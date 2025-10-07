@@ -42,13 +42,6 @@ RAG (I/O) → ASSEMBLE (CPU-lite) → INFERENCE (blocking) → POSTPROCESS (CPU)
 
 
 
-Optional “per-core” mode:
-  core0: RAG+ASSEMBLE   core1: INFERENCE   core2: POST   core3: STREAM  (affinity pinned; session sharded)
-
-
-Optional “per-core” mode:
-  core0: RAG+ASSEMBLE   core1: INFERENCE   core2: POST   core3: STREAM  (affinity pinned; session sharded)
-
 
 Model workers live behind a trait:
 
@@ -68,3 +61,57 @@ Rust 1.80+
 cargo
 
 (Optional) llama.cpp/TGI endpoint for the inference stage
+
+Per-Core Mode (optional)
+
+Launch N runtimes with core_affinity to pin each to a CPU core.
+
+Route sessions by hash to keep cache locality and reuse per-session state.
+
+Benchmark both modes; affinity helps locality but reduces elasticity.
+
+Observability
+
+tracing spans per stage (rag, assemble, infer, post, stream)
+
+Emit:
+
+queue depth (gauge)
+
+enqueue/dequeue latency
+
+task duration (histograms p50/p95/p99)
+
+drops/rejections (counter)
+
+Export to OTLP / Prometheus (feature flag).
+
+Roadmap
+
+ gRPC worker protocol (streaming tokens, cancel, deadlines)
+
+ Session KV-cache affinity & reuse hints for CPU inference paths
+
+ Batching policy (micro-batch inference workers)
+
+ Distributed mesh (NATS/Kafka) for cross-node queues
+
+ DAG config (.toml/.yaml) to declare pipelines declaratively
+
+ Bench suite (latency under surge; sustained tokens/sec)
+
+ Crate split: orchestrator-core, stages-*, workers-*, bin/
+
+ Adapters: llama.cpp HTTP, TGI/vLLM, OpenAI/Anthropic, Candle/Burn
+
+
+ FAQ
+
+Does this make models faster?
+No. It makes everything around the model faster, safer, and observable.
+
+GPU support?
+Treat GPU workers as blocking services behind the ModelWorker trait. The orchestrator just schedules and streams.
+
+Is per-core required?
+No. The default multi-threaded Tokio runtime is great. Per-core is an optimization—benchmark before enabling.
