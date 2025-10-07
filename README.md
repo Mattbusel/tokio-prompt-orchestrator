@@ -109,12 +109,12 @@ Each runtime can be pinned to a CPU core, with sessions sharded by hash for cach
 ##  FAQ
 
 **Does this make models faster?**
-No — it makes *everything around* the model faster, safer, and observable.
+No  it makes *everything around* the model faster, safer, and observable.
 
 **GPU support?**
 Treat GPU workers as blocking services behind `ModelWorker`. The orchestrator just schedules and streams.
 
 **Is per-core required?**
-No. The default multi-threaded Tokio runtime is excellent. Per-core is an optimization — benchmark before enabling.
+No. The default multi-threaded Tokio runtime is excellent. Per-core is an optimization  benchmark before enabling.
 
 
