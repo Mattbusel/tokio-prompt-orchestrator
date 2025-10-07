@@ -21,10 +21,13 @@ Scale seamlessly from **laptop → cluster** without changing a line of code.
 Most “agent” frameworks fake concurrency.
 This project makes it **real**.
 
- **Tokio at the core**  async stages, bounded channels, metrics, and backpressure
- **Per-core runtimes (optional)**  pin runtimes to cores for cache locality
- **Works with any model server**  `llama.cpp`, TGI, vLLM, OpenAI, etc.
- **Production knobs**  timeouts, retries, circuit breakers, queue depths
+Tokio at the core — async stages, bounded channels, metrics, and backpressure
+
+Per-core runtimes (optional) — pin runtimes to cores for cache locality
+
+Works with any model server — llama.cpp, TGI, vLLM, OpenAI, etc.
+
+Production knobs — timeouts, retries, circuit breakers, queue depths
 
 ---
 
