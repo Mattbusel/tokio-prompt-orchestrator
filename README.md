@@ -43,6 +43,7 @@ Roadmap below for gRPC mesh + distributed scale-out.
    mpsc 512           mpsc 512           mpsc 1024           mpsc 512             mpsc 256
 
 
+
 Optional “per-core” mode:
   core0: RAG+ASSEMBLE   core1: INFERENCE   core2: POST   core3: STREAM  (affinity pinned; session sharded)
 
