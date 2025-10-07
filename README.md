@@ -36,11 +36,9 @@ Graceful shed (drop oldest / reject new on surge)
 
 Roadmap below for gRPC mesh + distributed scale-out.
 
-┌──────────┐      ┌────────────┐      ┌─────────────┐      ┌─────────────┐      ┌──────────────┐
-│   RAG    │ -> │  ASSEMBLE  │ -> │  INFERENCE  │ -> │ POSTPROCESS │ -> │ STREAM (SSE) │  Client
-│  (I/O)   │      │ (CPU-lite) │      │ (blocking)  │      │   (CPU)     │      │     (I/O)    │
-└──────────┘      └────────────┘      └─────────────┘      └─────────────┘      └──────────────┘
-   mpsc 512           mpsc 512           mpsc 1024           mpsc 512             mpsc 256
+RAG (I/O) → ASSEMBLE (CPU-lite) → INFERENCE (blocking) → POSTPROCESS (CPU) → STREAM (I/O) → CLIENT
+        mpsc 512         mpsc 512          mpsc 1024           mpsc 512           mpsc 256
+
 
 
 
