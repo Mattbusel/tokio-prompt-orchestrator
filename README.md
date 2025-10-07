@@ -36,13 +36,12 @@ Graceful shed (drop oldest / reject new on surge)
 
 Roadmap below for gRPC mesh + distributed scale-out.
 
-           ┌──────────┐      ┌────────────┐      ┌─────────────┐      ┌─────────────┐      ┌──────────────┐
-Request →  │ RAG      │ ---> │ ASSEMBLE   │ ---> │ INFERENCE   │ ---> │ POSTPROCESS │ ---> │ STREAM (SSE) │ → Client
-           │ (I/O)    │      │ (CPU-lite) │      │ (blocking)  │      │ (CPU)       │      │ (I/O)        │
-           └──────────┘      └────────────┘      └─────────────┘      └─────────────┘      └──────────────┘
-              mpsc 512            mpsc 512            mpsc 1024            mpsc 512             mpsc 256
+┌──────────┐      ┌────────────┐      ┌─────────────┐      ┌─────────────┐      ┌──────────────┐
+│   RAG    │ ---> │  ASSEMBLE  │ ---> │  INFERENCE  │ ---> │ POSTPROCESS │ ---> │ STREAM (SSE) │ → Client
+│  (I/O)   │      │ (CPU-lite) │      │ (blocking)  │      │   (CPU)     │      │     (I/O)    │
+└──────────┘      └────────────┘      └─────────────┘      └─────────────┘      └──────────────┘
+   mpsc 512           mpsc 512           mpsc 1024           mpsc 512             mpsc 256
 
-                   └──────────────────── all orchestrated by a Tokio multi-thread runtime ───────────────────┘
 
 Optional “per-core” mode:
   core0: RAG+ASSEMBLE   core1: INFERENCE   core2: POST   core3: STREAM  (affinity pinned; session sharded)
