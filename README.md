@@ -11,7 +11,7 @@ Scale seamlessly from **laptop → cluster** without changing a line of code.
 > **TL;DR:** Treat each core like a *prompt-processing node*
 > (RAG → Assembly → Inference → Post-Processing → Streaming),
 > all coordinated by Tokio.
-> Keep GPUs/LLM servers behind a clean worker API —
+> Keep GPUs/LLM servers behind a clean worker API 
 > let the orchestrator do everything else.
 
 ---
@@ -21,7 +21,7 @@ Scale seamlessly from **laptop → cluster** without changing a line of code.
 Most “agent” frameworks fake concurrency.
 This project makes it **real**.
 
- **Tokio at the core** — async stages, bounded channels, metrics, and backpressure
+ **Tokio at the core**  async stages, bounded channels, metrics, and backpressure
  **Per-core runtimes (optional)** — pin runtimes to cores for cache locality
  **Works with any model server** — `llama.cpp`, TGI, vLLM, OpenAI, etc.
  **Production knobs** — timeouts, retries, circuit breakers, queue depths
