@@ -1,120 +1,165 @@
-tokio-prompt-orchestrator
+# tokio-prompt-orchestrator
 
-Multi-core, Tokio-native orchestration for LLM pipelines.
+A production-leaning orchestrator for multi-stage LLM pipelines over Tokio with bounded channels, backpressure, and metrics hooks.
 
----
- Overview
+## Architecture
 
-Shard prompt work across CPU cores with **bounded queues**, **backpressure**, and **zero-blocking async stages**.
-Scale seamlessly from **laptop → cluster** without changing a line of code.
+Five-stage pipeline with bounded channels:
 
-> **TL;DR:** Treat each core like a *prompt-processing node*
-> (RAG → Assembly → Inference → Post-Processing → Streaming),
-> all coordinated by Tokio.
-> Keep GPUs/LLM servers behind a clean worker API 
-> let the orchestrator do everything else.
-
----
-
-##  Why
-
-Most “agent” frameworks fake concurrency.
-This project makes it **real**.
-
-Tokio at the core — async stages, bounded channels, metrics, and backpressure
-
-Per-core runtimes (optional) — pin runtimes to cores for cache locality
-
-Works with any model server — llama.cpp, TGI, vLLM, OpenAI, etc.
-
-Production knobs — timeouts, retries, circuit breakers, queue depths
-
----
-
-##  Features (MVP)
-
-* **Pluggable stages** → `RagStage → AssembleStage → InferenceStage → PostStage → StreamStage`
-* **Bounded MPSC channels** for deterministic backpressure
-* **CPU isolation** via `spawn_blocking` / optional `rayon` pool for heavy tasks
-* **Session affinity** keeps a conversation on the same “macro-core”
-* **Tracing + metrics**: latency, queue depth, drops, p95/p99
-* **Graceful shed** — drop oldest / reject new on surge
-
- *Roadmap below for gRPC mesh + distributed scale-out.*
-
----
-
-##  Architecture
-
-```
-RAG (I/O)
-   ↓
-ASSEMBLE (CPU-lite)
-   ↓
-INFERENCE (blocking)
-   ↓
-POSTPROCESS (CPU)
-   ↓
-STREAM (I/O)
-   ↓
-CLIENT
-
-mpsc 512 → mpsc 512 → mpsc 1024 → mpsc 512 → mpsc 256
+```text
+PromptRequest → RAG(512) → Assemble(512) → Inference(1024) → Post(512) → Stream(256)
+                  ↓          ↓               ↓                ↓            ↓
+              5ms delay   format          ModelWorker      join tokens   emit
 ```
 
-*All orchestrated by a **Tokio multi-threaded runtime** with bounded queues and backpressure.*
+### Stages
 
-**Optional per-core mode:**
+1. **RAG** - Retrieval-Augmented Generation (document retrieval, context injection)
+2. **Assemble** - Prompt construction (templates, few-shot examples)
+3. **Inference** - LLM execution via `ModelWorker` trait
+4. **Post** - Post-processing (formatting, safety, PII redaction)
+5. **Stream** - Output emission (SSE, WebSocket, gRPC)
 
+### Key Features
+
+- **Bounded Channels** - Configurable buffer sizes prevent memory exhaustion
+- **Backpressure** - Graceful shedding on queue full (try_send + drop strategy)
+- **Session Affinity** - Hash-based sharding for per-core pinning (roadmap)
+- **Pluggable Workers** - `ModelWorker` trait for any inference backend
+- **Metrics Hooks** - Tracing-based (swap to Prometheus/OTLP via feature flags)
+- **Clean Shutdown** - Graceful drain on input channel close
+
+## Usage
+
+### Basic Example
+
+```rust
+use std::sync::Arc;
+use tokio_prompt_orchestrator::{
+    EchoWorker, ModelWorker, PromptRequest, SessionId, spawn_pipeline,
+};
+
+#[tokio::main]
+async fn main() {
+    // Create a model worker
+    let worker: Arc<dyn ModelWorker> = Arc::new(EchoWorker::new());
+    
+    // Spawn the pipeline
+    let handles = spawn_pipeline(worker);
+    
+    // Send requests
+    let request = PromptRequest {
+        session: SessionId::new("session-1"),
+        input: "Hello, world!".to_string(),
+        meta: Default::default(),
+    };
+    
+    handles.input_tx.send(request).await.unwrap();
+    
+    // Close input and wait for drain
+    drop(handles.input_tx);
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+}
 ```
-core0 → RAG + ASSEMBLE
-core1 → INFERENCE
-core2 → POSTPROCESS
-core3 → STREAM
+
+### Custom Model Worker
+
+```rust
+use async_trait::async_trait;
+use tokio_prompt_orchestrator::{ModelWorker, OrchestratorError};
+
+struct MyCustomWorker {
+    // Your model state
+}
+
+#[async_trait]
+impl ModelWorker for MyCustomWorker {
+    async fn infer(&self, prompt: &str) -> Result<Vec<String>, OrchestratorError> {
+        // Your inference logic
+        Ok(vec!["token1".to_string(), "token2".to_string()])
+    }
+}
 ```
 
-Each runtime can be pinned to a CPU core, with sessions sharded by hash for cache locality.
+## Running the Demo
 
----
+```bash
+cargo run --bin orchestrator-demo
+```
 
+The demo sends 10 requests through the pipeline and displays tracing output.
 
+## Testing
 
+```bash
+cargo test
+```
 
-##  Observability
+## Roadmap
 
-* **Tracing spans** per stage: `rag`, `assemble`, `infer`, `post`, `stream`
-* Emit:
+### Phase 1: Core Stability (MVP) ✅
+- [x] 5-stage pipeline
+- [x] Bounded channels with backpressure
+- [x] ModelWorker trait
+- [x] Basic metrics hooks
+- [x] Session affinity sharding
 
-  * Queue depth (gauge)
-  * Enqueue/dequeue latency
-  * Task duration histograms (p50/p95/p99)
-  * Drops/rejections (counter)
-* Export to **OTLP / Prometheus** via feature flag
+### Phase 2: Production Hardening
+- [ ] gRPC worker protocol (streaming tokens, cancellation, deadlines)
+- [ ] Prometheus/OTLP metrics via feature flags
+- [ ] Per-core runtime pinning with session affinity
+- [ ] Dead-letter queue for failed requests
+- [ ] Circuit breakers per worker
+- [ ] Request tracing with OpenTelemetry
 
----
+### Phase 3: Distributed Scale
+- [ ] Distributed mesh (NATS/Kafka) for cross-node queues
+- [ ] Declarative DAG config (.toml / .yaml)
+- [ ] Dynamic worker pools with auto-scaling
+- [ ] Multi-model routing (A/B testing, load shedding)
+- [ ] Quota management per session/tenant
 
-##  Roadmap
+### Phase 4: Advanced Features
+- [ ] Streaming inference support
+- [ ] Batch processing mode
+- [ ] Result caching layer
+- [ ] Request deduplication
+- [ ] Priority queues
 
-* [ ] gRPC worker protocol (streaming tokens, cancel, deadlines)
-* [ ] Session KV-cache affinity & reuse hints
-* [ ] Micro-batch inference policy
-* [ ] Distributed mesh (NATS / Kafka) for cross-node queues
-* [ ] Declarative DAG config (`.toml` / `.yaml`)
-* [ ] Bench suite (latency under surge, sustained tokens/sec)
-* [ ] Crate split: `core`, `stages-*`, `workers-*`, `bin/`
-* [ ] Adapters: `llama.cpp`, `vLLM`, `OpenAI`, `Candle`, `Burn`
+## Performance Considerations
 
----
+### Channel Sizing
 
-##  FAQ
+Current sizes are optimized for moderate throughput:
+- RAG → Assemble: 512 (fast stage, small buffer)
+- Assemble → Inference: 512 (pre-inference buffer)
+- Inference → Post: 1024 (inference is slowest, needs larger buffer)
+- Post → Stream: 512 (post-processing buffer)
 
-**Does this make models faster?**
-No  it makes *everything around* the model faster, safer, and observable.
+Tune based on your latency profile:
+- Higher inference latency → increase inference input buffer
+- Bursty traffic → increase all buffers
+- Memory constrained → decrease all buffers
 
-**GPU support?**
-Treat GPU workers as blocking services behind `ModelWorker`. The orchestrator just schedules and streams.
+### Session Affinity
 
-**Is per-core required?**
-No. The default multi-threaded Tokio runtime is excellent. Per-core is an optimization  benchmark before enabling.
+The `shard_session()` function enables per-core pinning:
 
+```rust
+let shard = shard_session(&request.session, num_cores);
+// TODO: Pin task to runtime shard
+```
 
+This reduces cache misses and improves locality for stateful workers.
+
+## License
+
+MIT OR Apache-2.0
+
+## Contributing
+
+Contributions welcome! Please:
+1. Add tests for new features
+2. Update roadmap checkboxes
+3. Follow existing code style
+4. Add tracing spans for observability

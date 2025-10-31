@@ -1,0 +1,88 @@
+# Example pipeline configuration (ROADMAP - not yet implemented)
+# 
+# Future: Load this via serde to create declarative DAG pipelines
+
+[pipeline]
+name = "llm-orchestrator-v1"
+version = "0.1.0"
+
+# Global settings
+[pipeline.settings]
+max_concurrent_requests = 1000
+graceful_shutdown_timeout_secs = 30
+enable_metrics = true
+metrics_backend = "prometheus" # or "otlp", "statsd"
+
+# Stage definitions
+[[stages]]
+name = "rag"
+type = "retrieval"
+workers = 4
+channel_size = 512
+timeout_ms = 1000
+
+[stages.config]
+vector_db = "pinecone"
+embedding_model = "text-embedding-ada-002"
+top_k = 5
+similarity_threshold = 0.7
+
+[[stages]]
+name = "assemble"
+type = "transform"
+workers = 4
+channel_size = 512
+timeout_ms = 100
+
+[stages.config]
+template = """
+Context: {context}
+
+User: {input}Assistant: {response}
+"""
+
+[[stages]]
+name = "inference"
+type = "model"
+workers = 8
+channel_size = 1024
+timeout_ms = 5000
+
+[stages.config]
+worker_type = "vllm"
+model_name = "meta-llama/Llama-2-70b-chat-hf"
+max_tokens = 512
+temperature = 0.7
+gpu_memory_utilization = 0.9
+
+[[stages]]
+name = "post"
+type = "transform"
+workers = 4
+channel_size = 512
+timeout_ms = 200
+
+[stages.config]
+filters = ["content_moderation", "pii_redaction"]
+format = "markdown"
+
+[[stages]]
+name = "stream"
+type = "output"
+workers = 2
+channel_size = 256
+timeout_ms = 100
+
+[stages.config]
+protocol = "sse" # or "websocket", "grpc"
+buffer_size = 4096
+
+# Metrics configuration
+[metrics]
+enabled = true
+port = 9090
+path = "/metrics"
+
+[metrics.labels]
+environment = "production"
+region = "us-east-1"
