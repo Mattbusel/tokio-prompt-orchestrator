@@ -2,6 +2,8 @@
 
 A production-leaning orchestrator for multi-stage LLM pipelines over Tokio with bounded channels, backpressure, and metrics hooks.
 
+![Pipeline Demo Output](https://github.com/Mattbusel/tokio-prompt-orchestrator/blob/main/Screenshot%202025-11-02%20161903.png)
+
 ## Architecture
 
 Five-stage pipeline with bounded channels:
