@@ -97,7 +97,7 @@ cargo test
 
 ## Roadmap
 
-### Phase 1: Core Stability (MVP) ✅
+### Phase 1: Core Stability (MVP) 
 - [x] 5-stage pipeline
 - [x] Bounded channels with backpressure
 - [x] ModelWorker trait
