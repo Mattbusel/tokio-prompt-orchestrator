@@ -26,7 +26,7 @@ tokio-prompt-orchestrator/
     ├── stages.rs                 # 5 pipeline stages + spawn_pipeline
     └── worker.rs                 # ModelWorker trait + EchoWorker
 
-🔄 PIPELINE ARCHITECTURE
+ PIPELINE ARCHITECTURE
 ═══════════════════════
 
     ┌──────────────┐
