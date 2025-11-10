@@ -55,10 +55,10 @@ cargo run --example openai_example
 ## What You Get
 
 ### New Workers (4)
-- ✅ OpenAiWorker - GPT models
-- ✅ AnthropicWorker - Claude models
-- ✅ LlamaCppWorker - Local inference
-- ✅ VllmWorker - GPU inference
+-  OpenAiWorker - GPT models
+-  AnthropicWorker - Claude models
+-  LlamaCppWorker - Local inference
+-  VllmWorker - GPU inference
 
 ### New Examples (4)
 - `examples/openai_example.rs`
@@ -182,4 +182,4 @@ If you need to roll back to v1:
 - Errors: See WHATS_NEW.md troubleshooting
 - Examples: All in `examples/` directory
 
-**Enjoy real LLM inference!** 🚀
+**Enjoy real LLM inference!** 
