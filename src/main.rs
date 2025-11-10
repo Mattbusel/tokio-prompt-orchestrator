@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Spawn the pipeline
     let handles = spawn_pipeline(worker);
 
-    info!("✅ Pipeline stages spawned");
+    info!(" Pipeline stages spawned");
 
     // Send demo requests
     let demo_requests = vec![
@@ -69,16 +69,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     }
 
-    info!("✅ All requests sent");
+    info!(" All requests sent");
 
     // Drop the sender to signal completion
     drop(handles.input_tx);
 
     // Wait for pipeline to drain
-    info!("⏳ Waiting for pipeline to drain...");
+    info!(" Waiting for pipeline to drain...");
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
-    info!("🏁 Demo complete - shutting down");
+    info!(" Demo complete - shutting down");
 
     // Graceful shutdown: wait for all stages
     // In production, you'd want timeout + force-kill logic
