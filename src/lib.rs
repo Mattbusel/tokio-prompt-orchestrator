@@ -28,7 +28,7 @@ pub mod worker;
 
 // Re-exports for convenience
 pub use stages::{spawn_pipeline, PipelineHandles};
-pub use worker::{EchoWorker, ModelWorker};
+pub use worker::{AnthropicWorker, EchoWorker, LlamaCppWorker, ModelWorker, OpenAiWorker, VllmWorker};
 
 /// Orchestrator-specific errors
 #[derive(Error, Debug)]
