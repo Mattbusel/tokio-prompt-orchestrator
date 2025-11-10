@@ -1,0 +1,52 @@
+# Prometheus Configuration for tokio-prompt-orchestrator
+#
+# Usage:
+#   1. Save this file as prometheus.yml
+#   2. Start Prometheus: prometheus --config.file=prometheus.yml
+#   3. Visit http://localhost:9091 to see Prometheus UI
+#   4. Your orchestrator metrics will be scraped from http://localhost:9090/metrics
+
+global:
+  scrape_interval: 15s # Scrape metrics every 15 seconds
+  evaluation_interval: 15s # Evaluate rules every 15 seconds
+  scrape_timeout: 10s # Timeout after 10 seconds
+
+  # Attach these labels to all time series
+  external_labels:
+    monitor: 'orchestrator-monitor'
+    environment: 'development'
+
+# Alertmanager configuration (optional)
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets:
+#           - 'localhost:9093'
+
+# Load rules once and periodically evaluate them
+# rule_files:
+#   - "orchestrator_alerts.yml"
+
+# Scrape configurations
+scrape_configs:
+  # Orchestrator metrics
+  - job_name: 'orchestrator'
+    scrape_interval: 5s # More frequent for demo
+    static_configs:
+      - targets: ['localhost:9090']
+        labels:
+          service: 'llm-orchestrator'
+          component: 'pipeline'
+
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9091']
+
+# Storage configuration (optional)
+# storage:
+#   tsdb:
+#     path: /var/lib/prometheus/data
+#     retention:
+#       time: 15d
+#       size: 10GB

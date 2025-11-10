@@ -26,6 +26,9 @@ pub mod metrics;
 pub mod stages;
 pub mod worker;
 
+#[cfg(feature = "metrics-server")]
+pub mod metrics_server;
+
 // Re-exports for convenience
 pub use stages::{spawn_pipeline, PipelineHandles};
 pub use worker::{AnthropicWorker, EchoWorker, LlamaCppWorker, ModelWorker, OpenAiWorker, VllmWorker};

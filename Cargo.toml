@@ -17,8 +17,18 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-feature
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
+# Metrics
+prometheus = "0.13"
+lazy_static = "1.4"
+
+# Optional: HTTP server for metrics endpoint
+axum = { version = "0.7", optional = true }
+tower = { version = "0.4", optional = true }
+tower-http = { version = "0.5", features = ["trace"], optional = true }
+
 [features]
 default = []
+metrics-server = ["axum", "tower", "tower-http"]
 
 [dev-dependencies]
 tokio-test = "0.4"
