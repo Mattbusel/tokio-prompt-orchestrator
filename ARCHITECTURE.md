@@ -309,9 +309,9 @@ let consumer = stream.create_consumer(ConsumerConfig {
 
 ### Unit Tests
 
-- ✅ Session sharding determinism
-- ✅ Session distribution
-- ✅ Echo worker behavior
+-  Session sharding determinism
+-  Session distribution
+-  Echo worker behavior
 
 ### Integration Tests
 
