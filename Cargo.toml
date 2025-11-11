@@ -34,6 +34,7 @@ redis = { version = "0.24", features = ["tokio-comp", "connection-manager"], opt
 dashmap = "5.5"
 governor = { version = "0.6", optional = true }
 nonzero_ext = { version = "0.3", optional = true }
+rand = "0.8"
 
 [features]
 default = []
