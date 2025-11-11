@@ -81,8 +81,8 @@ pub async fn start_server(addr: &str) -> Result<(), Box<dyn std::error::Error + 
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     
-    info!(" Metrics server ready at http://{}/metrics", addr);
-    info!(" Health check at http://{}/health", addr);
+    info!("✅ Metrics server ready at http://{}/metrics", addr);
+    info!("✅ Health check at http://{}/health", addr);
 
     axum::serve(listener, app).await?;
 

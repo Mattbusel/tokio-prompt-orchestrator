@@ -29,6 +29,14 @@ pub mod worker;
 #[cfg(feature = "metrics-server")]
 pub mod metrics_server;
 
+#[cfg(feature = "web-api")]
+pub mod web_api;
+
+pub mod enhanced;
+
+#[cfg(feature = "web-api")]
+pub mod web_api;
+
 // Re-exports for convenience
 pub use stages::{spawn_pipeline, PipelineHandles};
 pub use worker::{AnthropicWorker, EchoWorker, LlamaCppWorker, ModelWorker, OpenAiWorker, VllmWorker};

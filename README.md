@@ -2,9 +2,9 @@
 
 A production-ready orchestrator for multi-stage LLM pipelines over Tokio with bounded channels, backpressure, metrics hooks, and **real model integrations**.
 
-##  What's New
+## 🚀 What's New
 
- **Real Model Workers Added!**
+✨ **Real Model Workers Added!**
 - **OpenAI** - GPT-4, GPT-3.5-turbo-instruct
 - **Anthropic** - Claude 3.5 Sonnet, Claude 3 Opus  
 - **llama.cpp** - Local inference with GGUF models
@@ -158,7 +158,7 @@ cargo run --example vllm_example        # vLLM high-perf
 
 ## Roadmap
 
-### Phase 1: Core + Real Models 
+### Phase 1: Core + Real Models ✅
 - [x] 5-stage pipeline
 - [x] Bounded channels + backpressure
 - [x] ModelWorker trait

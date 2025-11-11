@@ -21,14 +21,27 @@ serde_json = "1.0"
 prometheus = "0.13"
 lazy_static = "1.4"
 
-# Optional: HTTP server for metrics endpoint
-axum = { version = "0.7", optional = true }
+# Web server
+axum = { version = "0.7", optional = true, features = ["ws", "macros"] }
 tower = { version = "0.4", optional = true }
-tower-http = { version = "0.5", features = ["trace"], optional = true }
+tower-http = { version = "0.5", features = ["trace", "cors"], optional = true }
+tokio-stream = { version = "0.1", optional = true }
+futures = { version = "0.3", optional = true }
+uuid = { version = "1.6", features = ["v4", "serde"], optional = true }
+
+# Enhanced features (Phase 4)
+redis = { version = "0.24", features = ["tokio-comp", "connection-manager"], optional = true }
+dashmap = "5.5"
+governor = { version = "0.6", optional = true }
+nonzero_ext = { version = "0.3", optional = true }
 
 [features]
 default = []
 metrics-server = ["axum", "tower", "tower-http"]
+web-api = ["axum", "tower", "tower-http", "tokio-stream", "futures", "uuid"]
+caching = ["redis"]
+rate-limiting = ["governor", "nonzero_ext"]
+full = ["web-api", "metrics-server", "caching", "rate-limiting"]
 
 [dev-dependencies]
 tokio-test = "0.4"
