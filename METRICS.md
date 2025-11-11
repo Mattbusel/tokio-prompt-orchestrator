@@ -583,4 +583,4 @@ orchestrator_queue_depth{stage="post"} 5
 
 ---
 
-**🎉 Your orchestrator now has production-grade observability!**
+
