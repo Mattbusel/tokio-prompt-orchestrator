@@ -1,6 +1,6 @@
 # Project Summary: tokio-prompt-orchestrator
 
-## ✅ Requirements Checklist
+##  Requirements Checklist
 
 ### 1. Language / Tooling
 - [x] Rust 1.79+ idioms
@@ -306,13 +306,13 @@ impl ModelWorker for LlamaCppWorker {
 
 This implementation provides a **solid MVP foundation** for a production-grade LLM orchestrator:
 
-✅ **Clean Architecture**: SEDA pattern with bounded channels
-✅ **Extensible**: Pluggable workers, swappable backends  
-✅ **Observable**: Comprehensive tracing and metrics hooks
-✅ **Resilient**: Backpressure handling, graceful degradation
-✅ **Documented**: 4 markdown files + inline comments
-✅ **Tested**: Unit + integration tests included
-✅ **Future-Proof**: Clear roadmap with 20+ TODOs
+ **Clean Architecture**: SEDA pattern with bounded channels
+ **Extensible**: Pluggable workers, swappable backends  
+ **Observable**: Comprehensive tracing and metrics hooks
+ **Resilient**: Backpressure handling, graceful degradation
+ **Documented**: 4 markdown files + inline comments
+ **Tested**: Unit + integration tests included
+ **Future-Proof**: Clear roadmap with 20+ TODOs
 
 The codebase is ready for:
 - Integration with real inference backends (vLLM, llama.cpp, OpenAI)
