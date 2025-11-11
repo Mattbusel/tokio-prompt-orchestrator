@@ -5,14 +5,19 @@ edition = "2021"
 rust-version = "1.79"
 
 [dependencies]
+# Core
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 thiserror = "1.0"
 async-trait = "0.1"
-chrono = "0.4"
 
-# HTTP client for API calls
+# Utils
+chrono = "0.4"
+uuid = { version = "1.6", features = ["v4", "fast-rng"] }
+rand = "0.8"
+
+# HTTP + JSON
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -21,25 +26,23 @@ serde_json = "1.0"
 prometheus = "0.13"
 lazy_static = "1.4"
 
-# Web server
+# Web (feature-gated)
 axum = { version = "0.7", optional = true, features = ["ws", "macros"] }
 tower = { version = "0.4", optional = true }
-tower-http = { version = "0.5", features = ["trace", "cors"], optional = true }
+tower-http = { version = "0.5", optional = true, features = ["trace", "cors"] }
 tokio-stream = { version = "0.1", optional = true }
 futures = { version = "0.3", optional = true }
-uuid = { version = "1.6", features = ["v4", "serde"], optional = true }
 
 # Enhanced features (Phase 4)
-redis = { version = "0.24", features = ["tokio-comp", "connection-manager"], optional = true }
+redis = { version = "0.24", optional = true, features = ["tokio-comp", "connection-manager"] }
 dashmap = "5.5"
 governor = { version = "0.6", optional = true }
 nonzero_ext = { version = "0.3", optional = true }
-rand = "0.8"
 
 [features]
 default = []
 metrics-server = ["axum", "tower", "tower-http"]
-web-api = ["axum", "tower", "tower-http", "tokio-stream", "futures", "uuid"]
+web-api = ["axum", "tower", "tower-http", "tokio-stream", "futures"]
 caching = ["redis"]
 rate-limiting = ["governor", "nonzero_ext"]
 full = ["web-api", "metrics-server", "caching", "rate-limiting"]
@@ -50,3 +53,4 @@ tokio-test = "0.4"
 [[bin]]
 name = "orchestrator-demo"
 path = "src/main.rs"
+
