@@ -122,7 +122,7 @@ impl Deduplicator {
 
     async fn register_new(&self, key: &str) -> DeduplicationResult {
         let (tx, _) = broadcast::channel(16);
-        
+
         self.requests.insert(
             key.to_string(),
             RequestState::InProgress {
@@ -142,19 +142,16 @@ impl Deduplicator {
 
     /// Wait for in-progress request to complete
     pub async fn wait_for_result(&self, key: &str) -> Option<String> {
-        let rx = {
+        let mut rx = {
             let state = self.requests.get(key)?;
             match state.value() {
-                RequestState::InProgress { waiter_tx, .. } => {
-                    waiter_tx.subscribe()
-                }
+                RequestState::InProgress { waiter_tx, .. } => waiter_tx.subscribe(),
                 RequestState::Completed { result, .. } => {
                     return Some(result.clone());
                 }
             }
         };
 
-        // Wait for broadcast
         match rx.recv().await {
             Ok(result) => Some(result),
             Err(_) => None,
@@ -164,12 +161,10 @@ impl Deduplicator {
     /// Mark request as completed
     pub async fn complete(&self, token: DeduplicationToken, result: String) {
         if let Some(mut entry) = self.requests.get_mut(&token.key) {
-            // Broadcast to waiters
             if let RequestState::InProgress { waiter_tx, .. } = entry.value() {
                 let _ = waiter_tx.send(result.clone());
             }
 
-            // Update to completed
             *entry = RequestState::Completed {
                 result,
                 completed_at: SystemTime::now(),
@@ -211,7 +206,7 @@ impl Deduplicator {
 }
 
 fn cleanup_expired(requests: &DashMap<String, RequestState>, cache_duration: Duration) {
-    let now = SystemTime::now();
+    let _now = SystemTime::now();
     let mut removed = 0;
 
     requests.retain(|_, state| {
@@ -254,7 +249,7 @@ pub fn dedup_key(prompt: &str, metadata: &std::collections::HashMap<String, Stri
 
     let mut hasher = DefaultHasher::new();
     prompt.hash(&mut hasher);
-    
+
     // Include relevant metadata in key
     let mut meta_keys: Vec<_> = metadata.keys().collect();
     meta_keys.sort();
@@ -276,7 +271,7 @@ mod tests {
     #[tokio::test]
     async fn test_new_request() {
         let dedup = Deduplicator::new(Duration::from_secs(60));
-        
+
         match dedup.check_and_register("test-key").await {
             DeduplicationResult::New(token) => {
                 assert_eq!(token.key, "test-key");
@@ -288,7 +283,7 @@ mod tests {
     #[tokio::test]
     async fn test_duplicate_detection() {
         let dedup = Deduplicator::new(Duration::from_secs(60));
-        
+
         // First request
         let token = match dedup.check_and_register("test-key").await {
             DeduplicationResult::New(t) => t,
@@ -297,7 +292,7 @@ mod tests {
 
         // Second request (while first is in progress)
         match dedup.check_and_register("test-key").await {
-            DeduplicationResult::InProgress => {}, // Expected
+            DeduplicationResult::InProgress => {} // Expected
             _ => panic!("Expected in-progress"),
         }
 
@@ -316,7 +311,7 @@ mod tests {
     #[tokio::test]
     async fn test_wait_for_result() {
         let dedup = Deduplicator::new(Duration::from_secs(60));
-        
+
         // Register request
         let token = match dedup.check_and_register("test-key").await {
             DeduplicationResult::New(t) => t,
@@ -351,7 +346,7 @@ mod tests {
         let mut meta = HashMap::new();
         meta.insert("user".to_string(), "alice".to_string());
         let key4 = dedup_key("hello", &meta);
-        
+
         assert_ne!(key1, key4); // Different due to metadata
     }
 }
