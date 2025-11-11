@@ -145,15 +145,15 @@ cargo run --example llamacpp_worker
 - 70B model: 48GB VRAM (Q4 quantization) or CPU with 64GB RAM
 
 **Pros:**
-- ✅ No API costs
-- ✅ Data privacy (runs locally)
-- ✅ No rate limits
-- ✅ Full control
+-  No API costs
+-  Data privacy (runs locally)
+-  No rate limits
+-  Full control
 
 **Cons:**
-- ❌ Requires hardware
-- ❌ Slower than cloud APIs
-- ❌ Manual model management
+ Requires hardware
+ Slower than cloud APIs
+-  Manual model management
 
 ---
 
@@ -206,10 +206,10 @@ cargo run --example vllm_worker
 ```
 
 **Why vLLM?**
-- ✅ **PagedAttention**: 2-4x throughput improvement
-- ✅ **Continuous batching**: Efficient request handling
-- ✅ **Tensor parallelism**: Multi-GPU support
-- ✅ **Production-ready**: Used by Anthropic, Meta, etc.
+-  **PagedAttention**: 2-4x throughput improvement
+-  **Continuous batching**: Efficient request handling
+-  **Tensor parallelism**: Multi-GPU support
+-  **Production-ready**: Used by Anthropic, Meta, etc.
 
 **Performance:**
 - 7B model: ~100 tokens/sec on A100
