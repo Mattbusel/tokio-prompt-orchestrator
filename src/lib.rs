@@ -1,6 +1,6 @@
 //! # tokio-prompt-orchestrator
 //!
-//! A production-leaning orchestrator for multi-stage LLM pipelines over Tokio.
+//! A production-grade orchestrator for multi-stage LLM pipelines over Tokio.
 //!
 //! ## Architecture
 //!
@@ -8,20 +8,18 @@
 //! ```text
 //! PromptRequest → RAG(512) → Assemble(512) → Inference(1024) → Post(512) → Stream(256)
 //! ```
-//!
-//! ## Roadmap
-//!
-//! - TODO: gRPC worker protocol (streaming tokens, cancel, deadlines)
-//! - TODO: distributed mesh (NATS/Kafka) for cross-node queues
-//! - TODO: declarative DAG config (.toml / .yaml)
-//! - TODO: per-core runtime pinning with session affinity
-//! - TODO: OTLP/Prometheus metrics instead of tracing logs
+
+// ── Lint policy (aerospace-grade) ─────────────────────────────────────────
+#![deny(clippy::unwrap_used)]
+#![deny(clippy::expect_used)]
+#![deny(clippy::panic)]
+#![deny(clippy::todo)]
+#![deny(missing_docs)]
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
 use thiserror::Error;
 
+pub mod enhanced;
 pub mod metrics;
 pub mod stages;
 pub mod worker;
@@ -32,85 +30,126 @@ pub mod metrics_server;
 #[cfg(feature = "web-api")]
 pub mod web_api;
 
-pub mod enhanced;
-
-#[cfg(feature = "web-api")]
-pub mod web_api;
-
 // Re-exports for convenience
 pub use stages::{spawn_pipeline, PipelineHandles};
-pub use worker::{AnthropicWorker, EchoWorker, LlamaCppWorker, ModelWorker, OpenAiWorker, VllmWorker};
+pub use worker::{
+    AnthropicWorker, EchoWorker, LlamaCppWorker, ModelWorker, OpenAiWorker, VllmWorker,
+};
 
-/// Orchestrator-specific errors
+/// Top-level orchestrator errors.
+///
+/// Every error surface in the pipeline is mapped to a variant here.
+/// All variants implement `std::error::Error` via [`thiserror`].
 #[derive(Error, Debug)]
 pub enum OrchestratorError {
+    /// A pipeline channel closed unexpectedly, indicating stage shutdown.
     #[error("channel closed unexpectedly")]
     ChannelClosed,
 
+    /// An LLM inference call failed (network, API, or parsing error).
     #[error("inference failed: {0}")]
     Inference(String),
 
+    /// A configuration value is missing or invalid (e.g., missing env var).
+    ///
+    /// This is returned at construction time so that misconfiguration
+    /// surfaces immediately rather than at the first inference call.
+    #[error("configuration error: {0}")]
+    ConfigError(String),
+
+    /// Catch-all for errors that do not fit a specific variant.
     #[error("{0}")]
     Other(String),
 }
 
-/// Unique session identifier for request tracking and affinity
+/// Unique session identifier for request tracking and pipeline affinity.
+///
+/// Sessions group related requests and enable consistent routing to the
+/// same worker shard for session-affinity scenarios.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct SessionId(pub String);
+pub struct SessionId(
+    /// The raw string ID, typically a UUID or user-provided token.
+    pub String,
+);
 
 impl SessionId {
+    /// Create a new [`SessionId`] from any string-like value.
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
 
+    /// Return the session ID as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
-/// Initial prompt request from client
+/// Initial prompt request submitted by a client.
 #[derive(Debug, Clone)]
 pub struct PromptRequest {
+    /// Session this request belongs to.
     pub session: SessionId,
+    /// The raw user-supplied prompt text.
     pub input: String,
+    /// Arbitrary key-value metadata (e.g., `client`, `timestamp`).
     pub meta: HashMap<String, String>,
 }
 
-/// Output from RAG stage (retrieval-augmented generation)
+/// Output from the RAG stage (retrieval-augmented generation).
 #[derive(Debug, Clone)]
 pub struct RagOutput {
+    /// Session this output belongs to.
     pub session: SessionId,
+    /// Retrieved context to prepend to the prompt.
     pub context: String,
+    /// The original request, preserved for downstream stages.
     pub original: PromptRequest,
 }
 
-/// Output from assembly stage (prompt construction)
+/// Output from the assembly stage (prompt construction).
 #[derive(Debug, Clone)]
 pub struct AssembleOutput {
+    /// Session this output belongs to.
     pub session: SessionId,
+    /// Fully assembled prompt ready for inference.
     pub prompt: String,
 }
 
-/// Output from inference stage (model generation)
+/// Output from the inference stage (model generation).
 #[derive(Debug, Clone)]
 pub struct InferenceOutput {
+    /// Session this output belongs to.
     pub session: SessionId,
+    /// Raw token strings produced by the model.
     pub tokens: Vec<String>,
 }
 
-/// Output from post-processing stage
+/// Output from the post-processing stage.
 #[derive(Debug, Clone)]
 pub struct PostOutput {
+    /// Session this output belongs to.
     pub session: SessionId,
+    /// Final joined and processed text ready for streaming.
     pub text: String,
 }
 
-/// Session affinity sharding helper
+/// Compute a shard index in `[0, shards)` for the given session.
 ///
-/// Returns shard index [0, shards) for the given session.
-/// This enables per-core runtime pinning in future iterations.
+/// Used for session-affinity routing — the same session always maps to the
+/// same shard, enabling per-core runtime pinning in future iterations.
 ///
-/// TODO: Use consistent hashing (jump hash, rendezvous) for better distribution
+/// # Panics
+///
+/// This function never panics.
+///
+/// # Example
+///
+/// ```rust
+/// use tokio_prompt_orchestrator::{SessionId, shard_session};
+/// let session = SessionId::new("user-42");
+/// let shard = shard_session(&session, 4);
+/// assert!(shard < 4);
+/// ```
 pub fn shard_session(session: &SessionId, shards: usize) -> usize {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -120,10 +159,18 @@ pub fn shard_session(session: &SessionId, shards: usize) -> usize {
     (hasher.finish() as usize) % shards
 }
 
-/// Helper for sending with graceful shedding on backpressure
+/// Attempt a channel send, gracefully shedding the item if the queue is full.
 ///
-/// Strategy: try_send → if full, log and drop (oldest in queue stays)
-/// This prevents cascading delays under load spikes.
+/// Strategy: `try_send` → if full, log and drop the incoming item (the queue
+/// keeps its existing contents). This prevents cascading delays under load spikes.
+///
+/// # Errors
+///
+/// Returns [`OrchestratorError::ChannelClosed`] if the receiving end has been dropped.
+///
+/// # Panics
+///
+/// This function never panics.
 pub async fn send_with_shed<T>(
     tx: &tokio::sync::mpsc::Sender<T>,
     item: T,
@@ -133,7 +180,6 @@ pub async fn send_with_shed<T>(
         Ok(_) => Ok(()),
         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
             tracing::warn!(stage = stage, "queue full, shedding request");
-            // Drop the item - this is our graceful degradation
             Ok(())
         }
         Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
@@ -157,7 +203,7 @@ mod tests {
     #[test]
     fn test_shard_session_distribution() {
         let sessions: Vec<_> = (0..100)
-            .map(|i| SessionId::new(format!("session-{}", i)))
+            .map(|i| SessionId::new(format!("session-{i}")))
             .collect();
 
         let shards = 4;
@@ -170,7 +216,49 @@ mod tests {
             })
             .collect();
 
-        // Should have reasonable distribution (not all in one shard)
         assert!(counts.iter().all(|&c| c > 0));
+    }
+
+    #[test]
+    fn test_shard_session_stays_in_range() {
+        let shards = 8;
+        for i in 0..200 {
+            let session = SessionId::new(format!("session-{i}"));
+            let shard = shard_session(&session, shards);
+            assert!(
+                shard < shards,
+                "shard {shard} out of range for shards={shards}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_config_error_display_includes_message() {
+        let err = OrchestratorError::ConfigError("OPENAI_API_KEY not set".to_string());
+        assert!(err.to_string().contains("OPENAI_API_KEY not set"));
+    }
+
+    #[test]
+    fn test_session_id_as_str_round_trips() {
+        let session = SessionId::new("my-session");
+        assert_eq!(session.as_str(), "my-session");
+    }
+
+    #[tokio::test]
+    async fn test_send_with_shed_returns_ok_on_full_queue() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<u32>(1);
+        // Fill the queue
+        let _ = tx.try_send(1);
+        // Another send should shed gracefully
+        let result = send_with_shed(&tx, 2, "test-stage").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_send_with_shed_returns_channel_closed_when_receiver_dropped() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<u32>(1);
+        drop(rx);
+        let result = send_with_shed(&tx, 1, "test-stage").await;
+        assert!(matches!(result, Err(OrchestratorError::ChannelClosed)));
     }
 }

@@ -4,9 +4,10 @@
 //!
 //! ## Usage
 //!
-//! ```rust
+//! ```no_run
 //! use tokio_prompt_orchestrator::enhanced::RateLimiter;
-//!
+//! # #[tokio::main]
+//! # async fn main() {
 //! let limiter = RateLimiter::new(100, 60); // 100 requests per 60 seconds
 //!
 //! if limiter.check("user-123").await {
@@ -14,17 +15,19 @@
 //! } else {
 //!     // Rate limit exceeded
 //! }
+//! # }
 //! ```
 
 #[cfg(feature = "rate-limiting")]
+use crate::OrchestratorError;
+#[cfg(feature = "rate-limiting")]
 use governor::{
-    Quota, RateLimiter as GovernorRateLimiter,
+    clock::DefaultClock,
     state::{InMemoryState, NotKeyed},
+    Quota, RateLimiter as GovernorRateLimiter,
 };
 #[cfg(feature = "rate-limiting")]
-use nonzero_ext::nonzero;
-#[cfg(feature = "rate-limiting")]
-use std::time::Duration;
+use std::num::NonZeroU32;
 
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -57,7 +60,7 @@ struct SessionLimit {
 
 #[cfg(feature = "rate-limiting")]
 struct GovernorRateLimiterWrapper {
-    limiters: DashMap<String, GovernorRateLimiter<NotKeyed, InMemoryState>>,
+    limiters: DashMap<String, GovernorRateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
     quota: Quota,
 }
 
@@ -77,17 +80,26 @@ impl RateLimiter {
     }
 
     /// Create governor-based rate limiter (more accurate)
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(OrchestratorError::ConfigError)` if `max_requests` is zero.
     #[cfg(feature = "rate-limiting")]
-    pub fn new_governor(max_requests: u32, window_secs: u64) -> Self {
-        let quota = Quota::per_second(nonzero!(max_requests))
-            .allow_burst(nonzero!(max_requests * 2));
+    pub fn new_governor(max_requests: u32, _window_secs: u64) -> Result<Self, OrchestratorError> {
+        let requests = NonZeroU32::new(max_requests)
+            .ok_or_else(|| OrchestratorError::ConfigError("max_requests must be > 0".into()))?;
+        // saturating_mul(2): since max_requests >= 1, burst_count >= 2 — never zero
+        let burst_count = max_requests.saturating_mul(2);
+        let burst = NonZeroU32::new(burst_count)
+            .ok_or_else(|| OrchestratorError::ConfigError("burst limit overflow".into()))?;
+        let quota = Quota::per_second(requests).allow_burst(burst);
 
-        Self {
+        Ok(Self {
             backend: RateLimiterBackend::Governor(Arc::new(GovernorRateLimiterWrapper {
                 limiters: DashMap::new(),
                 quota,
             })),
-        }
+        })
     }
 
     /// Check if request is allowed for session
@@ -95,13 +107,9 @@ impl RateLimiter {
     /// Returns `true` if allowed, `false` if rate limit exceeded
     pub async fn check(&self, session_id: &str) -> bool {
         match &self.backend {
-            RateLimiterBackend::Simple(limiter) => {
-                limiter.check_simple(session_id)
-            }
+            RateLimiterBackend::Simple(limiter) => limiter.check_simple(session_id),
             #[cfg(feature = "rate-limiting")]
-            RateLimiterBackend::Governor(limiter) => {
-                limiter.check_governor(session_id)
-            }
+            RateLimiterBackend::Governor(limiter) => limiter.check_governor(session_id),
         }
     }
 
@@ -127,7 +135,8 @@ impl RateLimiter {
                 limiter.limits.get(session_id).map(|limit| RateLimitInfo {
                     used: limit.count,
                     remaining: limiter.max_requests.saturating_sub(limit.count),
-                    reset_in_secs: limit.reset_at
+                    reset_in_secs: limit
+                        .reset_at
                         .duration_since(std::time::SystemTime::now())
                         .unwrap_or_default()
                         .as_secs(),
@@ -146,7 +155,9 @@ impl SimpleRateLimiter {
     fn check_simple(&self, session_id: &str) -> bool {
         let now = std::time::SystemTime::now();
 
-        let mut entry = self.limits.entry(session_id.to_string())
+        let mut entry = self
+            .limits
+            .entry(session_id.to_string())
             .or_insert(SessionLimit {
                 count: 0,
                 reset_at: now + std::time::Duration::from_secs(self.window_secs),
@@ -183,7 +194,9 @@ impl SimpleRateLimiter {
 #[cfg(feature = "rate-limiting")]
 impl GovernorRateLimiterWrapper {
     fn check_governor(&self, session_id: &str) -> bool {
-        let limiter = self.limiters.entry(session_id.to_string())
+        let limiter = self
+            .limiters
+            .entry(session_id.to_string())
             .or_insert_with(|| GovernorRateLimiter::direct(self.quota));
 
         match limiter.check() {
@@ -199,11 +212,14 @@ impl GovernorRateLimiterWrapper {
     }
 }
 
-/// Rate limit information
+/// Rate limit information for a session
 #[derive(Debug)]
 pub struct RateLimitInfo {
+    /// Number of requests consumed in the current window.
     pub used: usize,
+    /// Number of requests still available in the current window.
     pub remaining: usize,
+    /// Seconds until the current window resets.
     pub reset_in_secs: u64,
 }
 
@@ -217,11 +233,18 @@ mod tests {
 
         // First 5 requests should pass
         for i in 0..5 {
-            assert!(limiter.check("test-session").await, "request {} should pass", i);
+            assert!(
+                limiter.check("test-session").await,
+                "request {} should pass",
+                i
+            );
         }
 
         // 6th request should fail
-        assert!(!limiter.check("test-session").await, "request 6 should fail");
+        assert!(
+            !limiter.check("test-session").await,
+            "request 6 should fail"
+        );
 
         // Different session should have its own limit
         assert!(limiter.check("other-session").await);

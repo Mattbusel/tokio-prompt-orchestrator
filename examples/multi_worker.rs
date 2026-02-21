@@ -44,7 +44,10 @@ impl MultiWorker {
 
 #[async_trait::async_trait]
 impl ModelWorker for MultiWorker {
-    async fn infer(&self, prompt: &str) -> Result<Vec<String>, tokio_prompt_orchestrator::OrchestratorError> {
+    async fn infer(
+        &self,
+        prompt: &str,
+    ) -> Result<Vec<String>, tokio_prompt_orchestrator::OrchestratorError> {
         // Extract session from prompt (in real impl, pass it through context)
         // For demo, just use first worker
         let worker = &self.workers[0];
@@ -73,7 +76,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(EchoWorker::with_delay(50)),
     ];
 
-    info!("✅ Created {} workers with different latencies", workers.len());
+    info!(
+        "✅ Created {} workers with different latencies",
+        workers.len()
+    );
 
     // Create router
     let router = Arc::new(MultiWorker::new(workers));
@@ -94,7 +100,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("standard-user-3", "Standard query"),
     ];
 
-    info!("📨 Sending {} requests (will be routed to different workers)", requests.len());
+    info!(
+        "📨 Sending {} requests (will be routed to different workers)",
+        requests.len()
+    );
 
     for (session_id, prompt) in requests {
         let request = PromptRequest {

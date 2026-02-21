@@ -17,20 +17,23 @@
 //! ## Usage
 //!
 //! ```no_run
-//! use tokio_prompt_orchestrator::web_api;
+//! use std::sync::Arc;
+//! use tokio_prompt_orchestrator::{web_api, spawn_pipeline, EchoWorker, ModelWorker};
 //!
 //! #[tokio::main]
 //! async fn main() {
+//!     let worker: Arc<dyn ModelWorker> = Arc::new(EchoWorker::with_delay(0));
+//!     let handles = spawn_pipeline(worker);
 //!     let config = web_api::ServerConfig::default();
-//!     web_api::start_server(config, pipeline_handles).await.unwrap();
+//!     web_api::start_server(config, handles.input_tx).await.unwrap();
 //! }
 //! ```
 
 #[cfg(feature = "web-api")]
 use axum::{
     extract::{
-        Path, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
+        Path, State, WebSocketUpgrade,
     },
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -53,7 +56,7 @@ use tokio::sync::mpsc;
 #[cfg(feature = "web-api")]
 use tower_http::cors::CorsLayer;
 #[cfg(feature = "web-api")]
-use tracing::{info, warn, error};
+use tracing::{error, info};
 #[cfg(feature = "web-api")]
 use uuid::Uuid;
 
@@ -64,12 +67,17 @@ use crate::{PromptRequest, SessionId};
 // Types & Configuration
 // ============================================================================
 
+/// Configuration for the web API HTTP server.
 #[cfg(feature = "web-api")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
+    /// IP address or hostname to bind to (e.g. `"0.0.0.0"` for all interfaces).
     pub host: String,
+    /// TCP port the server listens on.
     pub port: u16,
+    /// Maximum allowed request body size in bytes.
     pub max_request_size: usize,
+    /// How long (in seconds) to wait for a result before returning a timeout error.
     pub timeout_seconds: u64,
 }
 
@@ -80,42 +88,58 @@ impl Default for ServerConfig {
             host: "0.0.0.0".to_string(),
             port: 8080,
             max_request_size: 10 * 1024 * 1024, // 10MB
-            timeout_seconds: 300, // 5 minutes
+            timeout_seconds: 300,               // 5 minutes
         }
     }
 }
 
+/// JSON body for `POST /api/v1/infer`.
 #[cfg(feature = "web-api")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InferRequest {
+    /// The input prompt text to be processed by the pipeline.
     pub prompt: String,
+    /// Optional client-supplied session identifier; one is generated if absent.
     #[serde(default)]
     pub session_id: Option<String>,
+    /// Arbitrary key-value metadata forwarded through the pipeline.
     #[serde(default)]
     pub metadata: HashMap<String, String>,
+    /// If `true`, the client would like a streaming (WebSocket) response.
     #[serde(default)]
     pub stream: bool,
 }
 
+/// JSON response body for inference endpoints.
 #[cfg(feature = "web-api")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InferResponse {
+    /// Unique identifier assigned to this inference request.
     pub request_id: String,
+    /// Current processing status of the request.
     pub status: RequestStatus,
+    /// Final inference result, present only when `status` is `Completed`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
+    /// Error description, present only when `status` is `Failed`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
+/// Processing state of an inference request.
 #[cfg(feature = "web-api")]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum RequestStatus {
+    /// Request has been received but not yet started.
     Pending,
+    /// Request is actively being processed by the pipeline.
     Processing,
+    /// Request finished successfully; result is available.
     Completed,
+    /// Request encountered an unrecoverable error.
     Failed,
+    /// Request did not complete within the configured timeout.
     Timeout,
 }
 
@@ -131,7 +155,6 @@ struct TrackedRequest {
     status: RequestStatus,
     result: Option<String>,
     error: Option<String>,
-    created_at: std::time::Instant,
 }
 
 #[cfg(feature = "web-api")]
@@ -152,7 +175,7 @@ pub async fn start_server(
     pipeline_tx: mpsc::Sender<PromptRequest>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr = format!("{}:{}", config.host, config.port);
-    
+
     info!("🌐 Starting web API server on http://{}", addr);
 
     let tracker = RequestTracker {
@@ -189,7 +212,9 @@ async fn infer_handler(
     Json(req): Json<InferRequest>,
 ) -> Result<Json<InferResponse>, AppError> {
     let request_id = Uuid::new_v4().to_string();
-    let session_id = req.session_id.unwrap_or_else(|| format!("web-{}", request_id));
+    let session_id = req
+        .session_id
+        .unwrap_or_else(|| format!("web-{}", request_id));
 
     state.tracker.status.insert(
         request_id.clone(),
@@ -197,7 +222,6 @@ async fn infer_handler(
             status: RequestStatus::Pending,
             result: None,
             error: None,
-            created_at: std::time::Instant::now(),
         },
     );
 
@@ -207,7 +231,10 @@ async fn infer_handler(
         meta: req.metadata,
     };
 
-    state.pipeline_tx.send(prompt_req).await
+    state
+        .pipeline_tx
+        .send(prompt_req)
+        .await
         .map_err(|_| AppError::PipelineClosed)?;
 
     if let Some(mut tracked) = state.tracker.status.get_mut(&request_id) {
@@ -227,7 +254,10 @@ async fn status_handler(
     State(state): State<Arc<AppState>>,
     Path(request_id): Path<String>,
 ) -> Result<Json<InferResponse>, AppError> {
-    let tracked = state.tracker.status.get(&request_id)
+    let tracked = state
+        .tracker
+        .status
+        .get(&request_id)
         .ok_or(AppError::NotFound)?;
 
     Ok(Json(InferResponse {
@@ -272,10 +302,7 @@ async fn result_handler(
 }
 
 #[cfg(feature = "web-api")]
-async fn websocket_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<Arc<AppState>>,
-) -> Response {
+async fn websocket_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> Response {
     ws.on_upgrade(|socket| websocket_stream(socket, state))
 }
 
@@ -291,24 +318,28 @@ async fn websocket_stream(mut socket: WebSocket, state: Arc<AppState>) {
                     Err(e) => {
                         let error_msg = serde_json::json!({
                             "error": format!("Invalid JSON: {}", e)
-                        }).to_string();
+                        })
+                        .to_string();
                         let _ = socket.send(Message::Text(error_msg)).await;
                         continue;
                     }
                 };
 
                 let request_id = Uuid::new_v4().to_string();
-                
+
                 let processing_msg = serde_json::json!({
                     "request_id": request_id,
                     "status": "processing"
-                }).to_string();
-                
+                })
+                .to_string();
+
                 if socket.send(Message::Text(processing_msg)).await.is_err() {
                     break;
                 }
 
-                let session_id = req.session_id.unwrap_or_else(|| format!("ws-{}", request_id));
+                let session_id = req
+                    .session_id
+                    .unwrap_or_else(|| format!("ws-{}", request_id));
                 let prompt_req = PromptRequest {
                     session: SessionId::new(session_id),
                     input: req.prompt,
@@ -317,13 +348,14 @@ async fn websocket_stream(mut socket: WebSocket, state: Arc<AppState>) {
 
                 if state.pipeline_tx.send(prompt_req).await.is_ok() {
                     tokio::time::sleep(Duration::from_millis(100)).await;
-                    
+
                     let result_msg = serde_json::json!({
                         "request_id": request_id,
                         "status": "completed",
                         "result": "Response from pipeline"
-                    }).to_string();
-                    
+                    })
+                    .to_string();
+
                     if socket.send(Message::Text(result_msg)).await.is_err() {
                         break;
                     }
@@ -377,7 +409,9 @@ impl IntoResponse for AppError {
 pub struct ServerConfig;
 #[cfg(not(feature = "web-api"))]
 impl Default for ServerConfig {
-    fn default() -> Self { Self }
+    fn default() -> Self {
+        Self
+    }
 }
 
 #[cfg(not(feature = "web-api"))]

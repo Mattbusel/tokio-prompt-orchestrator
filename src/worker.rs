@@ -52,10 +52,12 @@ pub struct EchoWorker {
 }
 
 impl EchoWorker {
+    /// Create a new `EchoWorker` with a default 10 ms simulated delay.
     pub fn new() -> Self {
         Self { delay_ms: 10 }
     }
 
+    /// Create a new `EchoWorker` with a custom simulated inference delay in milliseconds.
     pub fn with_delay(delay_ms: u64) -> Self {
         Self { delay_ms }
     }
@@ -74,10 +76,7 @@ impl ModelWorker for EchoWorker {
         tokio::time::sleep(tokio::time::Duration::from_millis(self.delay_ms)).await;
 
         // Echo back the prompt as tokens
-        let tokens: Vec<String> = prompt
-            .split_whitespace()
-            .map(|s| s.to_string())
-            .collect();
+        let tokens: Vec<String> = prompt.split_whitespace().map(|s| s.to_string()).collect();
 
         Ok(tokens)
     }
@@ -116,15 +115,17 @@ struct OpenAiChoice {
 /// ## Example
 ///
 /// ```no_run
-/// use tokio_prompt_orchestrator::OpenAiWorker;
-/// use std::sync::Arc;
-///
+/// # use tokio_prompt_orchestrator::{OpenAiWorker, OrchestratorError};
+/// # use std::sync::Arc;
+/// # fn example() -> Result<(), OrchestratorError> {
 /// let worker = Arc::new(
-///     OpenAiWorker::new("gpt-3.5-turbo-instruct")
+///     OpenAiWorker::new("gpt-3.5-turbo-instruct")?
 ///         .with_max_tokens(512)
 ///         .with_temperature(0.7)
 /// );
+/// # Ok(()) }
 /// ```
+#[derive(Debug)]
 pub struct OpenAiWorker {
     client: reqwest::Client,
     api_key: String,
@@ -132,25 +133,32 @@ pub struct OpenAiWorker {
     max_tokens: u32,
     temperature: f32,
     timeout: Duration,
+    /// API base URL — override for OpenAI-compatible endpoints or testing.
+    base_url: String,
 }
 
 impl OpenAiWorker {
-    /// Create a new OpenAI worker
+    /// Create a new OpenAI worker.
     ///
-    /// Reads API key from OPENAI_API_KEY environment variable.
-    /// Panics if the key is not set.
-    pub fn new(model: impl Into<String>) -> Self {
-        let api_key = std::env::var("OPENAI_API_KEY")
-            .expect("OPENAI_API_KEY environment variable not set");
+    /// Reads the API key from the `OPENAI_API_KEY` environment variable.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(OrchestratorError::ConfigError)` if `OPENAI_API_KEY` is not set.
+    pub fn new(model: impl Into<String>) -> Result<Self, OrchestratorError> {
+        let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| {
+            OrchestratorError::ConfigError("OPENAI_API_KEY environment variable not set".into())
+        })?;
 
-        Self {
+        Ok(Self {
             client: reqwest::Client::new(),
             api_key,
             model: model.into(),
             max_tokens: 256,
             temperature: 0.7,
             timeout: Duration::from_secs(30),
-        }
+            base_url: "https://api.openai.com/v1".to_string(),
+        })
     }
 
     /// Set maximum tokens to generate
@@ -170,6 +178,16 @@ impl OpenAiWorker {
         self.timeout = timeout;
         self
     }
+
+    /// Override the API base URL.
+    ///
+    /// Useful for OpenAI-compatible endpoints (Azure OpenAI, Groq, local proxies)
+    /// and for pointing at a mock server in tests.
+    /// Default: `"https://api.openai.com/v1"`.
+    pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
+        self.base_url = url.into();
+        self
+    }
 }
 
 #[async_trait]
@@ -185,7 +203,7 @@ impl ModelWorker for OpenAiWorker {
 
         let response = self
             .client
-            .post("https://api.openai.com/v1/completions")
+            .post(format!("{}/completions", self.base_url))
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
             .timeout(self.timeout)
@@ -203,10 +221,9 @@ impl ModelWorker for OpenAiWorker {
             )));
         }
 
-        let api_response: OpenAiResponse = response
-            .json()
-            .await
-            .map_err(|e| OrchestratorError::Inference(format!("Failed to parse response: {}", e)))?;
+        let api_response: OpenAiResponse = response.json().await.map_err(|e| {
+            OrchestratorError::Inference(format!("Failed to parse response: {}", e))
+        })?;
 
         if api_response.choices.is_empty() {
             return Err(OrchestratorError::Inference(
@@ -251,15 +268,17 @@ struct AnthropicResponse {
 /// ## Example
 ///
 /// ```no_run
-/// use tokio_prompt_orchestrator::AnthropicWorker;
-/// use std::sync::Arc;
-///
+/// # use tokio_prompt_orchestrator::{AnthropicWorker, OrchestratorError};
+/// # use std::sync::Arc;
+/// # fn example() -> Result<(), OrchestratorError> {
 /// let worker = Arc::new(
-///     AnthropicWorker::new("claude-3-5-sonnet-20241022")
+///     AnthropicWorker::new("claude-3-5-sonnet-20241022")?
 ///         .with_max_tokens(1024)
 ///         .with_temperature(1.0)
 /// );
+/// # Ok(()) }
 /// ```
+#[derive(Debug)]
 pub struct AnthropicWorker {
     client: reqwest::Client,
     api_key: String,
@@ -267,25 +286,32 @@ pub struct AnthropicWorker {
     max_tokens: u32,
     temperature: f32,
     timeout: Duration,
+    /// API base URL — override for Anthropic-compatible endpoints or testing.
+    base_url: String,
 }
 
 impl AnthropicWorker {
-    /// Create a new Anthropic worker
+    /// Create a new Anthropic worker.
     ///
-    /// Reads API key from ANTHROPIC_API_KEY environment variable.
-    /// Panics if the key is not set.
-    pub fn new(model: impl Into<String>) -> Self {
-        let api_key = std::env::var("ANTHROPIC_API_KEY")
-            .expect("ANTHROPIC_API_KEY environment variable not set");
+    /// Reads the API key from the `ANTHROPIC_API_KEY` environment variable.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(OrchestratorError::ConfigError)` if `ANTHROPIC_API_KEY` is not set.
+    pub fn new(model: impl Into<String>) -> Result<Self, OrchestratorError> {
+        let api_key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| {
+            OrchestratorError::ConfigError("ANTHROPIC_API_KEY environment variable not set".into())
+        })?;
 
-        Self {
+        Ok(Self {
             client: reqwest::Client::new(),
             api_key,
             model: model.into(),
             max_tokens: 1024,
             temperature: 1.0,
             timeout: Duration::from_secs(60),
-        }
+            base_url: "https://api.anthropic.com/v1".to_string(),
+        })
     }
 
     /// Set maximum tokens to generate
@@ -305,6 +331,15 @@ impl AnthropicWorker {
         self.timeout = timeout;
         self
     }
+
+    /// Override the API base URL.
+    ///
+    /// Useful for Anthropic-compatible endpoints or for pointing at a mock server
+    /// in tests. Default: `"https://api.anthropic.com/v1"`.
+    pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
+        self.base_url = url.into();
+        self
+    }
 }
 
 #[async_trait]
@@ -322,7 +357,7 @@ impl ModelWorker for AnthropicWorker {
 
         let response = self
             .client
-            .post("https://api.anthropic.com/v1/complete")
+            .post(format!("{}/complete", self.base_url))
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("Content-Type", "application/json")
@@ -330,7 +365,9 @@ impl ModelWorker for AnthropicWorker {
             .json(&request)
             .send()
             .await
-            .map_err(|e| OrchestratorError::Inference(format!("Anthropic request failed: {}", e)))?;
+            .map_err(|e| {
+                OrchestratorError::Inference(format!("Anthropic request failed: {}", e))
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -407,8 +444,8 @@ impl LlamaCppWorker {
     /// Reads server URL from LLAMA_CPP_URL environment variable,
     /// or defaults to http://localhost:8080
     pub fn new() -> Self {
-        let url = std::env::var("LLAMA_CPP_URL")
-            .unwrap_or_else(|_| "http://localhost:8080".to_string());
+        let url =
+            std::env::var("LLAMA_CPP_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
 
         Self {
             client: reqwest::Client::new(),
@@ -547,8 +584,7 @@ impl VllmWorker {
     /// Reads server URL from VLLM_URL environment variable,
     /// or defaults to http://localhost:8000
     pub fn new() -> Self {
-        let url =
-            std::env::var("VLLM_URL").unwrap_or_else(|_| "http://localhost:8000".to_string());
+        let url = std::env::var("VLLM_URL").unwrap_or_else(|_| "http://localhost:8000".to_string());
 
         Self {
             client: reqwest::Client::new(),
@@ -648,11 +684,814 @@ impl ModelWorker for VllmWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Serialise all tests that read/write environment variables so they don't race.
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /// Create an `OpenAiWorker` that points at `base_url`.
+    /// Must be called while `ENV_MUTEX` is held.
+    fn make_openai_worker_for(base_url: &str) -> OpenAiWorker {
+        std::env::set_var("OPENAI_API_KEY", "test-key-openai");
+        let w = OpenAiWorker::new("gpt-3.5-turbo-instruct")
+            .expect("OpenAiWorker::new must succeed when OPENAI_API_KEY is set")
+            .with_base_url(base_url);
+        std::env::remove_var("OPENAI_API_KEY");
+        w
+    }
+
+    /// Create an `AnthropicWorker` that points at `base_url`.
+    /// Must be called while `ENV_MUTEX` is held.
+    fn make_anthropic_worker_for(base_url: &str) -> AnthropicWorker {
+        std::env::set_var("ANTHROPIC_API_KEY", "test-key-anthropic");
+        let w = AnthropicWorker::new("claude-instant-1-2")
+            .expect("AnthropicWorker::new must succeed when ANTHROPIC_API_KEY is set")
+            .with_base_url(base_url);
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        w
+    }
+
+    fn openai_success_body() -> serde_json::Value {
+        serde_json::json!({"choices": [{"text": "hello world response"}]})
+    }
+
+    fn anthropic_success_body() -> serde_json::Value {
+        serde_json::json!({"completion": "hello world response"})
+    }
+
+    fn llamacpp_success_body() -> serde_json::Value {
+        serde_json::json!({"content": "hello world response"})
+    }
+
+    fn vllm_success_body() -> serde_json::Value {
+        serde_json::json!({"text": ["hello world response"]})
+    }
+
+    // ── EchoWorker ────────────────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn test_echo_worker() {
-        let worker = EchoWorker::with_delay(1);
-        let result = worker.infer("hello world").await.unwrap();
-        assert_eq!(result, vec!["hello", "world"]);
+    async fn test_echo_worker_infer_splits_on_whitespace() {
+        let worker = EchoWorker::with_delay(0);
+        let tokens = worker.infer("hello world").await.unwrap();
+        assert_eq!(tokens, vec!["hello", "world"]);
+    }
+
+    #[tokio::test]
+    async fn test_echo_worker_infer_empty_prompt_returns_empty_tokens() {
+        let worker = EchoWorker::with_delay(0);
+        let tokens = worker.infer("").await.unwrap();
+        assert!(tokens.is_empty(), "empty prompt should produce no tokens");
+    }
+
+    #[tokio::test]
+    async fn test_echo_worker_infer_single_word_returns_one_token() {
+        let worker = EchoWorker::with_delay(0);
+        let tokens = worker.infer("hello").await.unwrap();
+        assert_eq!(tokens, vec!["hello"]);
+    }
+
+    #[tokio::test]
+    async fn test_echo_worker_infer_multiple_whitespace_is_normalised() {
+        // split_whitespace collapses runs of whitespace
+        let worker = EchoWorker::with_delay(0);
+        let tokens = worker.infer("a   b   c").await.unwrap();
+        assert_eq!(tokens, vec!["a", "b", "c"]);
+    }
+
+    #[tokio::test]
+    async fn test_echo_worker_with_delay_stores_delay_ms() {
+        let worker = EchoWorker::with_delay(42);
+        assert_eq!(worker.delay_ms, 42);
+    }
+
+    #[tokio::test]
+    async fn test_echo_worker_new_delay_is_10ms() {
+        let worker = EchoWorker::new();
+        assert_eq!(worker.delay_ms, 10);
+    }
+
+    #[tokio::test]
+    async fn test_echo_worker_default_via_trait_works() {
+        let worker = EchoWorker::default();
+        let tokens = worker.infer("one two three").await.unwrap();
+        assert_eq!(tokens.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_echo_worker_infer_always_returns_ok() {
+        let worker = EchoWorker::with_delay(0);
+        // EchoWorker never returns an error
+        assert!(worker.infer("anything").await.is_ok());
+    }
+
+    // ── OpenAiWorker — constructor ────────────────────────────────────────────
+
+    #[test]
+    fn test_openai_worker_new_missing_key_returns_config_error() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::remove_var("OPENAI_API_KEY");
+        let result = OpenAiWorker::new("gpt-4");
+        assert!(
+            result.is_err(),
+            "Expected Err when OPENAI_API_KEY is not set"
+        );
+        match result.unwrap_err() {
+            OrchestratorError::ConfigError(msg) => {
+                assert!(
+                    msg.contains("OPENAI_API_KEY"),
+                    "Error should name the missing var"
+                );
+            }
+            other => panic!("Expected ConfigError, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_openai_worker_new_with_key_succeeds() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("OPENAI_API_KEY", "sk-test");
+        let result = OpenAiWorker::new("gpt-4");
+        std::env::remove_var("OPENAI_API_KEY");
+        assert!(result.is_ok(), "Expected Ok when OPENAI_API_KEY is set");
+    }
+
+    // ── OpenAiWorker — inference ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_openai_infer_success_parses_response_correctly() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(openai_success_body()))
+            .mount(&server)
+            .await;
+
+        let worker = {
+            let _g = ENV_MUTEX.lock().unwrap();
+            make_openai_worker_for(&server.uri())
+        };
+        let tokens = worker.infer("test prompt").await.unwrap();
+        assert_eq!(tokens, vec!["hello", "world", "response"]);
+    }
+
+    #[tokio::test]
+    async fn test_openai_infer_http_500_returns_inference_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/completions"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("internal error"))
+            .mount(&server)
+            .await;
+
+        let worker = {
+            let _g = ENV_MUTEX.lock().unwrap();
+            make_openai_worker_for(&server.uri())
+        };
+        let result = worker.infer("test").await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            OrchestratorError::Inference(msg) => {
+                assert!(
+                    msg.contains("500"),
+                    "Error message should include the status code"
+                );
+            }
+            other => panic!("Expected Inference error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_openai_infer_empty_choices_returns_inference_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/completions"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"choices": []})),
+            )
+            .mount(&server)
+            .await;
+
+        let worker = {
+            let _g = ENV_MUTEX.lock().unwrap();
+            make_openai_worker_for(&server.uri())
+        };
+        let result = worker.infer("test").await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            OrchestratorError::Inference(msg) => {
+                assert!(
+                    msg.contains("choices"),
+                    "Error should mention missing choices"
+                );
+            }
+            other => panic!("Expected Inference error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_openai_infer_invalid_json_returns_inference_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not valid json {{{{"))
+            .mount(&server)
+            .await;
+
+        let worker = {
+            let _g = ENV_MUTEX.lock().unwrap();
+            make_openai_worker_for(&server.uri())
+        };
+        assert!(worker.infer("test").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_openai_infer_sends_authorization_header() {
+        let server = MockServer::start().await;
+        // The mock only matches if the Authorization header has the right value.
+        // An unmatched request returns 404, which makes the worker return Err,
+        // causing the final assert to fail — which is the desired test signal.
+        Mock::given(method("POST"))
+            .and(path("/completions"))
+            .and(header("authorization", "Bearer test-key-openai"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(openai_success_body()))
+            .mount(&server)
+            .await;
+
+        let worker = {
+            let _g = ENV_MUTEX.lock().unwrap();
+            make_openai_worker_for(&server.uri())
+        };
+        let result = worker.infer("test").await;
+        assert!(
+            result.is_ok(),
+            "Request with correct auth header should succeed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_openai_infer_sends_correct_model_in_request_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(openai_success_body()))
+            .mount(&server)
+            .await;
+
+        let worker = {
+            let _g = ENV_MUTEX.lock().unwrap();
+            make_openai_worker_for(&server.uri())
+        };
+        let _ = worker.infer("test").await;
+
+        let reqs = server.received_requests().await.unwrap();
+        assert_eq!(reqs.len(), 1, "Exactly one request should be sent");
+        let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(body["model"], "gpt-3.5-turbo-instruct");
+    }
+
+    #[tokio::test]
+    async fn test_openai_with_max_tokens_sends_correct_value() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(openai_success_body()))
+            .mount(&server)
+            .await;
+
+        let worker = {
+            let _g = ENV_MUTEX.lock().unwrap();
+            std::env::set_var("OPENAI_API_KEY", "test-key-openai");
+            let w = OpenAiWorker::new("gpt-4")
+                .unwrap()
+                .with_max_tokens(1024)
+                .with_base_url(&server.uri());
+            std::env::remove_var("OPENAI_API_KEY");
+            w
+        };
+        let _ = worker.infer("test").await;
+
+        let reqs = server.received_requests().await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(body["max_tokens"], 1024);
+    }
+
+    #[tokio::test]
+    async fn test_openai_with_temperature_sends_correct_value() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(openai_success_body()))
+            .mount(&server)
+            .await;
+
+        let worker = {
+            let _g = ENV_MUTEX.lock().unwrap();
+            std::env::set_var("OPENAI_API_KEY", "test-key-openai");
+            let w = OpenAiWorker::new("gpt-4")
+                .unwrap()
+                .with_temperature(0.3)
+                .with_base_url(&server.uri());
+            std::env::remove_var("OPENAI_API_KEY");
+            w
+        };
+        let _ = worker.infer("test").await;
+
+        let reqs = server.received_requests().await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        let temp = body["temperature"].as_f64().unwrap();
+        assert!(
+            (temp - 0.3_f64).abs() < 0.01,
+            "Temperature should be ~0.3, got {temp}"
+        );
+    }
+
+    // ── AnthropicWorker — constructor ─────────────────────────────────────────
+
+    #[test]
+    fn test_anthropic_worker_new_missing_key_returns_config_error() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        let result = AnthropicWorker::new("claude-3-5-sonnet-20241022");
+        assert!(
+            result.is_err(),
+            "Expected Err when ANTHROPIC_API_KEY is not set"
+        );
+        match result.unwrap_err() {
+            OrchestratorError::ConfigError(msg) => {
+                assert!(
+                    msg.contains("ANTHROPIC_API_KEY"),
+                    "Error should name the missing var"
+                );
+            }
+            other => panic!("Expected ConfigError, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_anthropic_worker_new_with_key_succeeds() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test");
+        let result = AnthropicWorker::new("claude-3-5-sonnet-20241022");
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        assert!(result.is_ok(), "Expected Ok when ANTHROPIC_API_KEY is set");
+    }
+
+    // ── AnthropicWorker — inference ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_anthropic_infer_success_returns_tokens() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/complete"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_success_body()))
+            .mount(&server)
+            .await;
+
+        let worker = {
+            let _g = ENV_MUTEX.lock().unwrap();
+            make_anthropic_worker_for(&server.uri())
+        };
+        let tokens = worker.infer("test prompt").await.unwrap();
+        assert_eq!(tokens, vec!["hello", "world", "response"]);
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_infer_http_500_returns_inference_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/complete"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("error"))
+            .mount(&server)
+            .await;
+
+        let worker = {
+            let _g = ENV_MUTEX.lock().unwrap();
+            make_anthropic_worker_for(&server.uri())
+        };
+        let result = worker.infer("test").await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            OrchestratorError::Inference(msg) => {
+                assert!(msg.contains("500"), "Error should include the status code");
+            }
+            other => panic!("Expected Inference error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_infer_invalid_json_returns_inference_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/complete"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+            .mount(&server)
+            .await;
+
+        let worker = {
+            let _g = ENV_MUTEX.lock().unwrap();
+            make_anthropic_worker_for(&server.uri())
+        };
+        assert!(worker.infer("test").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_infer_sends_api_key_header() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/complete"))
+            .and(header("x-api-key", "test-key-anthropic"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_success_body()))
+            .mount(&server)
+            .await;
+
+        let worker = {
+            let _g = ENV_MUTEX.lock().unwrap();
+            make_anthropic_worker_for(&server.uri())
+        };
+        let result = worker.infer("test").await;
+        assert!(
+            result.is_ok(),
+            "Request with correct x-api-key header should succeed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_infer_sends_version_header() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/complete"))
+            .and(header("anthropic-version", "2023-06-01"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_success_body()))
+            .mount(&server)
+            .await;
+
+        let worker = {
+            let _g = ENV_MUTEX.lock().unwrap();
+            make_anthropic_worker_for(&server.uri())
+        };
+        let result = worker.infer("test").await;
+        assert!(
+            result.is_ok(),
+            "Request with correct anthropic-version header should succeed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_infer_sends_correct_model_in_request_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/complete"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_success_body()))
+            .mount(&server)
+            .await;
+
+        let worker = {
+            let _g = ENV_MUTEX.lock().unwrap();
+            make_anthropic_worker_for(&server.uri())
+        };
+        let _ = worker.infer("test").await;
+
+        let reqs = server.received_requests().await.unwrap();
+        assert_eq!(reqs.len(), 1, "Exactly one request should be sent");
+        let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(body["model"], "claude-instant-1-2");
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_with_max_tokens_sends_correct_value() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/complete"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_success_body()))
+            .mount(&server)
+            .await;
+
+        let worker = {
+            let _g = ENV_MUTEX.lock().unwrap();
+            std::env::set_var("ANTHROPIC_API_KEY", "test-key-anthropic");
+            let w = AnthropicWorker::new("claude-instant-1-2")
+                .unwrap()
+                .with_max_tokens(2048)
+                .with_base_url(&server.uri());
+            std::env::remove_var("ANTHROPIC_API_KEY");
+            w
+        };
+        let _ = worker.infer("test").await;
+
+        let reqs = server.received_requests().await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(body["max_tokens_to_sample"], 2048);
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_infer_formats_prompt_with_human_and_assistant_prefix() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/complete"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_success_body()))
+            .mount(&server)
+            .await;
+
+        let worker = {
+            let _g = ENV_MUTEX.lock().unwrap();
+            make_anthropic_worker_for(&server.uri())
+        };
+        let _ = worker.infer("my question").await;
+
+        let reqs = server.received_requests().await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        let prompt = body["prompt"].as_str().unwrap();
+        assert!(
+            prompt.contains("Human:"),
+            "Prompt should contain 'Human:' prefix"
+        );
+        assert!(
+            prompt.contains("Assistant:"),
+            "Prompt should contain 'Assistant:' marker"
+        );
+        assert!(
+            prompt.contains("my question"),
+            "Prompt should include the original input"
+        );
+    }
+
+    // ── LlamaCppWorker ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_llamacpp_default_constructor_builds_worker() {
+        // Uses unwrap_or_else — always succeeds
+        let worker = LlamaCppWorker::new();
+        assert!(!worker.url.is_empty(), "URL should be non-empty");
+    }
+
+    #[tokio::test]
+    async fn test_llamacpp_infer_success_returns_tokens() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/completion"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(llamacpp_success_body()))
+            .mount(&server)
+            .await;
+
+        let worker = LlamaCppWorker::new().with_url(server.uri());
+        let tokens = worker.infer("test prompt").await.unwrap();
+        assert_eq!(tokens, vec!["hello", "world", "response"]);
+    }
+
+    #[tokio::test]
+    async fn test_llamacpp_infer_http_500_returns_inference_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/completion"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("server error"))
+            .mount(&server)
+            .await;
+
+        let worker = LlamaCppWorker::new().with_url(server.uri());
+        let result = worker.infer("test").await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            OrchestratorError::Inference(msg) => {
+                assert!(msg.contains("500"), "Error should include the status code");
+            }
+            other => panic!("Expected Inference error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_llamacpp_infer_invalid_json_returns_inference_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/completion"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+            .mount(&server)
+            .await;
+
+        let worker = LlamaCppWorker::new().with_url(server.uri());
+        assert!(worker.infer("test").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_llamacpp_sends_request_to_completion_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/completion"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(llamacpp_success_body()))
+            .mount(&server)
+            .await;
+
+        let worker = LlamaCppWorker::new().with_url(server.uri());
+        let _ = worker.infer("test").await;
+
+        let reqs = server.received_requests().await.unwrap();
+        assert_eq!(reqs.len(), 1, "Exactly one request should be sent");
+        assert_eq!(reqs[0].url.path(), "/completion");
+    }
+
+    #[tokio::test]
+    async fn test_llamacpp_with_max_tokens_sends_n_predict_field() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/completion"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(llamacpp_success_body()))
+            .mount(&server)
+            .await;
+
+        let worker = LlamaCppWorker::new()
+            .with_url(server.uri())
+            .with_max_tokens(512);
+        let _ = worker.infer("test").await;
+
+        let reqs = server.received_requests().await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(body["n_predict"], 512);
+    }
+
+    #[tokio::test]
+    async fn test_llamacpp_infer_empty_content_returns_empty_tokens() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/completion"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"content": ""})),
+            )
+            .mount(&server)
+            .await;
+
+        let worker = LlamaCppWorker::new().with_url(server.uri());
+        let tokens = worker.infer("test").await.unwrap();
+        assert!(tokens.is_empty(), "Empty content should produce no tokens");
+    }
+
+    #[tokio::test]
+    async fn test_llamacpp_with_url_overrides_default_server() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/completion"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(llamacpp_success_body()))
+            .mount(&server)
+            .await;
+
+        // If with_url works, this request reaches our mock — not localhost:8080
+        let worker = LlamaCppWorker::new().with_url(server.uri());
+        let result = worker.infer("test").await;
+        assert!(
+            result.is_ok(),
+            "Request should reach the mock server via with_url"
+        );
+    }
+
+    // ── VllmWorker ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_vllm_default_constructor_builds_worker() {
+        let worker = VllmWorker::new();
+        assert!(!worker.url.is_empty(), "URL should be non-empty");
+    }
+
+    #[tokio::test]
+    async fn test_vllm_infer_success_returns_tokens() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/generate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(vllm_success_body()))
+            .mount(&server)
+            .await;
+
+        let worker = VllmWorker::new().with_url(server.uri());
+        let tokens = worker.infer("test prompt").await.unwrap();
+        assert_eq!(tokens, vec!["hello", "world", "response"]);
+    }
+
+    #[tokio::test]
+    async fn test_vllm_infer_http_500_returns_inference_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/generate"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("server error"))
+            .mount(&server)
+            .await;
+
+        let worker = VllmWorker::new().with_url(server.uri());
+        let result = worker.infer("test").await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            OrchestratorError::Inference(msg) => {
+                assert!(msg.contains("500"), "Error should include the status code");
+            }
+            other => panic!("Expected Inference error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_vllm_infer_empty_text_array_returns_inference_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/generate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"text": []})))
+            .mount(&server)
+            .await;
+
+        let worker = VllmWorker::new().with_url(server.uri());
+        let result = worker.infer("test").await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            OrchestratorError::Inference(msg) => {
+                assert!(msg.contains("Empty"), "Error should mention empty response");
+            }
+            other => panic!("Expected Inference error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_vllm_infer_invalid_json_returns_inference_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/generate"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+            .mount(&server)
+            .await;
+
+        let worker = VllmWorker::new().with_url(server.uri());
+        assert!(worker.infer("test").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_vllm_sends_request_to_generate_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/generate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(vllm_success_body()))
+            .mount(&server)
+            .await;
+
+        let worker = VllmWorker::new().with_url(server.uri());
+        let _ = worker.infer("test").await;
+
+        let reqs = server.received_requests().await.unwrap();
+        assert_eq!(reqs.len(), 1, "Exactly one request should be sent");
+        assert_eq!(reqs[0].url.path(), "/generate");
+    }
+
+    #[tokio::test]
+    async fn test_vllm_with_max_tokens_sends_correct_value() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/generate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(vllm_success_body()))
+            .mount(&server)
+            .await;
+
+        let worker = VllmWorker::new()
+            .with_url(server.uri())
+            .with_max_tokens(2048);
+        let _ = worker.infer("test").await;
+
+        let reqs = server.received_requests().await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(body["max_tokens"], 2048);
+    }
+
+    #[tokio::test]
+    async fn test_vllm_with_top_p_sends_correct_value() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/generate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(vllm_success_body()))
+            .mount(&server)
+            .await;
+
+        let worker = VllmWorker::new().with_url(server.uri()).with_top_p(0.85);
+        let _ = worker.infer("test").await;
+
+        let reqs = server.received_requests().await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        let top_p = body["top_p"].as_f64().unwrap();
+        assert!(
+            (top_p - 0.85_f64).abs() < 0.01,
+            "top_p should be ~0.85, got {top_p}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_vllm_with_url_overrides_default_server() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/generate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(vllm_success_body()))
+            .mount(&server)
+            .await;
+
+        // If with_url works, the request reaches our mock — not localhost:8000
+        let worker = VllmWorker::new().with_url(server.uri());
+        let result = worker.infer("test").await;
+        assert!(
+            result.is_ok(),
+            "Request should reach the mock server via with_url"
+        );
     }
 }

@@ -15,11 +15,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_prompt_orchestrator::{
-    spawn_pipeline, EchoWorker, ModelWorker, PromptRequest, SessionId,
     enhanced::{
-        Deduplicator, CircuitBreaker, RetryPolicy,
-        dedup, circuit_breaker::CircuitBreakerError,
+        circuit_breaker::CircuitBreakerError, dedup, CircuitBreaker, Deduplicator, RetryPolicy,
     },
+    spawn_pipeline, EchoWorker, ModelWorker, PromptRequest, SessionId,
 };
 use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -46,9 +45,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("✅ Deduplicator initialized (5 min window)");
 
     let circuit_breaker = CircuitBreaker::new(
-        3,                          // 3 failures opens circuit
-        0.8,                        // 80% success rate closes it
-        Duration::from_secs(10),    // 10 sec timeout
+        3,                       // 3 failures opens circuit
+        0.8,                     // 80% success rate closes it
+        Duration::from_secs(10), // 10 sec timeout
     );
     info!("✅ Circuit breaker initialized (3 failures threshold)");
 
@@ -89,8 +88,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let dedup_stats = dedup.stats();
-    info!("   ✅ Dedup stats: {} total, {} in progress, {} cached", 
-        dedup_stats.total, dedup_stats.in_progress, dedup_stats.cached);
+    info!(
+        "   ✅ Dedup stats: {} total, {} in progress, {} cached",
+        dedup_stats.total, dedup_stats.in_progress, dedup_stats.cached
+    );
     info!("   💰 Saved 4 out of 5 inference calls (80% cost reduction!)");
     info!("");
 
@@ -107,13 +108,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for i in 1..=10 {
         let should_fail = i <= 4; // First 4 fail
 
-        let result = circuit_breaker.call(|| async move {
-            if should_fail {
-                Err("Service unavailable")
-            } else {
-                Ok("Success")
-            }
-        }).await;
+        let result = circuit_breaker
+            .call(|| async move {
+                if should_fail {
+                    Err("Service unavailable")
+                } else {
+                    Ok("Success")
+                }
+            })
+            .await;
 
         match result {
             Ok(_) => {
@@ -131,13 +134,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let cb_stats = circuit_breaker.stats().await;
-        info!("      Status: {:?}, Failures: {}, Success Rate: {:.0}%",
-            cb_stats.status, cb_stats.failures, cb_stats.success_rate * 100.0);
+        info!(
+            "      Status: {:?}, Failures: {}, Success Rate: {:.0}%",
+            cb_stats.status,
+            cb_stats.failures,
+            cb_stats.success_rate * 100.0
+        );
 
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    info!("   ✅ Circuit breaker stats: {} failures prevented cascading", failure_count);
+    info!(
+        "   ✅ Circuit breaker stats: {} failures prevented cascading",
+        failure_count
+    );
     info!("   💪 System remained responsive despite failures");
     info!("");
 
@@ -151,18 +161,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for i in 1..=3 {
         let mut attempts = 0;
-        
-        let result = retry_policy.retry(|| {
-            attempts += 1;
-            async move {
-                // Fail first 2 attempts, succeed on 3rd
-                if attempts < 3 {
-                    Err("Transient error")
-                } else {
-                    Ok("Success")
+
+        let result = retry_policy
+            .retry(|| {
+                attempts += 1;
+                async move {
+                    // Fail first 2 attempts, succeed on 3rd
+                    if attempts < 3 {
+                        Err("Transient error")
+                    } else {
+                        Ok("Success")
+                    }
                 }
-            }
-        }).await;
+            })
+            .await;
 
         match result {
             Ok(_) => {
@@ -170,7 +182,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 attempt_counts.push(attempts);
             }
             Err(e) => {
-                info!("   Request {}: ❌ Failed after {} attempts: {}", i, attempts, e);
+                info!(
+                    "   Request {}: ❌ Failed after {} attempts: {}",
+                    i, attempts, e
+                );
             }
         }
     }
@@ -186,18 +201,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("4️⃣  COMBINED FEATURES TEST");
     info!("   Processing requests with all protections...");
 
-    let combined_stats = process_with_all_features(
-        "What is Rust?",
-        &dedup,
-        &circuit_breaker,
-        &retry_policy,
-    ).await;
+    let combined_stats =
+        process_with_all_features("What is Rust?", &dedup, &circuit_breaker, &retry_policy).await;
 
     info!("   ✅ Request completed successfully");
-    info!("   📊 Dedup: {}, CB: {:?}, Retries: {}",
-        if combined_stats.was_deduplicated { "HIT" } else { "MISS" },
+    info!(
+        "   📊 Dedup: {}, CB: {:?}, Retries: {}",
+        if combined_stats.was_deduplicated {
+            "HIT"
+        } else {
+            "MISS"
+        },
         combined_stats.circuit_breaker_status,
-        combined_stats.retry_attempts);
+        combined_stats.retry_attempts
+    );
     info!("");
 
     // ========================================================================
@@ -255,21 +272,24 @@ async fn process_with_all_features(
         }
         dedup::DeduplicationResult::New(token) => {
             // Not cached, process with circuit breaker + retry
-            let result = retry_policy.retry(|| {
-                retry_attempts += 1;
-                let cb = circuit_breaker.clone();
-                async move {
-                    cb.call(|| async {
-                        // Simulate processing
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                        Ok::<_, &str>("Processed result")
-                    }).await
-                    .map_err(|e| match e {
-                        circuit_breaker::CircuitBreakerError::Open => "Circuit open",
-                        circuit_breaker::CircuitBreakerError::Failed(e) => e,
-                    })
-                }
-            }).await;
+            let result = retry_policy
+                .retry(|| {
+                    retry_attempts += 1;
+                    let cb = circuit_breaker.clone();
+                    async move {
+                        cb.call(|| async {
+                            // Simulate processing
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                            Ok::<_, &str>("Processed result")
+                        })
+                        .await
+                        .map_err(|e| match e {
+                            CircuitBreakerError::Open => "Circuit open",
+                            CircuitBreakerError::Failed(e) => e,
+                        })
+                    }
+                })
+                .await;
 
             if let Ok(result) = result {
                 dedup.complete(token, result.to_string()).await;

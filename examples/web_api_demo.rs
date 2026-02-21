@@ -20,15 +20,12 @@
 //! ```
 
 use std::sync::Arc;
-use tokio_prompt_orchestrator::{
-    spawn_pipeline, EchoWorker, ModelWorker,
-    web_api, enhanced,
-};
+use tokio_prompt_orchestrator::{enhanced, spawn_pipeline, web_api, EchoWorker, ModelWorker};
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Initialize tracing
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::INFO)

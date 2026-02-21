@@ -5,9 +5,12 @@
 //!
 //! ## Usage
 //!
-//! ```rust
-//! use tokio_prompt_orchestrator::enhanced::Deduplicator;
-//!
+//! ```no_run
+//! use std::time::Duration;
+//! use tokio_prompt_orchestrator::enhanced::{Deduplicator, DeduplicationResult};
+//! # async fn process_request() -> String { String::new() }
+//! # #[tokio::main]
+//! # async fn main() {
 //! let dedup = Deduplicator::new(Duration::from_secs(300)); // 5 minute window
 //!
 //! // Check if request is duplicate
@@ -19,13 +22,14 @@
 //!     }
 //!     DeduplicationResult::InProgress => {
 //!         // Wait for in-progress request
-//!         let result = dedup.wait_for_result("prompt_hash").await;
+//!         let _result = dedup.wait_for_result("prompt_hash").await;
 //!     }
 //!     DeduplicationResult::Cached(result) => {
-//!         // Return cached result
-//!         return result;
+//!         // Use cached result
+//!         println!("{result}");
 //!     }
 //! }
+//! # }
 //! ```
 
 use dashmap::DashMap;
@@ -49,6 +53,7 @@ pub enum DeduplicationResult {
 /// Token for tracking request completion
 #[derive(Debug, Clone)]
 pub struct DeduplicationToken {
+    /// Unique identifier for this deduplication token.
     pub id: String,
     key: String,
 }
@@ -67,6 +72,7 @@ enum RequestState {
 }
 
 /// Request deduplicator
+#[derive(Clone)]
 pub struct Deduplicator {
     requests: Arc<DashMap<String, RequestState>>,
     cache_duration: Duration,
@@ -104,7 +110,10 @@ impl Deduplicator {
                     info!(key = key, "duplicate request detected (in progress)");
                     DeduplicationResult::InProgress
                 }
-                RequestState::Completed { result, completed_at } => {
+                RequestState::Completed {
+                    result,
+                    completed_at,
+                } => {
                     if completed_at.elapsed().unwrap_or_default() < self.cache_duration {
                         info!(key = key, "duplicate request detected (cached)");
                         DeduplicationResult::Cached(result.clone())
@@ -152,10 +161,7 @@ impl Deduplicator {
             }
         };
 
-        match rx.recv().await {
-            Ok(result) => Some(result),
-            Err(_) => None,
-        }
+        rx.recv().await.ok()
     }
 
     /// Mark request as completed
@@ -230,15 +236,21 @@ fn cleanup_expired(requests: &DashMap<String, RequestState>, cache_duration: Dur
     });
 
     if removed > 0 {
-        debug!(removed = removed, "cleaned up expired deduplication entries");
+        debug!(
+            removed = removed,
+            "cleaned up expired deduplication entries"
+        );
     }
 }
 
 /// Deduplication statistics
 #[derive(Debug)]
 pub struct DeduplicationStats {
+    /// Total number of tracked requests (in-progress + cached).
     pub total: usize,
+    /// Requests that are currently being processed.
     pub in_progress: usize,
+    /// Completed requests whose results are still cached.
     pub cached: usize,
 }
 
@@ -320,9 +332,7 @@ mod tests {
 
         // Spawn task to wait
         let dedup_clone = dedup.clone();
-        let wait_task = tokio::spawn(async move {
-            dedup_clone.wait_for_result("test-key").await
-        });
+        let wait_task = tokio::spawn(async move { dedup_clone.wait_for_result("test-key").await });
 
         // Complete request
         tokio::time::sleep(Duration::from_millis(100)).await;

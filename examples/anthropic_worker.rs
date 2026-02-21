@@ -32,7 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // - claude-3-sonnet-20240229
     // - claude-3-haiku-20240307
     let worker: Arc<dyn ModelWorker> = Arc::new(
-        AnthropicWorker::new("claude-3-5-sonnet-20241022")
+        AnthropicWorker::new("claude-3-5-sonnet-20241022")?
             .with_max_tokens(512)
             .with_temperature(1.0),
     );
@@ -49,11 +49,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "analyst-1",
             "Analyze the pros and cons of renewable energy.",
         ),
-        ("writer-1", "Write a creative story about a robot learning to paint."),
         (
-            "teacher-1",
-            "Explain photosynthesis to a 10-year-old.",
+            "writer-1",
+            "Write a creative story about a robot learning to paint.",
         ),
+        ("teacher-1", "Explain photosynthesis to a 10-year-old."),
     ];
 
     info!("📨 Sending {} requests to Claude", requests.len());

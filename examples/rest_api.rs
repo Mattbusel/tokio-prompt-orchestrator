@@ -27,7 +27,7 @@ use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Initialize tracing
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::INFO)
@@ -60,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!(r#"     -d '{{"prompt": "Hello, world!"}}'\"#);
     info!("");
 
-    web_api::start_server("0.0.0.0:8080", handles.input_tx).await?;
+    web_api::start_server(web_api::ServerConfig::default(), handles.input_tx).await?;
 
     Ok(())
 }

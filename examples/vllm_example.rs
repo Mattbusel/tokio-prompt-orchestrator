@@ -23,7 +23,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio_prompt_orchestrator::{
-    ModelWorker, PromptRequest, SessionId, VllmWorker, spawn_pipeline,
+    spawn_pipeline, ModelWorker, PromptRequest, SessionId, VllmWorker,
 };
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;

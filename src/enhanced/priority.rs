@@ -4,17 +4,29 @@
 //!
 //! ## Usage
 //!
-//! ```rust
+//! ```no_run
+//! use std::collections::HashMap;
+//! use tokio_prompt_orchestrator::{SessionId, PromptRequest};
 //! use tokio_prompt_orchestrator::enhanced::{PriorityQueue, Priority};
-//!
+//! # #[tokio::main]
+//! # async fn main() {
+//! # let make_req = || PromptRequest {
+//! #     session: SessionId::new("s"),
+//! #     input: String::new(),
+//! #     meta: HashMap::new(),
+//! # };
+//! # let (request1, request2, request3) = (make_req(), make_req(), make_req());
 //! let queue = PriorityQueue::new();
 //!
-//! queue.push(Priority::High, request1).await;
-//! queue.push(Priority::Normal, request2).await;
-//! queue.push(Priority::Low, request3).await;
+//! queue.push(Priority::High, request1).await.ok();
+//! queue.push(Priority::Normal, request2).await.ok();
+//! queue.push(Priority::Low, request3).await.ok();
 //!
-//! // Dequeue by priority
-//! let request = queue.pop().await.unwrap(); // Gets highest priority first
+//! // Dequeue by priority — highest priority first
+//! if let Some((_priority, request)) = queue.pop().await {
+//!     println!("{}", request.input);
+//! }
+//! # }
 //! ```
 
 use std::cmp::Ordering;
@@ -26,22 +38,24 @@ use tracing::debug;
 use crate::PromptRequest;
 
 /// Request priority levels
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Priority {
+    /// Lowest priority — background / batch work.
     Low = 0,
+    /// Standard priority for most requests.
+    #[default]
     Normal = 1,
+    /// Elevated priority, processed before `Normal`.
     High = 2,
+    /// Highest priority — processed immediately ahead of all others.
     Critical = 3,
 }
 
-impl Default for Priority {
-    fn default() -> Self {
-        Priority::Normal
-    }
-}
-
 impl Priority {
-    pub fn from_str(s: &str) -> Option<Self> {
+    /// Parse a priority level from a name string (`"low"`, `"normal"`, `"high"`, `"critical"`).
+    ///
+    /// Returns `None` for unrecognised strings.
+    pub fn from_name(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "low" => Some(Priority::Low),
             "normal" => Some(Priority::Normal),
@@ -110,7 +124,7 @@ impl PriorityQueue {
     /// Push request with priority
     pub async fn push(&self, priority: Priority, request: PromptRequest) -> Result<(), QueueError> {
         let mut heap = self.heap.lock().await;
-        
+
         if heap.len() >= self.max_size {
             return Err(QueueError::QueueFull);
         }
@@ -161,7 +175,7 @@ impl PriorityQueue {
     /// Get queue statistics by priority
     pub async fn stats(&self) -> QueueStats {
         let heap = self.heap.lock().await;
-        
+
         let mut stats = QueueStats {
             total: heap.len(),
             by_priority: std::collections::HashMap::new(),
@@ -191,6 +205,7 @@ impl Default for PriorityQueue {
 /// Queue error types
 #[derive(Debug)]
 pub enum QueueError {
+    /// The queue has reached its maximum capacity.
     QueueFull,
 }
 
@@ -207,7 +222,9 @@ impl std::error::Error for QueueError {}
 /// Queue statistics
 #[derive(Debug)]
 pub struct QueueStats {
+    /// Total number of requests currently in the queue.
     pub total: usize,
+    /// Breakdown of request counts keyed by priority level.
     pub by_priority: std::collections::HashMap<Priority, usize>,
 }
 
@@ -230,10 +247,22 @@ mod tests {
         let queue = PriorityQueue::new();
 
         // Push in random order
-        queue.push(Priority::Low, create_request("low")).await.unwrap();
-        queue.push(Priority::High, create_request("high")).await.unwrap();
-        queue.push(Priority::Normal, create_request("normal")).await.unwrap();
-        queue.push(Priority::Critical, create_request("critical")).await.unwrap();
+        queue
+            .push(Priority::Low, create_request("low"))
+            .await
+            .unwrap();
+        queue
+            .push(Priority::High, create_request("high"))
+            .await
+            .unwrap();
+        queue
+            .push(Priority::Normal, create_request("normal"))
+            .await
+            .unwrap();
+        queue
+            .push(Priority::Critical, create_request("critical"))
+            .await
+            .unwrap();
 
         // Should pop in priority order
         assert_eq!(queue.pop().await.unwrap().0, Priority::Critical);
@@ -247,9 +276,18 @@ mod tests {
         let queue = PriorityQueue::new();
 
         // Push multiple normal priority requests
-        queue.push(Priority::Normal, create_request("first")).await.unwrap();
-        queue.push(Priority::Normal, create_request("second")).await.unwrap();
-        queue.push(Priority::Normal, create_request("third")).await.unwrap();
+        queue
+            .push(Priority::Normal, create_request("first"))
+            .await
+            .unwrap();
+        queue
+            .push(Priority::Normal, create_request("second"))
+            .await
+            .unwrap();
+        queue
+            .push(Priority::Normal, create_request("third"))
+            .await
+            .unwrap();
 
         // Should pop in FIFO order
         assert_eq!(queue.pop().await.unwrap().1.input, "first");
@@ -261,21 +299,42 @@ mod tests {
     async fn test_queue_full() {
         let queue = PriorityQueue::with_capacity(2);
 
-        queue.push(Priority::Normal, create_request("1")).await.unwrap();
-        queue.push(Priority::Normal, create_request("2")).await.unwrap();
-        
+        queue
+            .push(Priority::Normal, create_request("1"))
+            .await
+            .unwrap();
+        queue
+            .push(Priority::Normal, create_request("2"))
+            .await
+            .unwrap();
+
         // 3rd should fail
-        assert!(queue.push(Priority::Normal, create_request("3")).await.is_err());
+        assert!(queue
+            .push(Priority::Normal, create_request("3"))
+            .await
+            .is_err());
     }
 
     #[tokio::test]
     async fn test_queue_stats() {
         let queue = PriorityQueue::new();
 
-        queue.push(Priority::High, create_request("h1")).await.unwrap();
-        queue.push(Priority::High, create_request("h2")).await.unwrap();
-        queue.push(Priority::Normal, create_request("n1")).await.unwrap();
-        queue.push(Priority::Low, create_request("l1")).await.unwrap();
+        queue
+            .push(Priority::High, create_request("h1"))
+            .await
+            .unwrap();
+        queue
+            .push(Priority::High, create_request("h2"))
+            .await
+            .unwrap();
+        queue
+            .push(Priority::Normal, create_request("n1"))
+            .await
+            .unwrap();
+        queue
+            .push(Priority::Low, create_request("l1"))
+            .await
+            .unwrap();
 
         let stats = queue.stats().await;
         assert_eq!(stats.total, 4);

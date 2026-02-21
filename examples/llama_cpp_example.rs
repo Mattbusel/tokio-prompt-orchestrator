@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio_prompt_orchestrator::{
-    LlamaCppWorker, ModelWorker, PromptRequest, SessionId, spawn_pipeline,
+    spawn_pipeline, LlamaCppWorker, ModelWorker, PromptRequest, SessionId,
 };
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;

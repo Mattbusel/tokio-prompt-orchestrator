@@ -47,7 +47,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start metrics server (non-blocking)
     #[cfg(feature = "metrics-server")]
     let metrics_handle = tokio::spawn(async {
-        if let Err(e) = tokio_prompt_orchestrator::metrics_server::start_server("0.0.0.0:9090").await {
+        if let Err(e) =
+            tokio_prompt_orchestrator::metrics_server::start_server("0.0.0.0:9090").await
+        {
             tracing::error!("Metrics server error: {}", e);
         }
     });
@@ -88,7 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for pipeline_id in 0..3 {
         let (_, handles) = &handles_vec[pipeline_id];
-        
+
         for i in 0..request_count {
             let request = PromptRequest {
                 session: SessionId::new(format!("session-{}", i % 10)),
@@ -103,7 +105,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             if handles.input_tx.send(request).await.is_ok() {
                 request_num += 1;
-                
+
                 if request_num % 10 == 0 {
                     info!("  Sent {} requests...", request_num);
                 }
@@ -115,7 +117,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     info!("");
-    info!("✅ Sent {} total requests across {} pipelines", request_num, handles_vec.len());
+    info!(
+        "✅ Sent {} total requests across {} pipelines",
+        request_num,
+        handles_vec.len()
+    );
     info!("");
     info!("⏳ Processing requests... (metrics updating in real-time)");
 
@@ -133,7 +139,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Print metrics summary
     let summary = tokio_prompt_orchestrator::metrics::get_metrics_summary();
-    
+
     info!("");
     info!("Requests Processed:");
     for (stage, count) in &summary.requests_total {
@@ -153,8 +159,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !summary.errors_total.is_empty() {
         info!("");
         info!("Errors:");
-        for ((stage, error_type), count) in &summary.errors_total {
-            info!("  {} stage ({}): {} errors", stage, error_type, count);
+        for (stage, count) in &summary.errors_total {
+            info!("  {} stage: {} errors", stage, count);
         }
     }
 

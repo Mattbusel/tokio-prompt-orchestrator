@@ -13,8 +13,8 @@
 //! - Stream output: 256
 
 use crate::{
-    metrics, send_with_shed, AssembleOutput, InferenceOutput, ModelWorker, OrchestratorError,
-    PostOutput, PromptRequest, RagOutput,
+    metrics, send_with_shed, AssembleOutput, InferenceOutput, ModelWorker, PostOutput,
+    PromptRequest, RagOutput,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -24,11 +24,17 @@ use tracing::{info, instrument, warn};
 
 /// Handles for all spawned pipeline tasks
 pub struct PipelineHandles {
+    /// Handle for the RAG (retrieval-augmented generation) stage task.
     pub rag: JoinHandle<()>,
+    /// Handle for the prompt assembly stage task.
     pub assemble: JoinHandle<()>,
+    /// Handle for the model inference stage task.
     pub inference: JoinHandle<()>,
+    /// Handle for the post-processing stage task.
     pub post: JoinHandle<()>,
+    /// Handle for the streaming output stage task.
     pub stream: JoinHandle<()>,
+    /// Channel sender for submitting new requests to the pipeline.
     pub input_tx: mpsc::Sender<PromptRequest>,
 }
 
@@ -74,10 +80,7 @@ pub fn spawn_pipeline(worker: Arc<dyn ModelWorker>) -> PipelineHandles {
 /// Simulates document retrieval and context injection.
 /// In production, this would query vector DBs, semantic search, etc.
 #[instrument(skip_all, name = "rag_stage")]
-async fn rag_stage(
-    mut rx: mpsc::Receiver<PromptRequest>,
-    tx: mpsc::Sender<RagOutput>,
-) {
+async fn rag_stage(mut rx: mpsc::Receiver<PromptRequest>, tx: mpsc::Sender<RagOutput>) {
     info!("RAG stage started");
 
     while let Some(request) = rx.recv().await {
@@ -119,10 +122,7 @@ async fn rag_stage(
 /// Constructs the final prompt from RAG context and user input.
 /// This is where prompt templates, few-shot examples, etc. get injected.
 #[instrument(skip_all, name = "assemble_stage")]
-async fn assemble_stage(
-    mut rx: mpsc::Receiver<RagOutput>,
-    tx: mpsc::Sender<AssembleOutput>,
-) {
+async fn assemble_stage(mut rx: mpsc::Receiver<RagOutput>, tx: mpsc::Sender<AssembleOutput>) {
     info!("Assemble stage started");
 
     while let Some(rag_output) = rx.recv().await {
@@ -215,10 +215,7 @@ async fn inference_stage(
 /// Joins tokens, applies formatting, filters, safety checks, etc.
 /// Could include content moderation, PII redaction, etc.
 #[instrument(skip_all, name = "post_stage")]
-async fn post_stage(
-    mut rx: mpsc::Receiver<InferenceOutput>,
-    tx: mpsc::Sender<PostOutput>,
-) {
+async fn post_stage(mut rx: mpsc::Receiver<InferenceOutput>, tx: mpsc::Sender<PostOutput>) {
     info!("Post stage started");
 
     while let Some(inference_output) = rx.recv().await {

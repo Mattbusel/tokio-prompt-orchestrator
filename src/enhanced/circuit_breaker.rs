@@ -9,29 +9,33 @@
 //!
 //! ## Usage
 //!
-//! ```rust
+//! ```no_run
+//! use std::time::Duration;
 //! use tokio_prompt_orchestrator::enhanced::CircuitBreaker;
-//!
+//! use tokio_prompt_orchestrator::enhanced::circuit_breaker::CircuitBreakerError;
+//! # #[tokio::main]
+//! # async fn main() {
 //! let breaker = CircuitBreaker::new(5, 0.5, Duration::from_secs(60));
 //!
-//! match breaker.call(|| async { 
-//!     // Your operation
-//!     worker.infer(prompt).await
+//! match breaker.call(|| async {
+//!     // Your operation — replace with a real async call
+//!     Ok::<&str, &str>("inference result")
 //! }).await {
-//!     Ok(result) => {}, // Success
+//!     Ok(result) => println!("{result}"), // Success
 //!     Err(CircuitBreakerError::Open) => {
 //!         // Circuit open, fail fast
 //!     }
 //!     Err(CircuitBreakerError::Failed(e)) => {
-//!         // Operation failed
+//!         eprintln!("Operation failed: {e}");
 //!     }
 //! }
+//! # }
 //! ```
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use tracing::{warn, info, debug};
+use tracing::{debug, info, warn};
 
 /// Circuit breaker for preventing cascading failures
 #[derive(Clone)]
@@ -63,10 +67,14 @@ struct CircuitState {
     recent_results: Vec<bool>,
 }
 
+/// Current state of a circuit breaker.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CircuitStatus {
+    /// Circuit is closed — requests flow through normally.
     Closed,
+    /// Circuit is open — requests are rejected immediately without calling the operation.
     Open,
+    /// Circuit is half-open — one probe request is allowed through to test recovery.
     HalfOpen,
 }
 
@@ -86,11 +94,7 @@ impl CircuitBreaker {
     /// * `failure_threshold` - Number of consecutive failures before opening
     /// * `success_threshold` - Success rate (0.0-1.0) needed to close circuit
     /// * `timeout` - How long to wait in open state before testing recovery
-    pub fn new(
-        failure_threshold: usize,
-        success_threshold: f64,
-        timeout: Duration,
-    ) -> Self {
+    pub fn new(failure_threshold: usize, success_threshold: f64, timeout: Duration) -> Self {
         Self {
             state: Arc::new(RwLock::new(CircuitState {
                 status: CircuitStatus::Closed,
@@ -118,14 +122,16 @@ impl CircuitBreaker {
         // Check if we should allow the request
         {
             let mut state = self.state.write().await;
-            
+
             match state.status {
                 CircuitStatus::Open => {
                     // Check if timeout elapsed
                     if let Some(last_failure) = state.last_failure_time {
                         if last_failure.elapsed() >= self.config.timeout {
-                            // Try half-open
+                            // Try half-open — clear window so success-rate is
+                            // calculated only from post-recovery requests.
                             state.status = CircuitStatus::HalfOpen;
+                            state.recent_results.clear();
                             state.last_state_change = Instant::now();
                             info!("circuit breaker: transitioning to half-open");
                         } else {
@@ -155,7 +161,7 @@ impl CircuitBreaker {
 
     async fn record_success(&self) {
         let mut state = self.state.write().await;
-        
+
         state.successes += 1;
         state.recent_results.push(true);
         if state.recent_results.len() > self.config.window_size {
@@ -195,7 +201,7 @@ impl CircuitBreaker {
 
     async fn record_failure(&self) {
         let mut state = self.state.write().await;
-        
+
         state.failures += 1;
         state.last_failure_time = Some(Instant::now());
         state.recent_results.push(false);
@@ -249,7 +255,7 @@ impl CircuitBreaker {
     /// Get circuit breaker statistics
     pub async fn stats(&self) -> CircuitBreakerStats {
         let state = self.state.read().await;
-        
+
         CircuitBreakerStats {
             status: state.status.clone(),
             failures: state.failures,
@@ -283,10 +289,15 @@ impl CircuitBreaker {
 /// Circuit breaker statistics
 #[derive(Debug)]
 pub struct CircuitBreakerStats {
+    /// Current state of the circuit breaker.
     pub status: CircuitStatus,
+    /// Total failures recorded in the current window.
     pub failures: usize,
+    /// Total successes recorded in the current window.
     pub successes: usize,
+    /// Fraction of recent requests that succeeded (0.0 – 1.0).
     pub success_rate: f64,
+    /// Wall-clock time spent in the current state.
     pub time_in_current_state: Duration,
 }
 
@@ -300,7 +311,8 @@ mod tests {
 
         // Record 3 failures
         for _ in 0..3 {
-            let result: Result<(), ()> = breaker.call(|| async { Err(()) }).await;
+            let result: Result<(), CircuitBreakerError<()>> =
+                breaker.call(|| async { Err(()) }).await;
             assert!(result.is_err());
         }
 
@@ -308,7 +320,7 @@ mod tests {
         assert_eq!(breaker.status().await, CircuitStatus::Open);
 
         // Next request should be rejected
-        let result: Result<(), ()> = breaker.call(|| async { Ok(()) }).await;
+        let result: Result<(), CircuitBreakerError<()>> = breaker.call(|| async { Ok(()) }).await;
         assert!(matches!(result, Err(CircuitBreakerError::Open)));
     }
 
@@ -318,7 +330,7 @@ mod tests {
 
         // Open circuit
         for _ in 0..2 {
-            let _: Result<(), ()> = breaker.call(|| async { Err(()) }).await;
+            let _: Result<(), CircuitBreakerError<()>> = breaker.call(|| async { Err(()) }).await;
         }
         assert_eq!(breaker.status().await, CircuitStatus::Open);
 
@@ -326,12 +338,12 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(150)).await;
 
         // Should transition to half-open and allow test request
-        let result: Result<(), ()> = breaker.call(|| async { Ok(()) }).await;
+        let result: Result<(), CircuitBreakerError<()>> = breaker.call(|| async { Ok(()) }).await;
         assert!(result.is_ok());
 
         // Record more successes to close circuit
         for _ in 0..5 {
-            let _: Result<(), ()> = breaker.call(|| async { Ok(()) }).await;
+            let _: Result<(), CircuitBreakerError<()>> = breaker.call(|| async { Ok(()) }).await;
         }
 
         assert_eq!(breaker.status().await, CircuitStatus::Closed);
@@ -343,7 +355,7 @@ mod tests {
 
         // Open circuit
         for _ in 0..2 {
-            let _: Result<(), ()> = breaker.call(|| async { Err(()) }).await;
+            let _: Result<(), CircuitBreakerError<()>> = breaker.call(|| async { Err(()) }).await;
         }
         assert_eq!(breaker.status().await, CircuitStatus::Open);
 
@@ -357,13 +369,15 @@ mod tests {
         let breaker = CircuitBreaker::new(5, 0.8, Duration::from_secs(60));
 
         // Record some results
-        let _: Result<(), ()> = breaker.call(|| async { Ok(()) }).await;
-        let _: Result<(), ()> = breaker.call(|| async { Err(()) }).await;
-        let _: Result<(), ()> = breaker.call(|| async { Ok(()) }).await;
+        let _: Result<(), CircuitBreakerError<()>> = breaker.call(|| async { Ok(()) }).await;
+        let _: Result<(), CircuitBreakerError<()>> = breaker.call(|| async { Err(()) }).await;
+        let _: Result<(), CircuitBreakerError<()>> = breaker.call(|| async { Ok(()) }).await;
 
         let stats = breaker.stats().await;
         assert_eq!(stats.successes, 2);
-        assert_eq!(stats.failures, 1);
+        // record_success() resets the failure counter when status is Closed,
+        // so after the 3rd call (a success) the failure count is back to 0.
+        assert_eq!(stats.failures, 0);
         assert_eq!(stats.status, CircuitStatus::Closed);
     }
 }

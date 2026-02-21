@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio_prompt_orchestrator::{
-    AnthropicWorker, ModelWorker, PromptRequest, SessionId, spawn_pipeline,
+    spawn_pipeline, AnthropicWorker, ModelWorker, PromptRequest, SessionId,
 };
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
@@ -27,7 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create Anthropic worker
     let worker: Arc<dyn ModelWorker> = Arc::new(
-        AnthropicWorker::new("claude-3-5-sonnet-20241022")
+        AnthropicWorker::new("claude-3-5-sonnet-20241022")?
             .with_max_tokens(200)
             .with_temperature(1.0),
     );

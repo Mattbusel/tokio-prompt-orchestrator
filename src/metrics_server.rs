@@ -36,7 +36,6 @@
 
 #[cfg(feature = "metrics-server")]
 use axum::{
-    extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
@@ -80,7 +79,7 @@ pub async fn start_server(addr: &str) -> Result<(), Box<dyn std::error::Error + 
         .layer(TraceLayer::new_for_http());
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    
+
     info!("✅ Metrics server ready at http://{}/metrics", addr);
     info!("✅ Health check at http://{}/health", addr);
 
@@ -93,7 +92,7 @@ pub async fn start_server(addr: &str) -> Result<(), Box<dyn std::error::Error + 
 /// Handler for /metrics endpoint
 async fn metrics_handler() -> Response {
     let metrics = crate::metrics::gather_metrics();
-    
+
     (
         StatusCode::OK,
         [("Content-Type", "text/plain; version=0.0.4")],
@@ -106,18 +105,19 @@ async fn metrics_handler() -> Response {
 /// Handler for /health endpoint
 async fn health_handler() -> Response {
     let summary = crate::metrics::get_metrics_summary();
-    
+
     let health_status = serde_json::json!({
         "status": "healthy",
         "requests_total": summary.requests_total.len(),
-        "shed_total": summary.requests_shed.iter().map(|(_, v)| v).sum::<u64>(),
+        "shed_total": summary.requests_shed.values().sum::<u64>(),
         "errors_total": summary.errors_total.len(),
     });
-    
+
     (
         StatusCode::OK,
         [("Content-Type", "application/json")],
-        serde_json::to_string_pretty(&health_status).unwrap(),
+        serde_json::to_string_pretty(&health_status)
+            .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string()),
     )
         .into_response()
 }
@@ -135,7 +135,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_health_endpoint() {
-        let response = health_handler().await;
+        let _response = health_handler().await;
         // Should return 200 OK
         // In real test, would check response body
     }

@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio_prompt_orchestrator::{
-    EchoWorker, ModelWorker, PromptRequest, SessionId, spawn_pipeline,
+    metrics, spawn_pipeline, EchoWorker, ModelWorker, PromptRequest, SessionId,
 };
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -20,6 +20,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .finish();
 
     tracing::subscriber::set_global_default(subscriber)?;
+
+    // Initialize Prometheus metrics registry before any pipeline stage runs.
+    metrics::init_metrics()?;
 
     info!("🚀 Starting tokio-prompt-orchestrator demo");
 

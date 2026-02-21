@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio_prompt_orchestrator::{
-    ModelWorker, OpenAiWorker, PromptRequest, SessionId, spawn_pipeline,
+    spawn_pipeline, ModelWorker, OpenAiWorker, PromptRequest, SessionId,
 };
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
@@ -27,7 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create OpenAI worker
     let worker: Arc<dyn ModelWorker> = Arc::new(
-        OpenAiWorker::new("gpt-3.5-turbo-instruct")
+        OpenAiWorker::new("gpt-3.5-turbo-instruct")?
             .with_max_tokens(100)
             .with_temperature(0.7),
     );

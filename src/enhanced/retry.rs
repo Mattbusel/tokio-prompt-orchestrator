@@ -4,24 +4,34 @@
 //!
 //! ## Usage
 //!
-//! ```rust
+//! ```no_run
+//! use std::time::Duration;
 //! use tokio_prompt_orchestrator::enhanced::RetryPolicy;
-//!
+//! # #[tokio::main]
+//! # async fn main() {
 //! let policy = RetryPolicy::exponential(3, Duration::from_millis(100));
 //!
 //! let result = policy.retry(|| async {
-//!     // Your fallible operation
-//!     worker.infer(prompt).await
-//! }).await?;
+//!     // Your fallible operation — returns Ok on success, Err on transient failure
+//!     Ok::<String, std::io::Error>("inference result".to_string())
+//! }).await;
+//!
+//! match result {
+//!     Ok(output) => println!("{output}"),
+//!     Err(e) => eprintln!("All retries exhausted: {e}"),
+//! }
+//! # }
 //! ```
 
 use std::time::Duration;
-use tracing::{warn, debug};
+use tracing::{debug, warn};
 
 /// Retry policy configuration
 #[derive(Clone, Debug)]
 pub struct RetryPolicy {
+    /// Maximum number of attempts (including the first try).
     pub max_attempts: usize,
+    /// Backoff strategy applied between consecutive attempts.
     pub strategy: RetryStrategy,
 }
 
@@ -32,13 +42,18 @@ pub enum RetryStrategy {
     Fixed(Duration),
     /// Exponential backoff (delay doubles each time)
     Exponential {
+        /// Delay applied before the second attempt.
         initial_delay: Duration,
+        /// Upper bound; the delay will never grow beyond this value.
         max_delay: Duration,
+        /// Multiplier applied to the delay on each successive failure.
         multiplier: f64,
     },
     /// Linear backoff (delay increases linearly)
     Linear {
+        /// Delay applied before the second attempt.
         initial_delay: Duration,
+        /// Amount added to the delay on each successive failure.
         increment: Duration,
     },
 }
@@ -50,7 +65,9 @@ pub enum RetryResult<T, E> {
     Success(T),
     /// All retries exhausted
     Failed {
+        /// The error returned by the final attempt.
         last_error: E,
+        /// Total number of attempts made before giving up.
         attempts: usize,
     },
 }
@@ -95,17 +112,23 @@ impl RetryPolicy {
         E: std::fmt::Display,
     {
         let mut attempt = 0;
-        let mut last_error = None;
 
         loop {
             attempt += 1;
 
-            debug!(attempt = attempt, max = self.max_attempts, "retry: attempting operation");
+            debug!(
+                attempt = attempt,
+                max = self.max_attempts,
+                "retry: attempting operation"
+            );
 
             match f().await {
                 Ok(result) => {
                     if attempt > 1 {
-                        debug!(attempt = attempt, "retry: operation succeeded after retries");
+                        debug!(
+                            attempt = attempt,
+                            "retry: operation succeeded after retries"
+                        );
                     }
                     return Ok(result);
                 }
@@ -117,16 +140,17 @@ impl RetryPolicy {
                         "retry: operation failed"
                     );
 
-                    last_error = Some(e);
-
                     if attempt >= self.max_attempts {
                         warn!(attempts = attempt, "retry: all attempts exhausted");
-                        return Err(last_error.unwrap());
+                        return Err(e);
                     }
 
                     // Calculate delay
                     let delay = self.calculate_delay(attempt);
-                    debug!(delay_ms = delay.as_millis(), "retry: waiting before next attempt");
+                    debug!(
+                        delay_ms = delay.as_millis(),
+                        "retry: waiting before next attempt"
+                    );
                     tokio::time::sleep(delay).await;
                 }
             }
@@ -134,10 +158,7 @@ impl RetryPolicy {
     }
 
     /// Execute with retries, returning detailed result
-    pub async fn retry_with_details<F, Fut, T, E>(
-        &self,
-        f: F,
-    ) -> RetryResult<T, E>
+    pub async fn retry_with_details<F, Fut, T, E>(&self, f: F) -> RetryResult<T, E>
     where
         F: FnMut() -> Fut,
         Fut: std::future::Future<Output = Result<T, E>>,
@@ -160,8 +181,8 @@ impl RetryPolicy {
                 max_delay,
                 multiplier,
             } => {
-                let delay = initial_delay.as_millis() as f64
-                    * multiplier.powi((attempt - 1) as i32);
+                let delay =
+                    initial_delay.as_millis() as f64 * multiplier.powi((attempt - 1) as i32);
                 let delay = Duration::from_millis(delay as u64);
                 delay.min(*max_delay)
             }
@@ -281,11 +302,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_linear_backoff() {
-        let policy = RetryPolicy::linear(
-            4,
-            Duration::from_millis(100),
-            Duration::from_millis(50),
-        );
+        let policy = RetryPolicy::linear(4, Duration::from_millis(100), Duration::from_millis(50));
 
         assert_eq!(policy.calculate_delay(1), Duration::from_millis(100));
         assert_eq!(policy.calculate_delay(2), Duration::from_millis(150));
@@ -300,7 +317,7 @@ mod tests {
         let policy = RetryPolicy::fixed(5, Duration::from_millis(10));
 
         // Only retry on "transient" errors
-        let result = retry_if(
+        let result: Result<(), &str> = retry_if(
             &policy,
             || {
                 let attempts = attempts_clone.clone();
@@ -326,7 +343,7 @@ mod tests {
     fn test_jitter() {
         let base = Duration::from_secs(1);
         let jittered = with_jitter(base);
-        
+
         // Should be within range
         assert!(jittered >= base);
         assert!(jittered <= base + Duration::from_millis(250));

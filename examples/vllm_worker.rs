@@ -59,7 +59,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // vLLM can handle high concurrency efficiently
     let requests = vec![
         ("user-1", "Explain machine learning in simple terms"),
-        ("user-2", "What are the benefits of Rust programming language?"),
+        (
+            "user-2",
+            "What are the benefits of Rust programming language?",
+        ),
         ("user-3", "Describe how neural networks work"),
         ("user-4", "What is the difference between AI and ML?"),
         ("user-5", "How does transformer architecture work?"),

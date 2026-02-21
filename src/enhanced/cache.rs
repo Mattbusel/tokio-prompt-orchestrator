@@ -4,20 +4,23 @@
 //!
 //! ## Usage
 //!
-//! ```rust
+//! ```no_run
 //! use tokio_prompt_orchestrator::enhanced::CacheLayer;
-//!
+//! # #[tokio::main]
+//! # async fn main() {
 //! let cache = CacheLayer::new_memory(1000); // 1000 entries
-//! 
+//!
 //! // Check cache
 //! if let Some(result) = cache.get("prompt_hash").await {
-//!     return result;
+//!     println!("{result}"); // use the cached result
 //! }
 //!
 //! // ... do inference ...
+//! let result = "inference result".to_string();
 //!
 //! // Store result
 //! cache.set("prompt_hash", result, 3600).await; // TTL: 1 hour
+//! # }
 //! ```
 
 use dashmap::DashMap;
@@ -71,10 +74,10 @@ impl CacheLayer {
     #[cfg(feature = "caching")]
     pub async fn new_redis(redis_url: &str) -> Result<Self, redis::RedisError> {
         let client = redis::Client::open(redis_url)?;
-        
+
         // Test connection
         let mut conn = client.get_multiplexed_async_connection().await?;
-        redis::cmd("PING").query_async(&mut conn).await?;
+        redis::cmd("PING").query_async::<_, ()>(&mut conn).await?;
 
         Ok(Self {
             backend: CacheBackend::Redis(Arc::new(RedisCache { client })),
@@ -89,33 +92,30 @@ impl CacheLayer {
                     if entry.expires_at > SystemTime::now() {
                         debug!(key = key, "cache hit (memory)");
                         return Some(entry.value.clone());
-                    } else {
-                        // Expired
-                        drop(entry);
-                        cache.store.remove(key);
-                        debug!(key = key, "cache expired");
                     }
+                    // Expired
+                    drop(entry);
+                    cache.store.remove(key);
+                    debug!(key = key, "cache expired");
                 }
                 debug!(key = key, "cache miss (memory)");
                 None
             }
             #[cfg(feature = "caching")]
-            CacheBackend::Redis(cache) => {
-                match cache.get_redis(key).await {
-                    Ok(Some(value)) => {
-                        debug!(key = key, "cache hit (redis)");
-                        Some(value)
-                    }
-                    Ok(None) => {
-                        debug!(key = key, "cache miss (redis)");
-                        None
-                    }
-                    Err(e) => {
-                        warn!(key = key, error = ?e, "redis get error");
-                        None
-                    }
+            CacheBackend::Redis(cache) => match cache.get_redis(key).await {
+                Ok(Some(value)) => {
+                    debug!(key = key, "cache hit (redis)");
+                    Some(value)
                 }
-            }
+                Ok(None) => {
+                    debug!(key = key, "cache miss (redis)");
+                    None
+                }
+                Err(e) => {
+                    warn!(key = key, error = ?e, "redis get error");
+                    None
+                }
+            },
         }
     }
 
@@ -210,13 +210,15 @@ impl CacheLayer {
 impl RedisCache {
     async fn get_redis(&self, key: &str) -> Result<Option<String>, redis::RedisError> {
         let mut conn = self.client.get_multiplexed_async_connection().await?;
-        redis::cmd("GET")
-            .arg(key)
-            .query_async(&mut conn)
-            .await
+        redis::cmd("GET").arg(key).query_async(&mut conn).await
     }
 
-    async fn set_redis(&self, key: &str, value: &str, ttl_secs: u64) -> Result<(), redis::RedisError> {
+    async fn set_redis(
+        &self,
+        key: &str,
+        value: &str,
+        ttl_secs: u64,
+    ) -> Result<(), redis::RedisError> {
         let mut conn = self.client.get_multiplexed_async_connection().await?;
         redis::cmd("SETEX")
             .arg(key)
@@ -228,31 +230,28 @@ impl RedisCache {
 
     async fn delete_redis(&self, key: &str) -> Result<(), redis::RedisError> {
         let mut conn = self.client.get_multiplexed_async_connection().await?;
-        redis::cmd("DEL")
-            .arg(key)
-            .query_async(&mut conn)
-            .await
+        redis::cmd("DEL").arg(key).query_async(&mut conn).await
     }
 
     async fn clear_redis(&self) -> Result<(), redis::RedisError> {
         let mut conn = self.client.get_multiplexed_async_connection().await?;
-        redis::cmd("FLUSHDB")
-            .query_async(&mut conn)
-            .await
+        redis::cmd("FLUSHDB").query_async(&mut conn).await
     }
 }
 
 /// Cache statistics
 #[derive(Debug)]
 pub struct CacheStats {
+    /// Number of entries currently held in the cache.
     pub entries: usize,
+    /// Name of the storage backend in use (`"memory"` or `"redis"`).
     pub backend: String,
 }
 
 /// Generate cache key from prompt
 pub fn cache_key(prompt: &str) -> String {
     use std::collections::hash_map::DefaultHasher;
-    
+
     let mut hasher = DefaultHasher::new();
     prompt.hash(&mut hasher);
     format!("prompt:{:x}", hasher.finish())
@@ -265,14 +264,14 @@ mod tests {
     #[tokio::test]
     async fn test_memory_cache() {
         let cache = CacheLayer::new_memory(10);
-        
+
         // Set and get
         cache.set("key1", "value1", 3600).await;
         assert_eq!(cache.get("key1").await, Some("value1".to_string()));
-        
+
         // Miss
         assert_eq!(cache.get("key2").await, None);
-        
+
         // Delete
         cache.delete("key1").await;
         assert_eq!(cache.get("key1").await, None);
@@ -281,11 +280,11 @@ mod tests {
     #[tokio::test]
     async fn test_cache_expiration() {
         let cache = CacheLayer::new_memory(10);
-        
+
         // Set with 1 second TTL
         cache.set("expire", "value", 1).await;
         assert_eq!(cache.get("expire").await, Some("value".to_string()));
-        
+
         // Wait for expiration
         tokio::time::sleep(Duration::from_secs(2)).await;
         assert_eq!(cache.get("expire").await, None);
@@ -296,7 +295,7 @@ mod tests {
         let key1 = cache_key("hello world");
         let key2 = cache_key("hello world");
         let key3 = cache_key("different");
-        
+
         assert_eq!(key1, key2); // Same input = same key
         assert_ne!(key1, key3); // Different input = different key
     }

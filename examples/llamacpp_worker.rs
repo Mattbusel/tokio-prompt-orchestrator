@@ -92,7 +92,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
 
     info!("🏁 Demo complete");
-    info!("💡 Tip: If you see connection errors, make sure llama.cpp server is running on port 8080");
+    info!(
+        "💡 Tip: If you see connection errors, make sure llama.cpp server is running on port 8080"
+    );
 
     Ok(())
 }

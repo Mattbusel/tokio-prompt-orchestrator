@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Uses GPT-3.5-turbo-instruct (completion model)
     // For chat models, use the Anthropic-style messages API
     let worker: Arc<dyn ModelWorker> = Arc::new(
-        OpenAiWorker::new("gpt-3.5-turbo-instruct")
+        OpenAiWorker::new("gpt-3.5-turbo-instruct")?
             .with_max_tokens(256)
             .with_temperature(0.7),
     );
