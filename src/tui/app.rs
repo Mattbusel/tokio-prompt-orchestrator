@@ -77,6 +77,9 @@ pub struct App {
     /// Rolling log entries, newest at the back.
     pub log_entries: VecDeque<LogEntry>,
 
+    /// Log scroll offset (0 = follow latest, >0 = scrolled up by N lines).
+    pub log_scroll_offset: usize,
+
     /// Data update interval.
     pub tick_rate: Duration,
 }
@@ -208,6 +211,7 @@ impl App {
             uptime_secs: 0,
 
             log_entries: VecDeque::with_capacity(LOG_ENTRIES_CAP),
+            log_scroll_offset: 0,
 
             tick_rate,
         }
@@ -221,6 +225,20 @@ impl App {
         self.throughput_history.clear();
         self.log_entries.clear();
         self.tick_count = 0;
+        self.log_scroll_offset = 0;
+    }
+
+    /// Scrolls log view up by one line.
+    pub fn scroll_log_up(&mut self) {
+        let max_scroll = self.log_entries.len().saturating_sub(1);
+        if self.log_scroll_offset < max_scroll {
+            self.log_scroll_offset += 1;
+        }
+    }
+
+    /// Scrolls log view down by one line (toward latest).
+    pub fn scroll_log_down(&mut self) {
+        self.log_scroll_offset = self.log_scroll_offset.saturating_sub(1);
     }
 
     /// Pushes a log entry, evicting the oldest if at capacity.
@@ -641,5 +659,78 @@ mod tests {
             app.log_entries.front().map(|e| e.message.as_str()),
             Some("first")
         );
+    }
+
+    #[test]
+    fn test_scroll_log_up() {
+        let mut app = App::new(Duration::from_secs(1));
+        for i in 0..10 {
+            app.push_log(LogEntry {
+                timestamp: format!("{}", i),
+                level: LogLevel::Info,
+                message: format!("msg {}", i),
+                fields: String::new(),
+            });
+        }
+        assert_eq!(app.log_scroll_offset, 0);
+        app.scroll_log_up();
+        assert_eq!(app.log_scroll_offset, 1);
+        app.scroll_log_up();
+        assert_eq!(app.log_scroll_offset, 2);
+    }
+
+    #[test]
+    fn test_scroll_log_up_bounded() {
+        let mut app = App::new(Duration::from_secs(1));
+        app.push_log(LogEntry {
+            timestamp: "0".into(),
+            level: LogLevel::Info,
+            message: "only".into(),
+            fields: String::new(),
+        });
+        // max_scroll = 1 - 1 = 0, so scroll_log_up should not increase
+        app.scroll_log_up();
+        assert_eq!(app.log_scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_scroll_log_down() {
+        let mut app = App::new(Duration::from_secs(1));
+        for i in 0..10 {
+            app.push_log(LogEntry {
+                timestamp: format!("{}", i),
+                level: LogLevel::Info,
+                message: format!("msg {}", i),
+                fields: String::new(),
+            });
+        }
+        app.log_scroll_offset = 5;
+        app.scroll_log_down();
+        assert_eq!(app.log_scroll_offset, 4);
+    }
+
+    #[test]
+    fn test_scroll_log_down_at_zero() {
+        let mut app = App::new(Duration::from_secs(1));
+        assert_eq!(app.log_scroll_offset, 0);
+        app.scroll_log_down();
+        assert_eq!(app.log_scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_reset_clears_scroll_offset() {
+        let mut app = App::new(Duration::from_secs(1));
+        app.log_scroll_offset = 10;
+        app.reset_stats();
+        assert_eq!(app.log_scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_scroll_empty_log() {
+        let mut app = App::new(Duration::from_secs(1));
+        app.scroll_log_up();
+        assert_eq!(app.log_scroll_offset, 0);
+        app.scroll_log_down();
+        assert_eq!(app.log_scroll_offset, 0);
     }
 }

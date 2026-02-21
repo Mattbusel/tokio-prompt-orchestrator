@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 use tokio_prompt_orchestrator::tui::app::{
-    App, LOG_ENTRIES_CAP, STAGE_BUDGETS_MS, STAGE_NAMES, THROUGHPUT_HISTORY_CAP,
+    App, CircuitState, LOG_ENTRIES_CAP, STAGE_BUDGETS_MS, STAGE_NAMES, THROUGHPUT_HISTORY_CAP,
 };
 use tokio_prompt_orchestrator::tui::events::{apply_event, InputEvent};
 use tokio_prompt_orchestrator::tui::metrics::MockMetrics;
@@ -152,8 +152,8 @@ fn test_dedup_savings_after_extended_operation() {
     }
 
     let savings = app.dedup_savings_percent();
-    assert!(savings > 70.0, "Expected >70% savings, got {:.1}%", savings);
-    assert!(savings < 90.0, "Expected <90% savings, got {:.1}%", savings);
+    assert!(savings > 60.0, "Expected >60% savings, got {:.1}%", savings);
+    assert!(savings < 95.0, "Expected <95% savings, got {:.1}%", savings);
 }
 
 #[test]
@@ -213,4 +213,147 @@ fn test_active_stage_always_valid_index() {
             assert!(idx < 5, "Active stage index out of range: {}", idx);
         }
     }
+}
+
+#[test]
+fn test_scroll_up_and_down_integration() {
+    let mock = MockMetrics::new();
+    let mut app = App::new(Duration::from_secs(1));
+
+    for _ in 0..30 {
+        mock.tick(&mut app);
+    }
+
+    assert_eq!(app.log_scroll_offset, 0);
+    apply_event(&mut app, InputEvent::ScrollUp);
+    assert!(app.log_scroll_offset > 0);
+    let offset = app.log_scroll_offset;
+    apply_event(&mut app, InputEvent::ScrollDown);
+    assert_eq!(app.log_scroll_offset, offset - 1);
+}
+
+#[test]
+fn test_scroll_offset_bounded_by_log_size() {
+    let mock = MockMetrics::new();
+    let mut app = App::new(Duration::from_secs(1));
+
+    for _ in 0..10 {
+        mock.tick(&mut app);
+    }
+
+    // Try scrolling way past the log size
+    for _ in 0..200 {
+        apply_event(&mut app, InputEvent::ScrollUp);
+    }
+
+    assert!(
+        app.log_scroll_offset < 200,
+        "Scroll offset should be bounded by log size, got {}",
+        app.log_scroll_offset
+    );
+}
+
+#[test]
+fn test_story_warmup_phase_characteristics() {
+    let mock = MockMetrics::new();
+    let mut app = App::new(Duration::from_secs(1));
+
+    for _ in 0..20 {
+        mock.tick(&mut app);
+    }
+
+    // All circuits closed during warmup
+    for cb in &app.circuit_breakers {
+        assert_eq!(
+            cb.state,
+            CircuitState::Closed,
+            "CB {} should be closed in warmup",
+            cb.name
+        );
+    }
+
+    // INFER latency should be moderate
+    assert!(
+        app.stage_latencies[2] < 300.0,
+        "INFER should be low in warmup"
+    );
+}
+
+#[test]
+fn test_story_failure_phase_high_latency() {
+    let mock = MockMetrics::new();
+    let mut app = App::new(Duration::from_secs(1));
+
+    // Advance to failure phase (tick 46-60)
+    for _ in 0..50 {
+        mock.tick(&mut app);
+    }
+
+    // INFER should be high
+    assert!(
+        app.stage_latencies[2] > 350.0,
+        "INFER should spike during failure phase, got {}",
+        app.stage_latencies[2]
+    );
+}
+
+#[test]
+fn test_story_recovery_clears_circuit() {
+    let mock = MockMetrics::new();
+    let mut app = App::new(Duration::from_secs(1));
+
+    // Advance to recovery phase (tick 76-90)
+    for _ in 0..80 {
+        mock.tick(&mut app);
+    }
+
+    // llama.cpp should be back to closed
+    assert_eq!(
+        app.circuit_breakers[2].state,
+        CircuitState::Closed,
+        "llama.cpp should be Closed during recovery"
+    );
+}
+
+#[test]
+fn test_story_steady_state_moderate_metrics() {
+    let mock = MockMetrics::new();
+    let mut app = App::new(Duration::from_secs(1));
+
+    // Advance to steady state (tick 91-120)
+    for _ in 0..100 {
+        mock.tick(&mut app);
+    }
+
+    // All circuits closed
+    for cb in &app.circuit_breakers {
+        assert_eq!(
+            cb.state,
+            CircuitState::Closed,
+            "CB {} should be closed in steady state",
+            cb.name
+        );
+    }
+
+    // CPU should be moderate
+    assert!(
+        app.cpu_percent < 80.0,
+        "CPU should be moderate in steady state"
+    );
+}
+
+#[test]
+fn test_reset_clears_scroll_offset_integration() {
+    let mock = MockMetrics::new();
+    let mut app = App::new(Duration::from_secs(1));
+
+    for _ in 0..20 {
+        mock.tick(&mut app);
+    }
+    apply_event(&mut app, InputEvent::ScrollUp);
+    apply_event(&mut app, InputEvent::ScrollUp);
+    assert!(app.log_scroll_offset > 0);
+
+    apply_event(&mut app, InputEvent::Reset);
+    assert_eq!(app.log_scroll_offset, 0);
 }

@@ -72,7 +72,10 @@ async fn test_priority_queue_ordering_end_to_end() {
         .push(Priority::Critical, make_request("critical"))
         .await
         .ok();
-    queue.push(Priority::Normal, make_request("normal")).await.ok();
+    queue
+        .push(Priority::Normal, make_request("normal"))
+        .await
+        .ok();
     queue.push(Priority::High, make_request("high")).await.ok();
 
     let (p1, _) = queue.pop().await.unwrap();

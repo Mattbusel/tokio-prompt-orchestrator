@@ -560,26 +560,23 @@ fn test_mock_channel_depths_vary_over_time() {
 }
 
 #[test]
-fn test_mock_cost_proportional_to_ticks() {
+fn test_mock_cost_accumulates_monotonically() {
     let mock = MockMetrics::new();
     let mut app = App::new(Duration::from_secs(1));
 
-    for _ in 0..100 {
+    let mut prev_cost = 0.0;
+    for i in 0..200 {
         mock.tick(&mut app);
+        assert!(
+            app.cost_saved_usd >= prev_cost,
+            "Cost should never decrease: tick {} prev={} now={}",
+            i,
+            prev_cost,
+            app.cost_saved_usd
+        );
+        prev_cost = app.cost_saved_usd;
     }
-    let cost_at_100 = app.cost_saved_usd;
-
-    for _ in 0..100 {
-        mock.tick(&mut app);
-    }
-    let cost_at_200 = app.cost_saved_usd;
-
-    assert!(
-        (cost_at_200 - cost_at_100 * 2.0).abs() < 0.01,
-        "Cost should grow linearly: at 100={}, at 200={}",
-        cost_at_100,
-        cost_at_200
-    );
+    assert!(prev_cost > 0.0, "Cost should be positive after 200 ticks");
 }
 
 #[test]

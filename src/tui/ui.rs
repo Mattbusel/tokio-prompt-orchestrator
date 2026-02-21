@@ -161,7 +161,7 @@ fn draw_too_small(f: &mut Frame, area: Rect) {
 fn draw_help_overlay(f: &mut Frame, area: Rect) {
     // Center the help popup
     let popup_width = 50.min(area.width.saturating_sub(4));
-    let popup_height = 14.min(area.height.saturating_sub(4));
+    let popup_height = 18.min(area.height.saturating_sub(4));
     let popup_x = (area.width.saturating_sub(popup_width)) / 2;
     let popup_y = (area.height.saturating_sub(popup_height)) / 2;
     let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
@@ -182,26 +182,42 @@ fn draw_help_overlay(f: &mut Frame, area: Rect) {
             Style::default().fg(Color::White),
         )),
         Line::from(Span::styled(
-            "    q / Esc    Quit",
+            "    [q] Quit              [Esc] Quit",
             Style::default().fg(Color::DarkGray),
         )),
         Line::from(Span::styled(
-            "    Ctrl+C     Force quit",
+            "    [Ctrl+C] Force quit",
             Style::default().fg(Color::DarkGray),
         )),
         Line::from(Span::styled(
-            "    p          Toggle pause",
+            "    [p] Pause / Resume",
             Style::default().fg(Color::DarkGray),
         )),
         Line::from(Span::styled(
-            "    r          Reset statistics",
+            "    [r] Reset counters",
             Style::default().fg(Color::DarkGray),
         )),
         Line::from(Span::styled(
-            "    h          Toggle this help",
+            "    [h] Toggle this help",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(Span::styled(
+            "    [↑↓] Scroll log",
             Style::default().fg(Color::DarkGray),
         )),
         Line::from(""),
+        Line::from(Span::styled(
+            "  ──────────────────────────────────────",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(Span::styled(
+            "  --mock  Synthetic 2-min story (default)",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(Span::styled(
+            "  --live  Connect to Prometheus endpoint",
+            Style::default().fg(Color::DarkGray),
+        )),
         Line::from(Span::styled(
             "  Press any key to close",
             Style::default().fg(Color::Yellow),
@@ -256,14 +272,14 @@ mod tests {
         let area_width: u16 = 120;
         let area_height: u16 = 50;
         let popup_width = 50.min(area_width.saturating_sub(4));
-        let popup_height = 14.min(area_height.saturating_sub(4));
+        let popup_height = 18.min(area_height.saturating_sub(4));
         let popup_x = (area_width.saturating_sub(popup_width)) / 2;
         let popup_y = (area_height.saturating_sub(popup_height)) / 2;
 
         assert_eq!(popup_width, 50);
-        assert_eq!(popup_height, 14);
+        assert_eq!(popup_height, 18);
         assert_eq!(popup_x, 35);
-        assert_eq!(popup_y, 18);
+        assert_eq!(popup_y, 16);
     }
 
     #[test]
@@ -271,7 +287,7 @@ mod tests {
         let area_width: u16 = 40;
         let area_height: u16 = 15;
         let popup_width = 50.min(area_width.saturating_sub(4));
-        let popup_height = 14.min(area_height.saturating_sub(4));
+        let popup_height = 18.min(area_height.saturating_sub(4));
 
         assert_eq!(popup_width, 36);
         assert_eq!(popup_height, 11);

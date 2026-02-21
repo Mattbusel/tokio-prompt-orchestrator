@@ -188,7 +188,7 @@ fn run_live(
         .enable_all()
         .build()?;
 
-    let live = LiveMetrics::new(metrics_url.to_string());
+    let mut live = LiveMetrics::new(metrics_url.to_string());
     let mut last_data_tick = Instant::now();
 
     loop {

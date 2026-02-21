@@ -321,6 +321,43 @@ ws.onmessage = (event) => {
 - **Object-Safe Workers** - Hot-swappable inference backends
 - **Session Affinity** - Deterministic sharding for optimization
 
+## TUI Dashboard
+
+Real-time terminal dashboard for monitoring the orchestrator pipeline.
+
+```bash
+# Mock mode (default) — 2-minute scripted story that loops
+cargo run --bin tui --features tui
+
+# Live mode — connect to Prometheus endpoint
+cargo run --bin tui --features tui -- --live
+
+# Custom metrics URL
+cargo run --bin tui --features tui -- --live --metrics-url http://host:9090/metrics
+```
+
+```text
+┌─ tokio-prompt-orchestrator ──────────────────────────── 2026-02-21 14:32:01 ─┐
+│ ┌─ Pipeline Flow ─────────────────────┐ ┌─ System Health ──────────────────┐  │
+│ │  [RAG]──→[ASM]──→[INF]──→[PST]──→  │ │  CPU  ████████░░  62%            │  │
+│ │  3.1ms   1.7ms  270ms   2.0ms      │ │  MEM  ██████░░░░  38%            │  │
+│ │                  ▲ active           │ │  Tasks: 210    Uptime: 1h 32m    │  │
+│ ├─ Channel Depths ────────────────────┤ ├─ Circuit Breakers ───────────────┤  │
+│ │  RAG→ASM  ████░░░░  15%  77/512    │ │  ● openai    CLOSED  (3247 ok)   │  │
+│ │  ASM→INF  ██░░░░░░   8%  41/512    │ │  ● anthropic CLOSED  (4120 ok)   │  │
+│ │  INF→PST  █████░░░  25% 256/1024   │ │  ○ llama.cpp OPEN    (opened 3s) │  │
+│ │  PST→STR  █░░░░░░░   6%  31/512    │ ├─ Dedup Savings ──────────────────┤  │
+│ ├─ Throughput (req/s) ────────────────┤ │  Requests:  12.4K  Infer: 2.8K   │  │
+│ │  ▂▃▅▇█▇▅▃▂▁▂▃▅▇█▇▅▃▂▁▂▃▅▇        │ │  Savings:   77.4%  $145.20       │  │
+│ ├─ Log ───────────────────────────────┤ └──────────────────────────────────┘  │
+│ │  14:32:01 INFO  Request deduped     key=0a3f2c session=user-42             │
+│ │  14:32:01 WARN  Circuit OPEN        worker=llama.cpp failures=5            │
+│ │  14:32:02 ERROR Worker timeout      worker=llama.cpp attempt=2/3           │
+│ └──────────────────────────────────── [q]uit [p]ause [r]eset [h]elp ─────────┘
+```
+
+Keybindings: `q` quit, `p` pause, `r` reset, `h` help, `↑↓` scroll log.
+
 ##  Monitoring & Observability
 
 ### Prometheus Metrics

@@ -26,6 +26,10 @@ pub enum InputEvent {
     Reset,
     /// User toggled help overlay.
     Help,
+    /// User pressed up arrow to scroll log.
+    ScrollUp,
+    /// User pressed down arrow to scroll log.
+    ScrollDown,
     /// A terminal resize occurred.
     Resize(u16, u16),
     /// No actionable event within the poll window.
@@ -69,6 +73,8 @@ pub fn apply_event(app: &mut App, event: InputEvent) {
         InputEvent::Pause => app.paused = !app.paused,
         InputEvent::Reset => app.reset_stats(),
         InputEvent::Help => app.show_help = !app.show_help,
+        InputEvent::ScrollUp => app.scroll_log_up(),
+        InputEvent::ScrollDown => app.scroll_log_down(),
         InputEvent::Resize(_, _) | InputEvent::None => {}
     }
 }
@@ -86,6 +92,8 @@ fn translate_key(key: KeyEvent) -> InputEvent {
         KeyCode::Char('r') | KeyCode::Char('R') => InputEvent::Reset,
         KeyCode::Char('h') | KeyCode::Char('H') => InputEvent::Help,
         KeyCode::Esc => InputEvent::Quit,
+        KeyCode::Up => InputEvent::ScrollUp,
+        KeyCode::Down => InputEvent::ScrollDown,
         _ => InputEvent::None,
     }
 }
@@ -143,9 +151,15 @@ mod tests {
     }
 
     #[test]
-    fn test_translate_key_arrow_returns_none() {
+    fn test_translate_key_up_scrolls_up() {
         let key = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
-        assert_eq!(translate_key(key), InputEvent::None);
+        assert_eq!(translate_key(key), InputEvent::ScrollUp);
+    }
+
+    #[test]
+    fn test_translate_key_down_scrolls_down() {
+        let key = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(translate_key(key), InputEvent::ScrollDown);
     }
 
     #[test]
@@ -198,5 +212,35 @@ mod tests {
         let mut app = App::new(Duration::from_secs(1));
         apply_event(&mut app, InputEvent::Resize(200, 60));
         assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn test_apply_event_scroll_up() {
+        let mut app = App::new(Duration::from_secs(1));
+        for i in 0..10 {
+            app.push_log(crate::tui::app::LogEntry {
+                timestamp: format!("{}", i),
+                level: crate::tui::app::LogLevel::Info,
+                message: format!("msg {}", i),
+                fields: String::new(),
+            });
+        }
+        apply_event(&mut app, InputEvent::ScrollUp);
+        assert_eq!(app.log_scroll_offset, 1);
+    }
+
+    #[test]
+    fn test_apply_event_scroll_down() {
+        let mut app = App::new(Duration::from_secs(1));
+        app.log_scroll_offset = 3;
+        apply_event(&mut app, InputEvent::ScrollDown);
+        assert_eq!(app.log_scroll_offset, 2);
+    }
+
+    #[test]
+    fn test_apply_event_scroll_down_at_zero() {
+        let mut app = App::new(Duration::from_secs(1));
+        apply_event(&mut app, InputEvent::ScrollDown);
+        assert_eq!(app.log_scroll_offset, 0);
     }
 }
