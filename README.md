@@ -579,5 +579,3 @@ If this project helps you, please consider giving it a star!
 ---
 
 **Built for production. Optimized for cost. Ready for scale.**
-
-Made with by the Rust community
