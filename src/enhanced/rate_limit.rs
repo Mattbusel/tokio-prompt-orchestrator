@@ -277,4 +277,161 @@ mod tests {
         assert_eq!(info.used, 2);
         assert_eq!(info.remaining, 8);
     }
+
+    // ── Hardening tests ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_zero_max_requests_blocks_all() {
+        let limiter = RateLimiter::new(0, 60);
+        assert!(
+            !limiter.check("any-session").await,
+            "zero max_requests must reject all requests"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_independent_sessions_do_not_interfere() {
+        let limiter = RateLimiter::new(2, 60);
+
+        assert!(limiter.check("alice").await);
+        assert!(limiter.check("alice").await);
+        assert!(!limiter.check("alice").await);
+
+        // Bob should still have full quota
+        assert!(limiter.check("bob").await);
+        assert!(limiter.check("bob").await);
+        assert!(!limiter.check("bob").await);
+    }
+
+    #[tokio::test]
+    async fn test_reset_restores_full_quota() {
+        let limiter = RateLimiter::new(2, 600);
+
+        assert!(limiter.check("session").await);
+        assert!(limiter.check("session").await);
+        assert!(!limiter.check("session").await);
+
+        limiter.reset("session").await;
+
+        assert!(limiter.check("session").await, "quota must be restored");
+        assert!(limiter.check("session").await);
+        assert!(!limiter.check("session").await);
+    }
+
+    #[tokio::test]
+    async fn test_get_usage_unknown_session_returns_none() {
+        let limiter = RateLimiter::new(10, 60);
+        assert!(
+            limiter.get_usage("nonexistent").is_none(),
+            "unknown session must return None"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_usage_at_limit() {
+        let limiter = RateLimiter::new(3, 60);
+
+        for _ in 0..3 {
+            limiter.check("full-session").await;
+        }
+
+        let info = limiter.get_usage("full-session").unwrap();
+        assert_eq!(info.used, 3);
+        assert_eq!(info.remaining, 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_usage_after_reset_returns_none() {
+        let limiter = RateLimiter::new(5, 60);
+
+        limiter.check("s").await;
+        assert!(limiter.get_usage("s").is_some());
+
+        limiter.reset("s").await;
+        assert!(
+            limiter.get_usage("s").is_none(),
+            "reset session must have no usage"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_large_window_does_not_overflow() {
+        // Use a large but safe window (1 year in seconds)
+        let limiter = RateLimiter::new(100, 365 * 24 * 3600);
+        assert!(limiter.check("test").await);
+    }
+
+    #[tokio::test]
+    async fn test_max_requests_exactly_one() {
+        let limiter = RateLimiter::new(1, 60);
+        assert!(limiter.check("s").await);
+        assert!(!limiter.check("s").await);
+    }
+
+    #[tokio::test]
+    async fn test_many_sessions_concurrent() {
+        let limiter = RateLimiter::new(5, 60);
+
+        let mut handles = Vec::new();
+        for i in 0..20 {
+            let l = limiter.clone();
+            handles.push(tokio::spawn(async move {
+                l.check(&format!("session-{i}")).await
+            }));
+        }
+
+        let mut ok_count = 0;
+        for h in handles {
+            if h.await.unwrap_or(false) {
+                ok_count += 1;
+            }
+        }
+        assert_eq!(ok_count, 20, "each session gets its own quota");
+    }
+
+    #[tokio::test]
+    async fn test_window_expiry_resets_count() {
+        let limiter = RateLimiter::new(1, 1); // 1 req per 1 second
+
+        assert!(limiter.check("s").await);
+        assert!(!limiter.check("s").await);
+
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+        assert!(limiter.check("s").await, "window must have reset");
+    }
+
+    #[cfg(feature = "rate-limiting")]
+    #[test]
+    fn test_governor_zero_max_returns_err() {
+        let result = RateLimiter::new_governor(0, 60);
+        assert!(result.is_err(), "zero max_requests must return Err");
+    }
+
+    #[cfg(feature = "rate-limiting")]
+    #[tokio::test]
+    async fn test_governor_basic_rate_limiting() {
+        let limiter = RateLimiter::new_governor(100, 1).unwrap();
+        assert!(limiter.check("g-session").await);
+    }
+
+    #[cfg(feature = "rate-limiting")]
+    #[tokio::test]
+    async fn test_governor_reset_clears_session() {
+        let limiter = RateLimiter::new_governor(100, 1).unwrap();
+        limiter.check("g-session").await;
+        limiter.reset("g-session").await;
+        // No panic and check still works
+        assert!(limiter.check("g-session").await);
+    }
+
+    #[cfg(feature = "rate-limiting")]
+    #[test]
+    fn test_governor_usage_returns_none() {
+        let limiter = RateLimiter::new_governor(100, 1).unwrap();
+        assert!(
+            limiter.get_usage("any").is_none(),
+            "governor backend does not expose usage stats"
+        );
+    }
 }

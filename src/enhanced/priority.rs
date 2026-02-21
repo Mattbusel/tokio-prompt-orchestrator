@@ -344,4 +344,211 @@ mod tests {
         assert_eq!(*stats.by_priority.get(&Priority::Normal).unwrap(), 1);
         assert_eq!(*stats.by_priority.get(&Priority::Low).unwrap(), 1);
     }
+
+    // ── Hardening tests ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_empty_queue_pop_returns_none() {
+        let queue = PriorityQueue::new();
+        assert!(queue.pop().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_empty_queue_is_empty_returns_true() {
+        let queue = PriorityQueue::new();
+        assert!(queue.is_empty().await);
+        assert_eq!(queue.len().await, 0);
+    }
+
+    #[test]
+    fn test_priority_ordering_critical_gt_high_gt_normal_gt_low() {
+        assert!(Priority::Critical > Priority::High);
+        assert!(Priority::High > Priority::Normal);
+        assert!(Priority::Normal > Priority::Low);
+    }
+
+    #[test]
+    fn test_priority_ordering_is_transitive() {
+        let levels = [
+            Priority::Low,
+            Priority::Normal,
+            Priority::High,
+            Priority::Critical,
+        ];
+        for i in 0..levels.len() {
+            for j in (i + 1)..levels.len() {
+                assert!(
+                    levels[i] < levels[j],
+                    "{:?} must be < {:?}",
+                    levels[i],
+                    levels[j]
+                );
+                for k in (j + 1)..levels.len() {
+                    // If a < b and b < c then a < c
+                    assert!(
+                        levels[i] < levels[k],
+                        "transitivity: {:?} < {:?} < {:?}",
+                        levels[i],
+                        levels[j],
+                        levels[k]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_priority_equality() {
+        assert_eq!(Priority::Normal, Priority::Normal);
+        assert_ne!(Priority::Low, Priority::High);
+    }
+
+    #[test]
+    fn test_priority_default_is_normal() {
+        assert_eq!(Priority::default(), Priority::Normal);
+    }
+
+    #[test]
+    fn test_from_name_valid_values() {
+        assert_eq!(Priority::from_name("low"), Some(Priority::Low));
+        assert_eq!(Priority::from_name("normal"), Some(Priority::Normal));
+        assert_eq!(Priority::from_name("high"), Some(Priority::High));
+        assert_eq!(Priority::from_name("critical"), Some(Priority::Critical));
+    }
+
+    #[test]
+    fn test_from_name_case_insensitive() {
+        assert_eq!(Priority::from_name("HIGH"), Some(Priority::High));
+        assert_eq!(Priority::from_name("Critical"), Some(Priority::Critical));
+        assert_eq!(Priority::from_name("LOW"), Some(Priority::Low));
+    }
+
+    #[test]
+    fn test_from_name_invalid_returns_none() {
+        assert_eq!(Priority::from_name(""), None);
+        assert_eq!(Priority::from_name("urgent"), None);
+        assert_eq!(Priority::from_name("medium"), None);
+    }
+
+    #[tokio::test]
+    async fn test_clear_empties_queue() {
+        let queue = PriorityQueue::new();
+        queue
+            .push(Priority::High, create_request("a"))
+            .await
+            .unwrap();
+        queue
+            .push(Priority::Low, create_request("b"))
+            .await
+            .unwrap();
+
+        assert_eq!(queue.len().await, 2);
+        queue.clear().await;
+        assert!(queue.is_empty().await);
+        assert!(queue.pop().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_queue_default_trait() {
+        let queue = PriorityQueue::default();
+        assert!(queue.is_empty().await);
+    }
+
+    #[tokio::test]
+    async fn test_with_capacity_zero_rejects_all() {
+        let queue = PriorityQueue::with_capacity(0);
+        let result = queue.push(Priority::Normal, create_request("x")).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_queue_error_display() {
+        let err = QueueError::QueueFull;
+        assert_eq!(format!("{err}"), "queue full");
+    }
+
+    #[tokio::test]
+    async fn test_fifo_preserved_across_all_priorities() {
+        let queue = PriorityQueue::new();
+
+        // Push 2 of each priority in known order
+        queue
+            .push(Priority::Normal, create_request("n1"))
+            .await
+            .unwrap();
+        queue
+            .push(Priority::Normal, create_request("n2"))
+            .await
+            .unwrap();
+        queue
+            .push(Priority::High, create_request("h1"))
+            .await
+            .unwrap();
+        queue
+            .push(Priority::High, create_request("h2"))
+            .await
+            .unwrap();
+        queue
+            .push(Priority::Low, create_request("l1"))
+            .await
+            .unwrap();
+        queue
+            .push(Priority::Low, create_request("l2"))
+            .await
+            .unwrap();
+
+        // Pop all — verify FIFO within each priority band
+        assert_eq!(queue.pop().await.unwrap().1.input, "h1");
+        assert_eq!(queue.pop().await.unwrap().1.input, "h2");
+        assert_eq!(queue.pop().await.unwrap().1.input, "n1");
+        assert_eq!(queue.pop().await.unwrap().1.input, "n2");
+        assert_eq!(queue.pop().await.unwrap().1.input, "l1");
+        assert_eq!(queue.pop().await.unwrap().1.input, "l2");
+    }
+
+    #[tokio::test]
+    async fn test_stats_on_empty_queue() {
+        let queue = PriorityQueue::new();
+        let stats = queue.stats().await;
+        assert_eq!(stats.total, 0);
+        assert!(stats.by_priority.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_push_then_pop_single_item() {
+        let queue = PriorityQueue::new();
+        queue
+            .push(Priority::Critical, create_request("only"))
+            .await
+            .unwrap();
+
+        let (prio, req) = queue.pop().await.unwrap();
+        assert_eq!(prio, Priority::Critical);
+        assert_eq!(req.input, "only");
+        assert!(queue.is_empty().await);
+    }
+
+    #[tokio::test]
+    async fn test_queue_len_tracks_correctly() {
+        let queue = PriorityQueue::new();
+        assert_eq!(queue.len().await, 0);
+
+        queue
+            .push(Priority::Normal, create_request("a"))
+            .await
+            .unwrap();
+        assert_eq!(queue.len().await, 1);
+
+        queue
+            .push(Priority::Normal, create_request("b"))
+            .await
+            .unwrap();
+        assert_eq!(queue.len().await, 2);
+
+        queue.pop().await;
+        assert_eq!(queue.len().await, 1);
+
+        queue.pop().await;
+        assert_eq!(queue.len().await, 0);
+    }
 }

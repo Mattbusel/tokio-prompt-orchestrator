@@ -11,7 +11,7 @@ pub mod rate_limit;
 pub mod retry;
 
 // Re-exports
-pub use cache::CacheLayer;
+pub use cache::{cache_key, CacheLayer};
 pub use circuit_breaker::{CircuitBreaker, CircuitStatus};
 pub use dedup::{DeduplicationResult, Deduplicator};
 pub use priority::{Priority, PriorityQueue};

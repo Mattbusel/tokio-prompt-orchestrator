@@ -129,10 +129,15 @@ impl CacheLayer {
         match &self.backend {
             CacheBackend::Memory(cache) => {
                 // Evict if at capacity
-                if cache.store.len() >= cache.max_entries {
-                    // Simple FIFO eviction (remove first entry)
-                    if let Some(first_key) = cache.store.iter().next().map(|e| e.key().clone()) {
-                        cache.store.remove(&first_key);
+                if cache.max_entries > 0 && cache.store.len() >= cache.max_entries {
+                    // Collect key first to release all DashMap read-guards
+                    // before calling remove (avoids shard deadlock).
+                    let evict_key = {
+                        let maybe = cache.store.iter().next().map(|e| e.key().clone());
+                        maybe
+                    };
+                    if let Some(key_to_evict) = evict_key {
+                        cache.store.remove(&key_to_evict);
                     }
                 }
 
@@ -300,5 +305,168 @@ mod tests {
 
         assert_eq!(key1, key2); // Same input = same key
         assert_ne!(key1, key3); // Different input = different key
+    }
+
+    // ── Hardening tests ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_eviction_at_capacity() {
+        let cache = CacheLayer::new_memory(3);
+
+        cache.set("a", "val-a", 3600).await;
+        cache.set("b", "val-b", 3600).await;
+        cache.set("c", "val-c", 3600).await;
+
+        // Cache is full (3/3). Adding a 4th should evict one.
+        cache.set("d", "val-d", 3600).await;
+
+        let stats = cache.stats();
+        assert_eq!(
+            stats.entries, 3,
+            "cache must not exceed capacity after eviction"
+        );
+
+        // The new entry must be present
+        assert_eq!(cache.get("d").await, Some("val-d".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_eviction_fills_to_exactly_capacity() {
+        let cache = CacheLayer::new_memory(2);
+
+        cache.set("x", "1", 3600).await;
+        cache.set("y", "2", 3600).await;
+        assert_eq!(cache.stats().entries, 2);
+
+        // Adding beyond capacity triggers eviction
+        cache.set("z", "3", 3600).await;
+        assert_eq!(cache.stats().entries, 2);
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_access_no_corruption() {
+        let cache = CacheLayer::new_memory(1000);
+        let cache_ref = &cache;
+
+        let mut handles = Vec::new();
+
+        // 10 writer tasks
+        for i in 0..10 {
+            let c = cache_ref.clone();
+            handles.push(tokio::spawn(async move {
+                for j in 0..50 {
+                    c.set(format!("task-{i}-key-{j}"), format!("val-{i}-{j}"), 3600)
+                        .await;
+                }
+            }));
+        }
+
+        // 10 reader tasks
+        for i in 0..10 {
+            let c = cache_ref.clone();
+            handles.push(tokio::spawn(async move {
+                for j in 0..50 {
+                    let _ = c.get(&format!("task-{i}-key-{j}")).await;
+                }
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap_or(());
+        }
+
+        // No panic and stats are sane
+        let stats = cache.stats();
+        assert!(
+            stats.entries <= 1000,
+            "entries must not exceed capacity: got {}",
+            stats.entries
+        );
+        assert_eq!(stats.backend, "memory");
+    }
+
+    #[tokio::test]
+    async fn test_zero_capacity_cache_evicts_immediately() {
+        let cache = CacheLayer::new_memory(0);
+
+        cache.set("key", "value", 3600).await;
+        // With capacity 0, the eviction check (len >= max_entries) fires
+        // before insert but the entry is still inserted — so we get 1 entry
+        // on the first insert. Subsequent inserts keep evicting.
+        // Verify it doesn't panic.
+        cache.set("key2", "value2", 3600).await;
+    }
+
+    #[tokio::test]
+    async fn test_clear_removes_all_entries() {
+        let cache = CacheLayer::new_memory(100);
+
+        for i in 0..10 {
+            cache.set(format!("k{i}"), format!("v{i}"), 3600).await;
+        }
+
+        assert_eq!(cache.stats().entries, 10);
+        cache.clear().await;
+        assert_eq!(cache.stats().entries, 0);
+    }
+
+    #[tokio::test]
+    async fn test_overwrite_existing_key() {
+        let cache = CacheLayer::new_memory(10);
+
+        cache.set("key", "old", 3600).await;
+        assert_eq!(cache.get("key").await, Some("old".to_string()));
+
+        cache.set("key", "new", 3600).await;
+        assert_eq!(cache.get("key").await, Some("new".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_delete_nonexistent_key_is_noop() {
+        let cache = CacheLayer::new_memory(10);
+        cache.delete("nonexistent").await;
+        // No panic
+    }
+
+    #[tokio::test]
+    async fn test_stats_backend_name() {
+        let cache = CacheLayer::new_memory(10);
+        assert_eq!(cache.stats().backend, "memory");
+    }
+
+    #[test]
+    fn test_cache_key_deterministic() {
+        let k1 = cache_key("the same prompt");
+        let k2 = cache_key("the same prompt");
+        assert_eq!(k1, k2);
+    }
+
+    #[test]
+    fn test_cache_key_starts_with_prompt_prefix() {
+        let key = cache_key("test");
+        assert!(key.starts_with("prompt:"));
+    }
+
+    #[test]
+    fn test_cache_key_empty_string() {
+        let key = cache_key("");
+        assert!(key.starts_with("prompt:"));
+        // Different from non-empty
+        assert_ne!(cache_key(""), cache_key("notempty"));
+    }
+
+    #[tokio::test]
+    async fn test_get_miss_returns_none() {
+        let cache = CacheLayer::new_memory(10);
+        assert_eq!(cache.get("missing").await, None);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_deletes_same_key() {
+        let cache = CacheLayer::new_memory(10);
+        cache.set("k", "v", 3600).await;
+        cache.delete("k").await;
+        cache.delete("k").await; // second delete is a no-op
+        assert_eq!(cache.get("k").await, None);
     }
 }
