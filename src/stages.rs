@@ -32,6 +32,7 @@
 //! - Stream output: 256
 
 use crate::{
+    enhanced::CircuitBreaker,
     metrics, send_with_shed, AssembleOutput, InferenceOutput, ModelWorker, PostOutput,
     PromptRequest, RagOutput,
 };
@@ -61,6 +62,11 @@ pub struct PipelineHandles {
     /// collector task) can `.take()` ownership. Callers who do not need
     /// pipeline output simply ignore this field.
     pub output_rx: tokio::sync::Mutex<Option<mpsc::Receiver<PostOutput>>>,
+    /// Circuit breaker guarding the inference stage.
+    ///
+    /// Exposed so callers (e.g. MCP server) can query live open/closed/half-open
+    /// state without hardcoding.
+    pub circuit_breaker: CircuitBreaker,
 }
 
 /// Spawn the complete 5-stage pipeline
@@ -88,10 +94,25 @@ pub fn spawn_pipeline(worker: Arc<dyn ModelWorker>) -> PipelineHandles {
     let (post_tx, post_rx) = mpsc::channel::<PostOutput>(512);
     let (output_tx, output_rx) = mpsc::channel::<PostOutput>(256);
 
+    // Create a shared circuit breaker for the inference stage.
+    // Threshold: 5 consecutive failures open the circuit.
+    // Success rate: 80% of recent requests must succeed to close.
+    // Timeout: 60 seconds before half-open probe.
+    let circuit_breaker = CircuitBreaker::new(
+        5,
+        0.8,
+        std::time::Duration::from_secs(60),
+    );
+
     // Spawn each stage
     let rag = tokio::spawn(rag_stage(input_rx, rag_tx));
     let assemble = tokio::spawn(assemble_stage(rag_rx, assemble_tx));
-    let inference = tokio::spawn(inference_stage(assemble_rx, inference_tx, worker));
+    let inference = tokio::spawn(inference_stage(
+        assemble_rx,
+        inference_tx,
+        worker,
+        circuit_breaker.clone(),
+    ));
     let post = tokio::spawn(post_stage(inference_rx, post_tx));
     let stream = tokio::spawn(stream_stage(post_rx, output_tx));
 
@@ -103,6 +124,7 @@ pub fn spawn_pipeline(worker: Arc<dyn ModelWorker>) -> PipelineHandles {
         stream,
         input_tx,
         output_rx: tokio::sync::Mutex::new(Some(output_rx)),
+        circuit_breaker,
     }
 }
 
@@ -257,6 +279,7 @@ async fn inference_stage(
     mut rx: mpsc::Receiver<AssembleOutput>,
     tx: mpsc::Sender<InferenceOutput>,
     worker: Arc<dyn ModelWorker>,
+    breaker: CircuitBreaker,
 ) {
     info!(target: "orchestrator::pipeline", "Inference stage started");
 
@@ -278,8 +301,12 @@ async fn inference_stage(
 
         metrics::inc_request("inference");
 
-        // Call model worker — prompt content is NOT logged
-        match worker.infer(&assemble_output.prompt).await {
+        // Call model worker through the circuit breaker — prompt content is NOT logged
+        let prompt = assemble_output.prompt.clone();
+        let w = Arc::clone(&worker);
+        let cb_result = breaker.call(|| async move { w.infer(&prompt).await }).await;
+
+        match cb_result {
             Ok(tokens) => {
                 let elapsed = start.elapsed();
                 metrics::record_stage_latency("inference", elapsed);
@@ -304,7 +331,23 @@ async fn inference_stage(
                     break;
                 }
             }
-            Err(e) => {
+            Err(crate::enhanced::circuit_breaker::CircuitBreakerError::Open) => {
+                let elapsed = start.elapsed();
+                metrics::record_stage_latency("inference", elapsed);
+                Span::current().record("duration_ms", elapsed.as_millis() as u64);
+                Span::current().record("outcome", "err");
+                Span::current().record("error_kind", "circuit_open");
+
+                warn!(
+                    target: "orchestrator::pipeline",
+                    session_id = %session_id,
+                    request_id = %request_id,
+                    "Inference rejected: circuit breaker open"
+                );
+                metrics::inc_error("inference", "circuit_open");
+                metrics::inc_shed("inference");
+            }
+            Err(crate::enhanced::circuit_breaker::CircuitBreakerError::Failed(e)) => {
                 let elapsed = start.elapsed();
                 metrics::record_stage_latency("inference", elapsed);
                 Span::current().record("duration_ms", elapsed.as_millis() as u64);
