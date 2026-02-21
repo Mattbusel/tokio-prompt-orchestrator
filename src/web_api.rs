@@ -227,6 +227,7 @@ async fn infer_handler(
 
     let prompt_req = PromptRequest {
         session: SessionId::new(session_id),
+        request_id: request_id.clone(),
         input: req.prompt,
         meta: req.metadata,
     };
@@ -342,6 +343,7 @@ async fn websocket_stream(mut socket: WebSocket, state: Arc<AppState>) {
                     .unwrap_or_else(|| format!("ws-{}", request_id));
                 let prompt_req = PromptRequest {
                     session: SessionId::new(session_id),
+                    request_id: request_id.clone(),
                     input: req.prompt,
                     meta: req.metadata,
                 };

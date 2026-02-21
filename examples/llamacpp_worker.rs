@@ -67,6 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let request = PromptRequest {
             session: SessionId::new(session_id),
             input: prompt.to_string(),
+            request_id: "example-req-0".to_string(),
             meta: {
                 let mut meta = HashMap::new();
                 meta.insert("backend".to_string(), "llama.cpp".to_string());

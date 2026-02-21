@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git clone:*)",
+      "Bash(git init:*)",
+      "Bash(git remote add:*)",
+      "Bash(git fetch:*)",
+      "Bash(git checkout:*)",
+      "Bash(python3:*)",
+      "Bash(chmod:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(cargo build:*)",
+      "Bash(xargs cat:*)",
+      "Bash(bash ./scripts/panic_scan.sh)",
+      "Bash(cargo test:*)",
+      "Bash(bash \"C:/Users/Matthew/Tokio Prompt/scripts/ratio_check.sh\")",
+      "Bash(powershell.exe -NoProfile:*)",
+      "Bash(bash \"C:/Users/Matthew/Tokio Prompt/scripts/ratio_check.sh\" --verbose)",
+      "Bash(echo:*)",
+      "Bash(bash scripts/ratio_check.sh --verbose)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(cargo fmt:*)",
+      "Bash(bash scripts/panic_scan.sh)",
+      "Bash(git push:*)",
+      "Bash(git pull:*)",
+      "Bash(git merge:*)",
+      "Bash(bash \"C:\\\\Users\\\\Matthew\\\\Tokio Prompt/scripts/ratio_check.sh\")",
+      "Bash(bash scripts/ratio_check.sh:*)"
+    ]
+  }
+}

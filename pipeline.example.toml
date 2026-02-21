@@ -1,88 +1,60 @@
-# Example pipeline configuration (ROADMAP - not yet implemented)
-# 
-# Future: Load this via serde to create declarative DAG pipelines
+# Example pipeline configuration for tokio-prompt-orchestrator
+#
+# Usage: cargo run -- --config pipeline.example.toml
+#
+# Generate JSON Schema for IDE autocomplete:
+#   cargo run -- schema > pipeline.schema.json
 
 [pipeline]
-name = "llm-orchestrator-v1"
-version = "0.1.0"
+name = "production"
+version = "1.0"
+description = "Production pipeline with OpenAI GPT-4"
 
-# Global settings
-[pipeline.settings]
-max_concurrent_requests = 1000
-graceful_shutdown_timeout_secs = 30
-enable_metrics = true
-metrics_backend = "prometheus" # or "otlp", "statsd"
+# ── Stage Configuration ──────────────────────────────────────────────────
 
-# Stage definitions
-[[stages]]
-name = "rag"
-type = "retrieval"
-workers = 4
-channel_size = 512
-timeout_ms = 1000
-
-[stages.config]
-vector_db = "pinecone"
-embedding_model = "text-embedding-ada-002"
-top_k = 5
-similarity_threshold = 0.7
-
-[[stages]]
-name = "assemble"
-type = "transform"
-workers = 4
-channel_size = 512
-timeout_ms = 100
-
-[stages.config]
-template = """
-Context: {context}
-
-User: {input}Assistant: {response}
-"""
-
-[[stages]]
-name = "inference"
-type = "model"
-workers = 8
-channel_size = 1024
-timeout_ms = 5000
-
-[stages.config]
-worker_type = "vllm"
-model_name = "meta-llama/Llama-2-70b-chat-hf"
-max_tokens = 512
-temperature = 0.7
-gpu_memory_utilization = 0.9
-
-[[stages]]
-name = "post"
-type = "transform"
-workers = 4
-channel_size = 512
-timeout_ms = 200
-
-[stages.config]
-filters = ["content_moderation", "pii_redaction"]
-format = "markdown"
-
-[[stages]]
-name = "stream"
-type = "output"
-workers = 2
-channel_size = 256
-timeout_ms = 100
-
-[stages.config]
-protocol = "sse" # or "websocket", "grpc"
-buffer_size = 4096
-
-# Metrics configuration
-[metrics]
+[stages.rag]
 enabled = true
-port = 9090
-path = "/metrics"
+timeout_ms = 5000
+max_context_tokens = 2048
+# channel_capacity = 512  # optional, defaults to 512
 
-[metrics.labels]
-environment = "production"
-region = "us-east-1"
+[stages.assemble]
+enabled = true
+# channel_capacity = 512  # defaults to 512
+
+[stages.inference]
+worker = "open_ai"
+model = "gpt-4"
+max_tokens = 1024
+temperature = 0.7
+timeout_ms = 30000
+
+[stages.post_process]
+enabled = true
+
+[stages.stream]
+enabled = true
+
+# ── Resilience ───────────────────────────────────────────────────────────
+
+[resilience]
+retry_attempts = 3
+retry_base_ms = 100          # exponential backoff base
+retry_max_ms = 5000          # backoff cap
+circuit_breaker_threshold = 5
+circuit_breaker_timeout_s = 60
+circuit_breaker_success_rate = 0.8
+
+# ── Deduplication ────────────────────────────────────────────────────────
+
+[deduplication]
+enabled = true
+window_s = 300               # 5-minute dedup window
+max_entries = 10000
+
+# ── Observability ────────────────────────────────────────────────────────
+
+[observability]
+log_format = "json"
+metrics_port = 9090
+# tracing_endpoint = "http://jaeger:14268"  # optional OTLP endpoint

@@ -27,7 +27,9 @@ use dashmap::DashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
-use tracing::{debug, warn};
+use tracing::debug;
+#[cfg(feature = "caching")]
+use tracing::warn;
 
 /// Cache entry with expiration
 #[derive(Clone)]

@@ -18,9 +18,9 @@ use tokio_prompt_orchestrator::{
     enhanced::{
         circuit_breaker::CircuitBreakerError, dedup, CircuitBreaker, Deduplicator, RetryPolicy,
     },
-    spawn_pipeline, EchoWorker, ModelWorker, PromptRequest, SessionId,
+    spawn_pipeline, EchoWorker, ModelWorker,
 };
-use tracing::{info, warn, Level};
+use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 #[tokio::main]
@@ -37,7 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create worker (simulating occasional failures)
     let worker: Arc<dyn ModelWorker> = Arc::new(EchoWorker::with_delay(100));
-    let handles = spawn_pipeline(worker);
+    let _handles = spawn_pipeline(worker);
     info!("✅ Pipeline spawned");
 
     // Initialize high-impact features
@@ -102,7 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("   Simulating service failures...");
 
     let mut failure_count = 0;
-    let mut success_count = 0;
+    let mut _success_count = 0;
 
     // Simulate failing service
     for i in 1..=10 {
@@ -120,7 +120,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         match result {
             Ok(_) => {
-                success_count += 1;
+                _success_count += 1;
                 info!("   Request {}: ✅ Success", i);
             }
             Err(CircuitBreakerError::Open) => {

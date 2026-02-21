@@ -45,15 +45,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("✅ Pipeline spawned");
 
     // Create cache layer (in-memory)
-    let cache = enhanced::CacheLayer::new_memory(1000);
+    let _cache = enhanced::CacheLayer::new_memory(1000);
     info!("✅ Cache layer initialized (1000 entries)");
 
     // Create rate limiter (100 requests per 60 seconds)
-    let rate_limiter = enhanced::RateLimiter::new(100, 60);
+    let _rate_limiter = enhanced::RateLimiter::new(100, 60);
     info!("✅ Rate limiter initialized (100 req/min)");
 
     // Create priority queue
-    let priority_queue = enhanced::PriorityQueue::new();
+    let _priority_queue = enhanced::PriorityQueue::new();
     info!("✅ Priority queue initialized");
 
     info!("");

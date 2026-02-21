@@ -12,6 +12,7 @@
 //! # async fn main() {
 //! # let make_req = || PromptRequest {
 //! #     session: SessionId::new("s"),
+//! #     request_id: String::new(),
 //! #     input: String::new(),
 //! #     meta: HashMap::new(),
 //! # };
@@ -237,6 +238,7 @@ mod tests {
     fn create_request(id: &str) -> PromptRequest {
         PromptRequest {
             session: SessionId::new(id),
+            request_id: format!("test-{id}"),
             input: id.to_string(),
             meta: HashMap::new(),
         }

@@ -95,6 +95,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let request = PromptRequest {
                 session: SessionId::new(format!("session-{}", i % 10)),
                 input: format!("Request {} to pipeline {}", i, pipeline_id),
+                request_id: format!("example-req-{i}"),
                 meta: {
                     let mut meta = HashMap::new();
                     meta.insert("pipeline_id".to_string(), pipeline_id.to_string());

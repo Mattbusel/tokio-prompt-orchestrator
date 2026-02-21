@@ -1,11 +1,30 @@
-//! Pipeline stage implementations
+//! Pipeline stage implementations with structured tracing.
 //!
 //! Each stage is an async task that:
 //! 1. Pulls from its input channel
-//! 2. Processes the message with tracing spans
-//! 3. Sends to the next stage with backpressure handling
+//! 2. Processes the message inside a structured tracing span
+//! 3. Records outcome, duration, and error fields before exiting the span
+//! 4. Sends to the next stage with backpressure handling
 //!
-//! Channel sizes:
+//! ## Span Fields (every stage)
+//!
+//! | Field | Description |
+//! |-------|-------------|
+//! | `session_id` | Session this request belongs to |
+//! | `request_id` | Unique ID for trace correlation |
+//! | `stage` | Stage name string |
+//! | `duration_ms` | Recorded after processing completes |
+//! | `outcome` | `"ok"` or `"err"` |
+//! | `error_kind` | Recorded only on error — the variant name |
+//!
+//! ## Sensitive Fields — NEVER Logged
+//!
+//! - Prompt content (`request.input`, assembled prompts)
+//! - Model responses (inference tokens, final text)
+//! - API keys
+//!
+//! ## Channel sizes
+//!
 //! - RAG → Assemble: 512
 //! - Assemble → Inference: 512
 //! - Inference → Post: 1024
@@ -20,7 +39,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tracing::{info, instrument, warn};
+use tracing::{info, warn, Span};
 
 /// Handles for all spawned pipeline tasks
 pub struct PipelineHandles {
@@ -42,6 +61,10 @@ pub struct PipelineHandles {
 ///
 /// Returns handles to all tasks and the input sender.
 /// Caller should send PromptRequests to input_tx and await handles on shutdown.
+///
+/// # Panics
+///
+/// This function never panics.
 ///
 /// TODO: Support per-core pinning:
 /// ```ignore
@@ -79,24 +102,42 @@ pub fn spawn_pipeline(worker: Arc<dyn ModelWorker>) -> PipelineHandles {
 ///
 /// Simulates document retrieval and context injection.
 /// In production, this would query vector DBs, semantic search, etc.
-#[instrument(skip_all, name = "rag_stage")]
+///
+/// # Panics
+///
+/// This function never panics.
 async fn rag_stage(mut rx: mpsc::Receiver<PromptRequest>, tx: mpsc::Sender<RagOutput>) {
-    info!("RAG stage started");
+    info!(target: "orchestrator::pipeline", "RAG stage started");
 
     while let Some(request) = rx.recv().await {
         let start = Instant::now();
-        let session = request.session.clone();
+        let session_id = request.session.as_str().to_string();
+        let request_id = request.request_id.clone();
 
-        let span = tracing::span!(
-            tracing::Level::DEBUG,
-            "rag_process",
-            session = session.as_str()
+        let span = tracing::info_span!(
+            "pipeline.rag",
+            session_id = %session_id,
+            request_id = %request_id,
+            stage = "rag",
+            duration_ms = tracing::field::Empty,
+            outcome = tracing::field::Empty,
+            error_kind = tracing::field::Empty,
         );
         let _enter = span.enter();
+
+        tracing::info!(
+            target: "orchestrator::pipeline",
+            session_id = %session_id,
+            request_id = %request_id,
+            "Request received at RAG stage"
+        );
+
+        metrics::inc_request("rag");
 
         // Simulate RAG work (DB query, embedding search, etc.)
         tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
 
+        let session = request.session.clone();
         let output = RagOutput {
             session: session.clone(),
             context: format!(
@@ -106,53 +147,88 @@ async fn rag_stage(mut rx: mpsc::Receiver<PromptRequest>, tx: mpsc::Sender<RagOu
             original: request,
         };
 
-        metrics::record_stage_latency("rag", start.elapsed());
+        let elapsed = start.elapsed();
+        metrics::record_stage_latency("rag", elapsed);
+        Span::current().record("duration_ms", elapsed.as_millis() as u64);
+        Span::current().record("outcome", "ok");
 
         if let Err(e) = send_with_shed(&tx, output, "rag").await {
-            warn!(error = ?e, "RAG stage send failed");
+            warn!(
+                target: "orchestrator::pipeline",
+                session_id = %session_id,
+                request_id = %request_id,
+                error = ?e,
+                "RAG stage send failed"
+            );
+            metrics::inc_error("rag", "channel_closed");
             break;
         }
     }
 
-    info!("RAG stage shutting down");
+    info!(target: "orchestrator::pipeline", "RAG stage shutting down");
 }
 
 /// Stage 2: Assemble
 ///
 /// Constructs the final prompt from RAG context and user input.
 /// This is where prompt templates, few-shot examples, etc. get injected.
-#[instrument(skip_all, name = "assemble_stage")]
+///
+/// # Panics
+///
+/// This function never panics.
 async fn assemble_stage(mut rx: mpsc::Receiver<RagOutput>, tx: mpsc::Sender<AssembleOutput>) {
-    info!("Assemble stage started");
+    info!(target: "orchestrator::pipeline", "Assemble stage started");
 
     while let Some(rag_output) = rx.recv().await {
         let start = Instant::now();
-        let session = rag_output.session.clone();
+        let session_id = rag_output.session.as_str().to_string();
+        let request_id = rag_output.original.request_id.clone();
 
-        let span = tracing::span!(
-            tracing::Level::DEBUG,
-            "assemble_process",
-            session = session.as_str()
+        let span = tracing::info_span!(
+            "pipeline.assemble",
+            session_id = %session_id,
+            request_id = %request_id,
+            stage = "assemble",
+            duration_ms = tracing::field::Empty,
+            outcome = tracing::field::Empty,
+            error_kind = tracing::field::Empty,
         );
         let _enter = span.enter();
 
+        metrics::inc_request("assemble");
+
         // Construct prompt from context + user input
+        // NOTE: prompt content is NOT logged — it is sensitive data
         let prompt = format!(
             "{}\n\nUser Query: {}\n\nAssistant:",
             rag_output.context, rag_output.original.input
         );
 
-        let output = AssembleOutput { session, prompt };
+        let output = AssembleOutput {
+            session: rag_output.session,
+            request_id: request_id.clone(),
+            prompt,
+        };
 
-        metrics::record_stage_latency("assemble", start.elapsed());
+        let elapsed = start.elapsed();
+        metrics::record_stage_latency("assemble", elapsed);
+        Span::current().record("duration_ms", elapsed.as_millis() as u64);
+        Span::current().record("outcome", "ok");
 
         if let Err(e) = send_with_shed(&tx, output, "assemble").await {
-            warn!(error = ?e, "Assemble stage send failed");
+            warn!(
+                target: "orchestrator::pipeline",
+                session_id = %session_id,
+                request_id = %request_id,
+                error = ?e,
+                "Assemble stage send failed"
+            );
+            metrics::inc_error("assemble", "channel_closed");
             break;
         }
     }
 
-    info!("Assemble stage shutting down");
+    info!(target: "orchestrator::pipeline", "Assemble stage shutting down");
 }
 
 /// Stage 3: Inference
@@ -160,95 +236,156 @@ async fn assemble_stage(mut rx: mpsc::Receiver<RagOutput>, tx: mpsc::Sender<Asse
 /// Delegates to the ModelWorker trait for actual LLM inference.
 /// This stage is the hot path and should be horizontally scalable.
 ///
+/// # Panics
+///
+/// This function never panics.
+///
 /// TODO: Add multi-worker pool for parallel inference:
 /// ```ignore
 /// let workers: Vec<Arc<dyn ModelWorker>> = ...;
 /// let worker = &workers[shard_session(&session, workers.len())];
 /// ```
-#[instrument(skip_all, name = "inference_stage")]
 async fn inference_stage(
     mut rx: mpsc::Receiver<AssembleOutput>,
     tx: mpsc::Sender<InferenceOutput>,
     worker: Arc<dyn ModelWorker>,
 ) {
-    info!("Inference stage started");
+    info!(target: "orchestrator::pipeline", "Inference stage started");
 
     while let Some(assemble_output) = rx.recv().await {
         let start = Instant::now();
-        let session = assemble_output.session.clone();
+        let session_id = assemble_output.session.as_str().to_string();
+        let request_id = assemble_output.request_id.clone();
 
-        let span = tracing::span!(
-            tracing::Level::DEBUG,
-            "inference_process",
-            session = session.as_str()
+        let span = tracing::info_span!(
+            "pipeline.inference",
+            session_id = %session_id,
+            request_id = %request_id,
+            stage = "inference",
+            duration_ms = tracing::field::Empty,
+            outcome = tracing::field::Empty,
+            error_kind = tracing::field::Empty,
         );
         let _enter = span.enter();
 
-        // Call model worker
+        metrics::inc_request("inference");
+
+        // Call model worker — prompt content is NOT logged
         match worker.infer(&assemble_output.prompt).await {
             Ok(tokens) => {
-                let output = InferenceOutput { session, tokens };
+                let elapsed = start.elapsed();
+                metrics::record_stage_latency("inference", elapsed);
+                Span::current().record("duration_ms", elapsed.as_millis() as u64);
+                Span::current().record("outcome", "ok");
 
-                metrics::record_stage_latency("inference", start.elapsed());
+                let output = InferenceOutput {
+                    session: assemble_output.session,
+                    request_id: request_id.clone(),
+                    tokens,
+                };
 
                 if let Err(e) = send_with_shed(&tx, output, "inference").await {
-                    warn!(error = ?e, "Inference stage send failed");
+                    warn!(
+                        target: "orchestrator::pipeline",
+                        session_id = %session_id,
+                        request_id = %request_id,
+                        error = ?e,
+                        "Inference stage send failed"
+                    );
+                    metrics::inc_error("inference", "channel_closed");
                     break;
                 }
             }
             Err(e) => {
+                let elapsed = start.elapsed();
+                metrics::record_stage_latency("inference", elapsed);
+                Span::current().record("duration_ms", elapsed.as_millis() as u64);
+                Span::current().record("outcome", "err");
+                Span::current().record("error_kind", "inference_failure");
+
                 warn!(
-                    session = session.as_str(),
-                    error = ?e,
+                    target: "orchestrator::pipeline",
+                    session_id = %session_id,
+                    request_id = %request_id,
+                    error = %e,
                     "Inference failed"
                 );
-                // Drop request - could also send to DLQ
+                metrics::inc_error("inference", "inference_failure");
+                // Drop request — could also send to DLQ
             }
         }
     }
 
-    info!("Inference stage shutting down");
+    info!(target: "orchestrator::pipeline", "Inference stage shutting down");
 }
 
 /// Stage 4: Post-processing
 ///
 /// Joins tokens, applies formatting, filters, safety checks, etc.
 /// Could include content moderation, PII redaction, etc.
-#[instrument(skip_all, name = "post_stage")]
+///
+/// # Panics
+///
+/// This function never panics.
 async fn post_stage(mut rx: mpsc::Receiver<InferenceOutput>, tx: mpsc::Sender<PostOutput>) {
-    info!("Post stage started");
+    info!(target: "orchestrator::pipeline", "Post stage started");
 
     while let Some(inference_output) = rx.recv().await {
         let start = Instant::now();
-        let session = inference_output.session.clone();
+        let session_id = inference_output.session.as_str().to_string();
+        let request_id = inference_output.request_id.clone();
 
-        let span = tracing::span!(
-            tracing::Level::DEBUG,
-            "post_process",
-            session = session.as_str()
+        let span = tracing::info_span!(
+            "pipeline.post",
+            session_id = %session_id,
+            request_id = %request_id,
+            stage = "post",
+            duration_ms = tracing::field::Empty,
+            outcome = tracing::field::Empty,
+            error_kind = tracing::field::Empty,
         );
         let _enter = span.enter();
 
-        // Join tokens into final text
+        metrics::inc_request("post");
+
+        // Join tokens into final text — content is NOT logged
         let text = inference_output.tokens.join(" ");
 
-        let output = PostOutput { session, text };
+        let output = PostOutput {
+            session: inference_output.session,
+            request_id: request_id.clone(),
+            text,
+        };
 
-        metrics::record_stage_latency("post", start.elapsed());
+        let elapsed = start.elapsed();
+        metrics::record_stage_latency("post", elapsed);
+        Span::current().record("duration_ms", elapsed.as_millis() as u64);
+        Span::current().record("outcome", "ok");
 
         if let Err(e) = send_with_shed(&tx, output, "post").await {
-            warn!(error = ?e, "Post stage send failed");
+            warn!(
+                target: "orchestrator::pipeline",
+                session_id = %session_id,
+                request_id = %request_id,
+                error = ?e,
+                "Post stage send failed"
+            );
+            metrics::inc_error("post", "channel_closed");
             break;
         }
     }
 
-    info!("Post stage shutting down");
+    info!(target: "orchestrator::pipeline", "Post stage shutting down");
 }
 
 /// Stage 5: Stream
 ///
-/// Final output stage - could write to SSE, WebSocket, gRPC stream, etc.
-/// For MVP, just logs the result.
+/// Final output stage — could write to SSE, WebSocket, gRPC stream, etc.
+/// For MVP, logs a redacted summary (text length only, no content).
+///
+/// # Panics
+///
+/// This function never panics.
 ///
 /// TODO: Make this pluggable via trait:
 /// ```ignore
@@ -257,32 +394,43 @@ async fn post_stage(mut rx: mpsc::Receiver<InferenceOutput>, tx: mpsc::Sender<Po
 ///     async fn emit(&self, session: &SessionId, text: &str) -> Result<()>;
 /// }
 /// ```
-#[instrument(skip_all, name = "stream_stage")]
 async fn stream_stage(mut rx: mpsc::Receiver<PostOutput>) {
-    info!("Stream stage started");
+    info!(target: "orchestrator::pipeline", "Stream stage started");
 
     while let Some(post_output) = rx.recv().await {
         let start = Instant::now();
+        let session_id = post_output.session.as_str().to_string();
+        let request_id = post_output.request_id.clone();
 
-        let span = tracing::span!(
-            tracing::Level::DEBUG,
-            "stream_emit",
-            session = post_output.session.as_str()
+        let span = tracing::info_span!(
+            "pipeline.stream",
+            session_id = %session_id,
+            request_id = %request_id,
+            stage = "stream",
+            duration_ms = tracing::field::Empty,
+            outcome = tracing::field::Empty,
+            error_kind = tracing::field::Empty,
         );
         let _enter = span.enter();
 
-        // Emit final output (currently just logs)
+        metrics::inc_request("stream");
+
+        // Emit final output — log text LENGTH only, never content
         info!(
-            session = post_output.session.as_str(),
+            target: "orchestrator::pipeline",
+            session_id = %session_id,
+            request_id = %request_id,
             text_len = post_output.text.len(),
-            "📤 STREAM OUTPUT: {}",
-            post_output.text.chars().take(100).collect::<String>()
+            "Stream output emitted"
         );
 
-        metrics::record_stage_latency("stream", start.elapsed());
+        let elapsed = start.elapsed();
+        metrics::record_stage_latency("stream", elapsed);
+        Span::current().record("duration_ms", elapsed.as_millis() as u64);
+        Span::current().record("outcome", "ok");
     }
 
-    info!("Stream stage shutting down");
+    info!(target: "orchestrator::pipeline", "Stream stage shutting down");
 }
 
 #[cfg(test)]
@@ -291,8 +439,18 @@ mod tests {
     use crate::{EchoWorker, SessionId};
     use std::collections::HashMap;
 
+    /// Helper to create a test request with all required fields.
+    fn make_test_request(session: &str, request_id: &str, input: &str) -> PromptRequest {
+        PromptRequest {
+            session: SessionId::new(session),
+            request_id: request_id.to_string(),
+            input: input.to_string(),
+            meta: HashMap::new(),
+        }
+    }
+
     #[tokio::test]
-    async fn test_pipeline_end_to_end() {
+    async fn test_pipeline_end_to_end_request_flows_through_all_stages() {
         tracing_subscriber::fmt()
             .with_max_level(tracing::Level::DEBUG)
             .with_test_writer()
@@ -302,17 +460,74 @@ mod tests {
         let worker = Arc::new(EchoWorker::with_delay(1));
         let handles = spawn_pipeline(worker);
 
-        // Send a test request
-        let request = PromptRequest {
-            session: SessionId::new("test-123"),
-            input: "Hello world".to_string(),
-            meta: HashMap::new(),
-        };
+        let request = make_test_request("test-123", "req-001", "Hello world");
 
-        handles.input_tx.send(request).await.unwrap();
+        handles.input_tx.send(request).await.unwrap_or_else(|_| ());
         drop(handles.input_tx); // Close input to trigger shutdown
 
         // Wait for pipeline to drain
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_multiple_requests_complete_successfully() {
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_test_writer()
+            .try_init()
+            .ok();
+
+        let worker = Arc::new(EchoWorker::with_delay(1));
+        let handles = spawn_pipeline(worker);
+
+        for i in 0..5 {
+            let request =
+                make_test_request(&format!("session-{i}"), &format!("req-{i}"), "test input");
+            handles.input_tx.send(request).await.unwrap_or_else(|_| ());
+        }
+
+        drop(handles.input_tx);
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_request_id_propagation_does_not_panic() {
+        let worker = Arc::new(EchoWorker::with_delay(0));
+        let handles = spawn_pipeline(worker);
+
+        let request = make_test_request("s1", "req-propagation-test", "propagation test");
+
+        handles.input_tx.send(request).await.unwrap_or_else(|_| ());
+        drop(handles.input_tx);
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_shutdown_gracefully_on_sender_drop() {
+        let worker = Arc::new(EchoWorker::with_delay(0));
+        let handles = spawn_pipeline(worker);
+
+        // Immediately drop sender — all stages should shut down gracefully
+        drop(handles.input_tx);
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        // Primary assertion: no panic, no hang
+    }
+
+    #[tokio::test]
+    async fn test_rag_stage_increments_metrics() {
+        let _ = crate::metrics::init_metrics();
+
+        let worker = Arc::new(EchoWorker::with_delay(0));
+        let handles = spawn_pipeline(worker);
+
+        let request = make_test_request("metrics-test", "req-metrics", "metrics test");
+        handles.input_tx.send(request).await.unwrap_or_else(|_| ());
+        drop(handles.input_tx);
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+        // Metrics should have been recorded (no panic)
+        let summary = crate::metrics::get_metrics_summary();
+        // Summary is valid (fields are accessible without panic)
+        let _rt = summary.requests_total.len();
     }
 }

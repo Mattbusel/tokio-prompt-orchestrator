@@ -29,6 +29,7 @@ impl MultiWorker {
         Self { workers }
     }
 
+    #[allow(dead_code)]
     fn select_worker(&self, session: &SessionId) -> &Arc<dyn ModelWorker> {
         // Simple hash-based routing
         use std::collections::hash_map::DefaultHasher;
@@ -109,6 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let request = PromptRequest {
             session: SessionId::new(session_id),
             input: prompt.to_string(),
+            request_id: "example-req-0".to_string(),
             meta: {
                 let mut meta = HashMap::new();
                 meta.insert("routing".to_string(), "hash-based".to_string());

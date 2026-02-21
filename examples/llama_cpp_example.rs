@@ -56,6 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let request = PromptRequest {
             session: SessionId::new(session_id),
             input: input.to_string(),
+            request_id: "example-req-0".to_string(),
             meta: HashMap::new(),
         };
 

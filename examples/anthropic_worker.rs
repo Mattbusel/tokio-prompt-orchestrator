@@ -62,6 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let request = PromptRequest {
             session: SessionId::new(session_id),
             input: prompt.to_string(),
+            request_id: "example-req-0".to_string(),
             meta: {
                 let mut meta = HashMap::new();
                 meta.insert("model".to_string(), "claude-3-5-sonnet".to_string());

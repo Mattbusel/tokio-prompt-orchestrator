@@ -18,7 +18,9 @@
 
 use std::collections::HashMap;
 use thiserror::Error;
+use tracing_subscriber::EnvFilter;
 
+pub mod config;
 pub mod enhanced;
 pub mod metrics;
 pub mod stages;
@@ -30,11 +32,60 @@ pub mod metrics_server;
 #[cfg(feature = "web-api")]
 pub mod web_api;
 
+#[cfg(feature = "tui")]
+pub mod tui;
+
 // Re-exports for convenience
 pub use stages::{spawn_pipeline, PipelineHandles};
 pub use worker::{
     AnthropicWorker, EchoWorker, LlamaCppWorker, ModelWorker, OpenAiWorker, VllmWorker,
 };
+
+/// Initialise the global tracing subscriber.
+///
+/// Reads the `LOG_FORMAT` environment variable to choose output format:
+/// - `"json"` — structured JSON output for production log aggregators
+///   (Datadog, Grafana Loki, etc.)
+/// - anything else (including unset) — human-readable pretty output
+///   for local development
+///
+/// Filter level is controlled by `RUST_LOG` (e.g. `RUST_LOG=info`).
+///
+/// # Errors
+///
+/// Returns [`OrchestratorError::Other`] if the global subscriber has already
+/// been set (e.g. by a previous call or a test harness).
+///
+/// # Panics
+///
+/// This function never panics.
+///
+/// # Example
+///
+/// ```no_run
+/// # use tokio_prompt_orchestrator::{init_tracing, OrchestratorError};
+/// # fn example() -> Result<(), OrchestratorError> {
+/// init_tracing()?;
+/// # Ok(()) }
+/// ```
+pub fn init_tracing() -> Result<(), OrchestratorError> {
+    let format = std::env::var("LOG_FORMAT").unwrap_or_else(|_| "pretty".to_string());
+
+    let result = match format.as_str() {
+        "json" => tracing_subscriber::fmt()
+            .json()
+            .with_env_filter(EnvFilter::from_default_env())
+            .with_current_span(true)
+            .with_span_list(true)
+            .try_init(),
+        _ => tracing_subscriber::fmt()
+            .pretty()
+            .with_env_filter(EnvFilter::from_default_env())
+            .try_init(),
+    };
+
+    result.map_err(|e| OrchestratorError::Other(format!("tracing init failed: {e}")))
+}
 
 /// Top-level orchestrator errors.
 ///
@@ -89,6 +140,8 @@ impl SessionId {
 pub struct PromptRequest {
     /// Session this request belongs to.
     pub session: SessionId,
+    /// Unique identifier for this individual request, used for trace correlation.
+    pub request_id: String,
     /// The raw user-supplied prompt text.
     pub input: String,
     /// Arbitrary key-value metadata (e.g., `client`, `timestamp`).
@@ -111,6 +164,8 @@ pub struct RagOutput {
 pub struct AssembleOutput {
     /// Session this output belongs to.
     pub session: SessionId,
+    /// Request ID propagated from the originating [`PromptRequest`].
+    pub request_id: String,
     /// Fully assembled prompt ready for inference.
     pub prompt: String,
 }
@@ -120,6 +175,8 @@ pub struct AssembleOutput {
 pub struct InferenceOutput {
     /// Session this output belongs to.
     pub session: SessionId,
+    /// Request ID propagated from the originating [`PromptRequest`].
+    pub request_id: String,
     /// Raw token strings produced by the model.
     pub tokens: Vec<String>,
 }
@@ -129,6 +186,8 @@ pub struct InferenceOutput {
 pub struct PostOutput {
     /// Session this output belongs to.
     pub session: SessionId,
+    /// Request ID propagated from the originating [`PromptRequest`].
+    pub request_id: String,
     /// Final joined and processed text ready for streaming.
     pub text: String,
 }
@@ -260,5 +319,26 @@ mod tests {
         drop(rx);
         let result = send_with_shed(&tx, 1, "test-stage").await;
         assert!(matches!(result, Err(OrchestratorError::ChannelClosed)));
+    }
+
+    #[test]
+    fn test_prompt_request_carries_request_id() {
+        let req = PromptRequest {
+            session: SessionId::new("s1"),
+            request_id: "req-abc-123".to_string(),
+            input: "test".to_string(),
+            meta: HashMap::new(),
+        };
+        assert_eq!(req.request_id, "req-abc-123");
+    }
+
+    #[test]
+    fn test_init_tracing_second_call_returns_err() {
+        // First call may succeed or fail depending on test execution order
+        // (another test may have already installed a subscriber).
+        let _ = init_tracing();
+        // Second call must not panic — it should return Err.
+        let result = init_tracing();
+        assert!(result.is_err(), "double init must return Err, not panic");
     }
 }
