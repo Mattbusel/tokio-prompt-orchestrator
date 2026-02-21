@@ -4,7 +4,8 @@ A **production-ready**, **cost-optimized** orchestrator for multi-stage LLM pipe
 
 [![Rust](https://img.shields.io/badge/rust-1.79%2B-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Lines of Code](https://img.shields.io/badge/lines-15.4k-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-495_passing-brightgreen.svg)]()
+[![Lines of Code](https://img.shields.io/badge/lines-12k+-brightgreen.svg)]()
 
 ##  What Is This?
 
@@ -47,19 +48,42 @@ Request → RAG → Assemble → Inference → Post-Process → Stream → Respo
 - **Alert Rules** - 5 critical alerts included
 - **Tracing** - Comprehensive structured logging
 
-###  Enhanced Features
+### Claude Desktop & Claude Code Integration (MCP)
+
+- **Model Context Protocol** - Expose the pipeline as native Claude tools
+- **`infer`** - Run prompts through the local pipeline with stage latency reporting
+- **`pipeline_status`** - Real-time circuit breaker, channel depth, and dedup stats
+- **`batch_infer`** - Submit multiple prompts in one call
+- **`configure_pipeline`** - Hot-swap workers and settings at runtime
+
+### TUI Dashboard
+
+- **Real-time terminal UI** - Monitor pipeline flow, channel depths, circuit breakers
+- **Story mode** - 2-minute scripted demo that loops
+- **Live mode** - Connect to a running Prometheus endpoint
+- **Scrollable log** - Keybindings for quit, pause, reset, scroll
+
+### Declarative Configuration
+
+- **TOML config files** - Full pipeline configuration with validation
+- **JSON Schema export** - IDE autocomplete for config files
+- **Hot-reload** - Filesystem watcher for live config updates
+- **Validation** - Multi-error reporting with field-level diagnostics
+
+### Enhanced Features
 
 - **Caching** - In-memory + Redis support, configurable TTL
 - **Rate Limiting** - Per-session limits, token bucket algorithm
 - **Priority Queues** - 4-level priority (Critical, High, Normal, Low)
 - **Backpressure** - Graceful degradation under load
 
-###  Production Ready
+### Production Ready
 
 - **Bounded Channels** - Prevent memory exhaustion
 - **Session Affinity** - Hash-based sharding for optimization
 - **Health Checks** - Detailed component monitoring
 - **Docker Support** - Complete docker-compose stack
+- **Criterion Benchmarks** - Performance contracts enforced by CI
 
 ##  ROI & Impact
 
@@ -92,7 +116,7 @@ Request → RAG → Assemble → Inference → Post-Process → Stream → Respo
 ### Installation
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/Mattbusel/tokio-prompt-orchestrator.git
 cd tokio-prompt-orchestrator
 ```
 
@@ -133,6 +157,27 @@ cargo run --example high_impact_demo --features full
 ```
 
 See deduplication, circuit breaker, and retry logic in action.
+
+### TUI Dashboard
+
+```bash
+# Mock story mode (no external dependencies)
+cargo run --bin tui --features tui
+
+# Live mode (connect to Prometheus)
+cargo run --bin tui --features tui -- --live
+```
+
+### MCP Server (Claude Desktop / Claude Code)
+
+```bash
+# Build and run with echo worker
+cargo build --bin mcp --features mcp --release
+./target/release/mcp --worker echo
+
+# With local llama.cpp
+./target/release/mcp --worker llama_cpp
+```
 
 ##  Usage Examples
 
@@ -358,33 +403,63 @@ cargo run --bin tui --features tui -- --live --metrics-url http://host:9090/metr
 
 Keybindings: `q` quit, `p` pause, `r` reset, `h` help, `↑↓` scroll log.
 
-## Claude Desktop Integration
+## Claude Desktop & Claude Code Integration (MCP)
 
-Use tokio-prompt-orchestrator as a native Claude tool via the Model Context Protocol (MCP):
+Use tokio-prompt-orchestrator as a native Claude tool via the Model Context Protocol (MCP).
+
+### Setup
 
 1. Build the MCP server:
    ```bash
    cargo build --bin mcp --features mcp --release
    ```
 
-2. Add to Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+2. **Claude Desktop** — add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
    ```json
    {
      "mcpServers": {
        "tokio-prompt-orchestrator": {
-         "command": "/path/to/target/release/mcp"
+         "command": "/path/to/target/release/mcp",
+         "args": ["--worker", "llama_cpp"]
        }
      }
    }
    ```
 
-3. Restart Claude Desktop. You now have these tools available:
-   - `infer` — run prompts through your local pipeline
-   - `pipeline_status` — monitor circuit breakers and throughput
-   - `batch_infer` — process multiple prompts
-   - `configure_pipeline` — hot-swap workers and settings
+3. **Claude Code** — add to `.claude/mcp.json` in your project:
+   ```json
+   {
+     "mcpServers": {
+       "tokio-prompt-orchestrator": {
+         "command": "./target/release/mcp",
+         "args": ["--worker", "echo"]
+       }
+     }
+   }
+   ```
 
-Example: "Hey Claude, run this prompt through my local pipeline and show me the stage latencies"
+### Available Tools
+
+| Tool | Description |
+|------|-------------|
+| `infer` | Run a prompt through the 5-stage pipeline. Returns output, session ID, request ID, latency, and per-stage timing. |
+| `pipeline_status` | Real-time health: circuit breaker states, channel depths, dedup savings, throughput. |
+| `batch_infer` | Submit multiple prompts in one call. Returns a job ID for tracking. |
+| `configure_pipeline` | Hot-swap worker, retry attempts, circuit breaker threshold, and rate limits at runtime. |
+
+### Workers
+
+Pass `--worker <name>` when starting the MCP server:
+
+- `echo` (default) — testing/demo, no external dependencies
+- `llama_cpp` — local inference via llama.cpp server (`LLAMA_CPP_URL`, default `http://localhost:8080`)
+
+### Example
+
+```
+You: "Run 'explain quicksort' through my local pipeline"
+Claude: calls infer(prompt="explain quicksort") → returns output + stage latencies
+```
 
 ##  Monitoring & Observability
 
@@ -436,11 +511,13 @@ Access Grafana: http://localhost:3000 (admin/admin)
 ```toml
 [features]
 default = []
-web-api = ["axum", "tower", "tower-http", "tokio-stream", "futures", "uuid"]
+web-api = ["axum", "tower", "tower-http", "tokio-stream", "futures"]
 metrics-server = ["axum", "tower", "tower-http"]
 caching = ["redis"]
 rate-limiting = ["governor", "nonzero_ext"]
-full = ["web-api", "metrics-server", "caching", "rate-limiting"]
+tui = ["ratatui", "crossterm"]
+mcp = ["dep:rmcp"]
+full = ["web-api", "metrics-server", "caching", "rate-limiting", "tui"]
 ```
 
 **Build with all features:**
@@ -467,24 +544,33 @@ export SERVER_PORT="8080"
 export METRICS_PORT="9090"
 ```
 
-##  Testing
+## Testing
+
+**495 tests passing** across unit, integration, property-based, and doc tests.
 
 ```bash
 # Run all tests
-cargo test
+cargo test --all-features
 
-# Run specific feature tests
+# Run specific module tests
 cargo test enhanced::dedup
 cargo test enhanced::circuit_breaker
 cargo test enhanced::retry
+cargo test config::validation
+
+# Run integration tests only
+cargo test --test mcp_tests
+cargo test --test enhanced_hardening_tests
+cargo test --test worker_extra_tests
+
+# Run benchmarks (criterion)
+cargo bench
+cargo bench --bench pipeline
+cargo bench --bench enhanced
+cargo bench --bench workers
 
 # Run with output
 cargo test -- --nocapture
-
-# Run examples
-cargo run --example openai_worker
-cargo run --example web_api_demo --features full
-cargo run --example high_impact_demo --features full
 ```
 
 ## Docker Deployment
@@ -524,6 +610,7 @@ CMD ["/app/orchestrator"]
 - **[METRICS.md](METRICS.md)** - Observability setup (600+ lines)
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** - Design deep-dive
 - **[HIGH_IMPACT.md](HIGH_IMPACT.md)** - Cost optimization guide
+- **[BENCHMARKS.md](BENCHMARKS.md)** - Performance benchmarks and contracts
 - **[QUICKSTART.md](QUICKSTART.md)** - Getting started
 
 ### API Documentation
@@ -578,7 +665,7 @@ let worker = if rand::random::<f32>() < 0.5 {
 
 ##  Roadmap
 
-###  Completed
+### Completed
 
 - [x] 5-stage pipeline with backpressure
 - [x] 4 production model workers (OpenAI, Anthropic, llama.cpp, vLLM)
@@ -588,20 +675,21 @@ let worker = if rand::random::<f32>() < 0.5 {
 - [x] Request deduplication (60-80% cost savings)
 - [x] Circuit breaker (failure protection)
 - [x] Retry logic with exponential backoff
+- [x] Declarative TOML configuration with validation and hot-reload
+- [x] TUI dashboard (story mode + live Prometheus mode)
+- [x] MCP server for Claude Desktop and Claude Code integration
+- [x] Criterion benchmark harness with performance contracts
+- [x] 495 tests (unit, integration, property-based, doc)
 
-###  Coming Soon
+### Coming Soon
 
 - [ ] OpenAPI/Swagger documentation
-- [ ] Structured JSON logging
 - [ ] Distributed tracing (Jaeger/Zipkin)
 - [ ] Multi-node deployment (NATS/Kafka)
-- [ ] Declarative pipeline configuration (YAML/TOML)
-- [ ] Advanced health checks
 
-###  Future
+### Future
 
 - [ ] Streaming inference support
-- [ ] Batch processing mode
 - [ ] Request deduplication across nodes
 - [ ] Auto-scaling based on queue depth
 - [ ] Model fine-tuning integration
@@ -629,13 +717,15 @@ Built with:
 - [Prometheus](https://prometheus.io/) - Metrics
 - [Tracing](https://tracing.rs/) - Structured logging
 
-##  Project Stats
+## Project Stats
 
-- **Lines of Code**: ~15,400
-- **Test Coverage**: Comprehensive unit + integration tests
-- **Dependencies**: Minimal, production-grade
-- **Performance**: <1ms overhead for all features
-- **Reliability**: 99%+ with default configuration
+- **Source Files**: 33 Rust modules across `src/`, `tests/`, `benches/`
+- **Lines of Code**: ~12,200 (src/) + tests and benchmarks
+- **Tests**: 495 passing (unit, integration, property-based, doc)
+- **Benchmarks**: 30+ criterion benchmarks with enforced budgets
+- **Dependencies**: Minimal, production-grade, feature-gated
+- **Performance**: <1ms overhead for all resilience primitives
+- **Reliability**: 99%+ with default retry configuration
 
 ##  Star History
 
