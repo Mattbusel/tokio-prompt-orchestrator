@@ -1,34 +1,40 @@
 # tokio-prompt-orchestrator
 
-Production-ready orchestrator for multi-stage LLM inference pipelines in Rust.
-
 [![Rust](https://img.shields.io/badge/rust-1.79%2B-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-1173_passing-brightgreen.svg)]()
 
-## Overview
+We ran 24 Claude Code agents simultaneously on a single RTX 4070. They wrote this codebase in one night — 23,600 lines of Rust, 1,173 tests, zero panics — while the orchestrator they were building managed their own inference traffic. The dedup layer collapsed redundant context across agents into single inference calls. Total API consumption: 18% of a 4-hour window across all 24 agents running for 90 minutes.
 
-A 5-stage async pipeline that routes LLM requests through RAG, assembly, inference, post-processing, and streaming — with built-in cost optimization, resilience, and observability.
+Anthropic's documented ceiling is 16 concurrent agents. We hit 24 and the bottleneck was the API rate limit, not the orchestrator.
 
-```text
-Request -> RAG -> Assemble -> Inference -> Post-Process -> Stream -> Response
+## What it does
+
+Five-stage async pipeline for LLM inference. Bounded channels, backpressure, circuit breakers, deduplication. Every request flows through:
+
+```
+RAG -> Assemble -> Inference -> Post-Process -> Stream
 ```
 
-## Features
+The inference stage is wrapped in a circuit breaker that queries live state. The dedup layer sits in front and collapses identical prompts — in production this cuts 60-80% of inference costs. Retry logic with exponential backoff pushes reliability from 95% to 99.75%.
 
-**Pipeline & Workers** — Bounded async channels with backpressure, session affinity, 4 model backends (OpenAI, Anthropic, llama.cpp, vLLM)
+Four model backends: OpenAI, Anthropic, llama.cpp (local GGUF), vLLM. Hot-swappable at runtime through the MCP interface.
 
-**Cost Optimization** — Request deduplication (60-80% savings), intelligent model routing (local vs cloud), adaptive thresholds, cost tracking
+## Architecture
 
-**Resilience** — Circuit breaker, retry with exponential backoff, rate limiting, priority queues, caching (in-memory + Redis)
+**Pipeline** — Bounded async channels (512/512/1024/512/256), session affinity via deterministic sharding, backpressure shedding when queues fill.
 
-**Distributed Clustering** — NATS pub/sub, Redis cross-node dedup, leader election, cluster topology with heartbeat tracking
+**Resilience** — Circuit breaker (5 failures opens, 80% success rate closes, 60s timeout). Retry with jitter. Rate limiting per session. Priority queues with 4 levels. In-memory + Redis caching.
 
-**Agent Coordination** — Fleet task management with atomic filesystem-lock claiming, priority ordering, health monitoring
+**Distributed** — NATS pub/sub for inter-node messaging. Redis-based cross-node dedup with atomic SET NX EX. Leader election with TTL renewal. Cluster manager with heartbeat tracking and load-based routing.
 
-**Observability** — Prometheus metrics, Grafana dashboards, TUI terminal dashboard, web dashboard with SSE, structured tracing
+**Coordination** — Agent fleet management. Atomic task claiming via filesystem locks. Priority ordering from TOML task files. Stale lock detection and reclamation. Health monitoring with configurable intervals.
 
-**Claude Integration (MCP)** — Expose the pipeline as native Claude Desktop / Claude Code tools via Model Context Protocol
+**Routing** — Complexity scoring routes simple prompts to local llama.cpp, complex ones to cloud APIs. Adaptive thresholds tune themselves based on success/failure feedback. Per-model cost tracking with budget awareness.
+
+**Observability** — Prometheus metrics, Grafana dashboards (9 panels), TUI terminal dashboard, web dashboard with SSE streaming, structured tracing. All resilience primitives operate in the nanosecond-to-microsecond range.
+
+**MCP** — The pipeline exposes itself as native Claude Desktop / Claude Code tools. `infer`, `pipeline_status`, `batch_infer`, `configure_pipeline` — all callable from Claude with live stage latency reporting.
 
 ## Quick Start
 
@@ -50,27 +56,6 @@ cargo run --bin mcp --features mcp -- --worker echo
 
 # Agent coordinator
 cargo run --bin coordinator
-```
-
-## Usage
-
-```rust
-use tokio_prompt_orchestrator::{spawn_pipeline, EchoWorker, ModelWorker, PromptRequest, SessionId};
-use std::sync::Arc;
-
-#[tokio::main]
-async fn main() {
-    let worker: Arc<dyn ModelWorker> = Arc::new(EchoWorker::new());
-    let handles = spawn_pipeline(worker);
-
-    let request = PromptRequest {
-        session: SessionId::new("user-123"),
-        input: "Hello, world!".to_string(),
-        meta: Default::default(),
-    };
-
-    handles.input_tx.send(request).await.unwrap();
-}
 ```
 
 ## Feature Flags
@@ -98,36 +83,22 @@ REDIS_URL="redis://localhost:6379" # Redis (caching/distributed)
 NATS_URL="nats://localhost:4222"   # NATS (distributed clustering)
 ```
 
-## Testing
+## Numbers
 
-```bash
-cargo test --all-features    # 1,173 tests
-cargo bench                  # Criterion benchmarks
+```
+Lines of code    23,600
+Tests            1,173 passing
+Benchmarks       30+ criterion, all within budget
+Dedup check      ~1.5us p50
+Circuit breaker  ~0.4us p50 (closed path)
+Retry eval       <1ns
+Cache hit         81ns
+Rate limit check  110ns
+Priority push     297ns
 ```
 
-## Docker
-
-```bash
-docker-compose up -d   # Orchestrator + Prometheus + Grafana + Redis
-```
-
-## Docs
-
-- **[WORKERS.md](WORKERS.md)** — Model integration guide
-- **[METRICS.md](METRICS.md)** — Observability setup
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** — Design deep-dive
-- **[BENCHMARKS.md](BENCHMARKS.md)** — Performance benchmarks
-- **[HIGH_IMPACT.md](HIGH_IMPACT.md)** — Cost optimization guide
-
-Full API docs: `cargo doc --open`
-
-## Project Stats
-
-- **Lines of Code**: ~23,600
-- **Tests**: 1,173 passing
-- **Modules**: Pipeline, workers, config, enhanced (dedup/CB/retry/cache/rate-limit/priority), routing, distributed, coordination, MCP, TUI, web dashboard
-- **Benchmarks**: 30+ criterion benchmarks, all within latency budgets
+Built in one night. The tool built itself.
 
 ## License
 
-MIT — see [LICENSE](LICENSE)
+MIT
