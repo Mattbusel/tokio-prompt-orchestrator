@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>tokio-prompt-orchestrator</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0a0e17;--bg2:#111827;--bg3:#1a2332;--border:#1e293b;
+  --text:#e2e8f0;--text2:#94a3b8;--accent:#38bdf8;--green:#22c55e;
+  --red:#ef4444;--yellow:#eab308;--purple:#a78bfa;--orange:#fb923c;
+  --card-bg:#0f172a;--glow:0 0 20px rgba(56,189,248,0.1);
+}
+body{font-family:'SF Mono','Cascadia Code','Fira Code',monospace;background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden}
+a{color:var(--accent);text-decoration:none}
+
+/* Header */
+.header{display:flex;align-items:center;justify-content:space-between;padding:16px 24px;border-bottom:1px solid var(--border);background:var(--bg2)}
+.header h1{font-size:16px;font-weight:600;letter-spacing:-0.5px}
+.header h1 span{color:var(--accent)}
+.header-right{display:flex;gap:20px;align-items:center;font-size:13px;color:var(--text2)}
+.status-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px;animation:pulse 2s infinite}
+.status-dot.live{background:var(--green)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+
+/* Metrics Cards */
+.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;padding:20px 24px}
+.card{background:var(--card-bg);border:1px solid var(--border);border-radius:12px;padding:20px;position:relative;overflow:hidden}
+.card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,var(--accent),var(--purple))}
+.card-label{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--text2);margin-bottom:8px}
+.card-value{font-size:28px;font-weight:700;color:var(--text)}
+.card-sub{font-size:12px;color:var(--text2);margin-top:4px}
+
+/* Main grid */
+.main-grid{display:grid;grid-template-columns:2fr 1fr;gap:16px;padding:0 24px 20px}
+.panel{background:var(--card-bg);border:1px solid var(--border);border-radius:12px;padding:20px}
+.panel-title{font-size:13px;text-transform:uppercase;letter-spacing:1px;color:var(--accent);margin-bottom:16px;display:flex;align-items:center;gap:8px}
+
+/* Pipeline Flow */
+.pipeline{display:flex;align-items:center;justify-content:center;gap:0;padding:20px 0;flex-wrap:wrap}
+.stage{display:flex;flex-direction:column;align-items:center;gap:6px}
+.stage-box{background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:12px 18px;font-size:13px;font-weight:600;min-width:90px;text-align:center;transition:all 0.3s}
+.stage-box.active{border-color:var(--accent);box-shadow:var(--glow)}
+.stage-latency{font-size:11px;color:var(--text2)}
+.stage-count{font-size:10px;color:var(--text2)}
+.arrow{color:var(--text2);font-size:20px;margin:0 4px;align-self:center}
+
+/* Circuit Breakers */
+.cb-list{display:flex;flex-direction:column;gap:10px}
+.cb-item{display:flex;align-items:center;gap:12px;padding:10px;background:var(--bg3);border-radius:8px}
+.cb-dot{width:12px;height:12px;border-radius:50%;flex-shrink:0}
+.cb-dot.closed{background:var(--green);box-shadow:0 0 8px rgba(34,197,94,0.4)}
+.cb-dot.open{background:var(--red);box-shadow:0 0 8px rgba(239,68,68,0.4)}
+.cb-dot.half_open{background:var(--yellow);box-shadow:0 0 8px rgba(234,179,8,0.4)}
+.cb-name{font-size:13px;font-weight:500;flex:1}
+.cb-stats{font-size:11px;color:var(--text2)}
+
+/* Donut Chart */
+.donut-container{display:flex;align-items:center;gap:24px;justify-content:center;padding:16px 0}
+.donut{position:relative;width:120px;height:120px}
+.donut svg{width:120px;height:120px;transform:rotate(-90deg)}
+.donut-center{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:14px;font-weight:600;text-align:center}
+.donut-legend{display:flex;flex-direction:column;gap:8px}
+.legend-item{display:flex;align-items:center;gap:8px;font-size:12px}
+.legend-dot{width:10px;height:10px;border-radius:50%}
+.legend-dot.primary{background:var(--accent)}
+.legend-dot.fallback{background:var(--purple)}
+
+/* Sparkline */
+.sparkline-container{padding:10px 0}
+.sparkline{display:flex;align-items:end;gap:2px;height:60px}
+.spark-bar{flex:1;background:var(--accent);border-radius:2px 2px 0 0;min-width:4px;max-width:8px;transition:height 0.3s;opacity:0.7}
+.spark-bar:last-child{opacity:1}
+
+/* Request Log */
+.log-container{max-height:300px;overflow-y:auto}
+.log-container::-webkit-scrollbar{width:4px}
+.log-container::-webkit-scrollbar-track{background:var(--bg)}
+.log-container::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+.log-entry{padding:8px 12px;border-bottom:1px solid var(--border);font-size:12px;display:grid;grid-template-columns:80px 60px 1fr 70px;gap:8px;align-items:center}
+.log-entry:last-child{border-bottom:none}
+.log-time{color:var(--text2)}
+.log-stage{font-weight:500}
+.log-stage.rag{color:var(--accent)}
+.log-stage.assemble{color:var(--purple)}
+.log-stage.inference{color:var(--orange)}
+.log-stage.post{color:var(--green)}
+.log-stage.stream{color:var(--yellow)}
+.log-msg{color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.log-latency{color:var(--text2);text-align:right}
+
+/* Bottom grid */
+.bottom-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;padding:0 24px 24px}
+
+/* Responsive */
+@media(max-width:900px){
+  .cards{grid-template-columns:repeat(2,1fr)}
+  .main-grid{grid-template-columns:1fr}
+  .bottom-grid{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <h1><span>&gt;</span> tokio-prompt-orchestrator</h1>
+  <div class="header-right">
+    <div><span class="status-dot live"></span>LIVE</div>
+    <div id="clock">--:--:--</div>
+    <div>Nodes: <span id="node-count">1</span></div>
+    <div>Uptime: <span id="uptime">0s</span></div>
+  </div>
+</div>
+
+<!-- Metrics Cards -->
+<div class="cards">
+  <div class="card">
+    <div class="card-label">Total Requests</div>
+    <div class="card-value" id="requests-total">0</div>
+    <div class="card-sub" id="requests-sub">0 shed</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Dedup Rate</div>
+    <div class="card-value" id="dedup-rate">0%</div>
+    <div class="card-sub" id="dedup-sub">0 deduplicated</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Cost Saved</div>
+    <div class="card-value" id="cost-saved">$0.00</div>
+    <div class="card-sub">via deduplication</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Throughput</div>
+    <div class="card-value" id="throughput">0 rps</div>
+    <div class="card-sub" id="throughput-sub">requests per second</div>
+  </div>
+</div>
+
+<!-- Main Content -->
+<div class="main-grid">
+  <!-- Pipeline Flow -->
+  <div class="panel">
+    <div class="panel-title">Pipeline Flow</div>
+    <div class="pipeline" id="pipeline-flow">
+      <div class="stage">
+        <div class="stage-box active" id="stage-rag">RAG</div>
+        <div class="stage-latency" id="lat-rag">0.0ms</div>
+        <div class="stage-count" id="cnt-rag">0 req</div>
+      </div>
+      <div class="arrow">&rarr;</div>
+      <div class="stage">
+        <div class="stage-box active" id="stage-assemble">Assemble</div>
+        <div class="stage-latency" id="lat-assemble">0.0ms</div>
+        <div class="stage-count" id="cnt-assemble">0 req</div>
+      </div>
+      <div class="arrow">&rarr;</div>
+      <div class="stage">
+        <div class="stage-box active" id="stage-inference">Inference</div>
+        <div class="stage-latency" id="lat-inference">0.0ms</div>
+        <div class="stage-count" id="cnt-inference">0 req</div>
+      </div>
+      <div class="arrow">&rarr;</div>
+      <div class="stage">
+        <div class="stage-box active" id="stage-post">Post</div>
+        <div class="stage-latency" id="lat-post">0.0ms</div>
+        <div class="stage-count" id="cnt-post">0 req</div>
+      </div>
+      <div class="arrow">&rarr;</div>
+      <div class="stage">
+        <div class="stage-box active" id="stage-stream">Stream</div>
+        <div class="stage-latency" id="lat-stream">0.0ms</div>
+        <div class="stage-count" id="cnt-stream">0 req</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Circuit Breakers -->
+  <div class="panel">
+    <div class="panel-title">Circuit Breakers</div>
+    <div class="cb-list" id="cb-list">
+      <div class="cb-item">
+        <div class="cb-dot closed"></div>
+        <div class="cb-name">inference</div>
+        <div class="cb-stats">0F / 0S</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Bottom Row -->
+<div class="bottom-grid">
+  <!-- Model Routing -->
+  <div class="panel">
+    <div class="panel-title">Model Routing</div>
+    <div class="donut-container">
+      <div class="donut">
+        <svg viewBox="0 0 42 42">
+          <circle cx="21" cy="21" r="15.91549" fill="none" stroke="var(--purple)" stroke-width="4" stroke-dasharray="0 100"/>
+          <circle cx="21" cy="21" r="15.91549" fill="none" stroke="var(--accent)" stroke-width="4" stroke-dasharray="100 0" id="donut-primary"/>
+        </svg>
+        <div class="donut-center" id="donut-label">100%</div>
+      </div>
+      <div class="donut-legend">
+        <div class="legend-item"><div class="legend-dot primary"></div><span id="legend-primary">echo (100%)</span></div>
+        <div class="legend-item"><div class="legend-dot fallback"></div><span id="legend-fallback">fallback (0%)</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Throughput Sparkline -->
+  <div class="panel">
+    <div class="panel-title">Throughput (60s)</div>
+    <div class="sparkline-container">
+      <div class="sparkline" id="sparkline"></div>
+    </div>
+  </div>
+
+  <!-- Live Request Log -->
+  <div class="panel">
+    <div class="panel-title">Live Request Log</div>
+    <div class="log-container" id="log-container">
+      <div class="log-entry">
+        <div class="log-time">--:--:--</div>
+        <div class="log-stage">--</div>
+        <div class="log-msg">Waiting for events...</div>
+        <div class="log-latency">--</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  'use strict';
+
+  // ── State ──
+  var sparkData = [];
+  var MAX_SPARK = 60;
+  var logEntries = [];
+  var MAX_LOG = 20;
+  var prevTotal = 0;
+  var lastData = null;
+
+  // ── Helpers ──
+  function $(id){ return document.getElementById(id); }
+  function fmt(n, d){ return Number(n).toFixed(d || 0); }
+  function fmtUsd(n){ return '$' + Number(n).toFixed(2); }
+  function fmtTime(){
+    var d = new Date();
+    return d.toLocaleTimeString('en-US',{hour12:false});
+  }
+  function fmtUptime(s){
+    if(s<60) return s+'s';
+    if(s<3600) return Math.floor(s/60)+'m '+s%60+'s';
+    return Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m';
+  }
+
+  // ── Clock ──
+  setInterval(function(){ $('clock').textContent = fmtTime(); }, 1000);
+
+  // ── Update UI ──
+  function update(data){
+    lastData = data;
+
+    // Top cards
+    $('requests-total').textContent = data.requests_total.toLocaleString();
+    var totalShed = data.shed_counts.rag + data.shed_counts.assemble +
+                    data.shed_counts.inference + data.shed_counts.post +
+                    data.shed_counts.stream;
+    $('requests-sub').textContent = totalShed + ' shed';
+    $('dedup-rate').textContent = fmt(data.dedup_rate,1) + '%';
+    $('dedup-sub').textContent = data.requests_deduped + ' deduplicated';
+    $('cost-saved').textContent = fmtUsd(data.cost_saved_usd);
+    $('throughput').textContent = fmt(data.throughput_rps,1) + ' rps';
+    $('uptime').textContent = fmtUptime(data.uptime_secs);
+
+    // Pipeline stages
+    var stages = ['rag','assemble','inference','post','stream'];
+    var latencies = data.stage_latencies;
+    var latMap = {
+      rag: latencies.rag_ms,
+      assemble: latencies.assemble_ms,
+      inference: latencies.inference_ms,
+      post: latencies.post_ms,
+      stream: latencies.stream_ms
+    };
+    var cntMap = data.stage_counts;
+    for(var i=0;i<stages.length;i++){
+      var s = stages[i];
+      var el = $('lat-'+s);
+      if(el) el.textContent = fmt(latMap[s],2) + 'ms';
+      var cel = $('cnt-'+s);
+      if(cel) cel.textContent = (cntMap[s]||0) + ' req';
+    }
+
+    // Circuit breakers
+    var cbList = $('cb-list');
+    if(data.circuit_breakers && data.circuit_breakers.length){
+      var html = '';
+      for(var j=0;j<data.circuit_breakers.length;j++){
+        var cb = data.circuit_breakers[j];
+        html += '<div class="cb-item">' +
+          '<div class="cb-dot '+cb.status+'"></div>' +
+          '<div class="cb-name">'+cb.name+'</div>' +
+          '<div class="cb-stats">'+cb.failures+'F / '+cb.successes+'S ('+fmt(cb.success_rate*100,0)+'%)</div>' +
+          '</div>';
+      }
+      cbList.innerHTML = html;
+    }
+
+    // Model routing donut
+    var pp = data.model_routing.primary_pct;
+    var fp = data.model_routing.fallback_pct;
+    $('donut-primary').setAttribute('stroke-dasharray', pp + ' ' + (100-pp));
+    $('donut-label').textContent = fmt(pp,0) + '%';
+    $('legend-primary').textContent = data.model_routing.primary_model + ' (' + fmt(pp,0) + '%)';
+    $('legend-fallback').textContent = 'fallback (' + fmt(fp,0) + '%)';
+
+    // Sparkline
+    var newReqs = data.requests_total - prevTotal;
+    prevTotal = data.requests_total;
+    sparkData.push(newReqs > 0 ? newReqs : 0);
+    if(sparkData.length > MAX_SPARK) sparkData.shift();
+    renderSparkline();
+
+    // Log entry (simulated from stage counts changing)
+    if(newReqs > 0){
+      var logStage = stages[Math.floor(Math.random()*stages.length)];
+      logEntries.unshift({
+        time: fmtTime(),
+        stage: logStage,
+        msg: 'request processed (batch: '+newReqs+')',
+        latency: fmt(latMap[logStage],2)+'ms'
+      });
+      if(logEntries.length > MAX_LOG) logEntries.pop();
+      renderLog();
+    }
+  }
+
+  function renderSparkline(){
+    var el = $('sparkline');
+    var max = Math.max.apply(null, sparkData.concat([1]));
+    var html = '';
+    for(var i=0;i<sparkData.length;i++){
+      var h = Math.max(2, (sparkData[i]/max)*60);
+      html += '<div class="spark-bar" style="height:'+h+'px"></div>';
+    }
+    el.innerHTML = html;
+  }
+
+  function renderLog(){
+    var el = $('log-container');
+    var html = '';
+    for(var i=0;i<logEntries.length;i++){
+      var e = logEntries[i];
+      html += '<div class="log-entry">' +
+        '<div class="log-time">'+e.time+'</div>' +
+        '<div class="log-stage '+e.stage+'">'+e.stage+'</div>' +
+        '<div class="log-msg">'+e.msg+'</div>' +
+        '<div class="log-latency">'+e.latency+'</div>' +
+        '</div>';
+    }
+    el.innerHTML = html;
+  }
+
+  // ── SSE Connection ──
+  function connect(){
+    var es = new EventSource('/api/status');
+    es.onmessage = function(ev){
+      try{
+        var data = JSON.parse(ev.data);
+        update(data);
+      }catch(err){
+        // Ignore parse errors silently
+      }
+    };
+    es.onerror = function(){
+      es.close();
+      // Reconnect after 2 seconds
+      setTimeout(connect, 2000);
+    };
+  }
+
+  // ── Init ──
+  connect();
+  $('clock').textContent = fmtTime();
+})();
+</script>
+</body>
+</html>

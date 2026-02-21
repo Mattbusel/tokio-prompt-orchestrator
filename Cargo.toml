@@ -35,8 +35,8 @@ prometheus = "0.13"
 
 # Web (feature-gated)
 axum = { version = "0.7", optional = true, features = ["ws", "macros"] }
-tower = { version = "0.4", optional = true }
-tower-http = { version = "0.5", optional = true, features = ["trace", "cors"] }
+tower = { version = "0.5", optional = true }
+tower-http = { version = "0.5", optional = true, features = ["trace", "cors", "fs"] }
 tokio-stream = { version = "0.1", optional = true }
 futures = { version = "0.3", optional = true }
 
@@ -48,20 +48,28 @@ crossterm = { version = "0.28", optional = true }
 rmcp = { version = "0.16", features = ["server", "transport-io"], optional = true }
 
 # Enhanced features (Phase 4)
-redis = { version = "0.24", optional = true, features = ["tokio-comp", "connection-manager"] }
+redis = { version = "0.25", optional = true, features = ["tokio-comp", "connection-manager"] }
 dashmap = "5.5"
 governor = { version = "0.6", optional = true }
 nonzero_ext = { version = "0.3", optional = true }
+
+# Dashboard — async SSE stream generation
+async-stream = { version = "0.3", optional = true }
+
+# Distributed clustering (Phase 5) — NATS for pub/sub messaging, Redis for cross-node dedup + leader election
+async-nats = { version = "0.38", optional = true }
 
 [features]
 default = []
 metrics-server = ["axum", "tower", "tower-http"]
 web-api = ["axum", "tower", "tower-http", "tokio-stream", "futures"]
-caching = ["redis"]
+caching = ["dep:redis"]
 rate-limiting = ["governor", "nonzero_ext"]
 tui = ["ratatui", "crossterm"]
 mcp = ["dep:rmcp"]
-full = ["web-api", "metrics-server", "caching", "rate-limiting", "tui"]
+dashboard = ["axum", "tower", "tower-http", "tokio-stream", "dep:async-stream"]
+distributed = ["dep:async-nats", "dep:redis"]
+full = ["web-api", "metrics-server", "caching", "rate-limiting", "tui", "dashboard"]
 
 [dev-dependencies]
 tokio-test = "0.4"
@@ -89,6 +97,11 @@ required-features = ["tui"]
 name = "mcp"
 path = "src/bin/mcp.rs"
 required-features = ["mcp"]
+
+[[bin]]
+name = "dashboard"
+path = "src/bin/dashboard.rs"
+required-features = ["dashboard"]
 
 [[bench]]
 name = "pipeline"

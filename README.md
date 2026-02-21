@@ -4,8 +4,8 @@ A **production-ready**, **cost-optimized** orchestrator for multi-stage LLM pipe
 
 [![Rust](https://img.shields.io/badge/rust-1.79%2B-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-495_passing-brightgreen.svg)]()
-[![Lines of Code](https://img.shields.io/badge/lines-12k+-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-959_passing-brightgreen.svg)]()
+[![Lines of Code](https://img.shields.io/badge/lines-23.6k-brightgreen.svg)]()
 
 ##  What Is This?
 
@@ -62,6 +62,33 @@ Request → RAG → Assemble → Inference → Post-Process → Stream → Respo
 - **Story mode** - 2-minute scripted demo that loops
 - **Live mode** - Connect to a running Prometheus endpoint
 - **Scrollable log** - Keybindings for quit, pause, reset, scroll
+
+### Distributed Clustering (Phase 5)
+
+- **NATS Pub/Sub** - Inter-node messaging for cluster coordination
+- **Redis Cross-Node Dedup** - Distributed deduplication with atomic SET NX EX
+- **Leader Election** - Redis-based SETNX + TTL leader election with renewal
+- **Cluster Manager** - Node registry, heartbeat tracking, stale-node eviction, load-based routing
+
+### Intelligent Model Routing
+
+- **Complexity Scoring** - Heuristic-based prompt analysis for routing decisions
+- **Local vs Cloud** - Route simple prompts to local llama.cpp, complex to cloud APIs
+- **Adaptive Thresholds** - Auto-tune routing thresholds based on success/failure feedback
+- **Cost Tracking** - Per-model cost accounting with budget awareness
+
+### Agent Fleet Coordination
+
+- **Task Claiming** - Atomic task claiming via filesystem locks
+- **Priority Queues** - TOML-based task files with priority ordering
+- **Fleet Health** - Configurable health intervals, stale lock detection
+
+### Web Dashboard
+
+- **Real-time SSE** - Server-sent events for live metric streaming
+- **Pipeline Visualization** - Stage latencies, circuit breaker status, dedup savings
+- **Cost Savings Display** - Live cost tracking with model routing breakdown
+- **Dark Theme** - Responsive single-page HTML dashboard
 
 ### Declarative Configuration
 
@@ -178,6 +205,18 @@ cargo build --bin mcp --features mcp --release
 # With local llama.cpp
 ./target/release/mcp --worker llama_cpp
 ```
+
+### Web Dashboard
+
+```bash
+# Start with echo worker on port 3030
+cargo run --bin dashboard --features dashboard
+
+# With llama.cpp worker on custom port
+cargo run --bin dashboard --features dashboard -- --worker llama_cpp --port 8081
+```
+
+Open http://localhost:3030 for live pipeline metrics via SSE.
 
 ##  Usage Examples
 
@@ -513,11 +552,13 @@ Access Grafana: http://localhost:3000 (admin/admin)
 default = []
 web-api = ["axum", "tower", "tower-http", "tokio-stream", "futures"]
 metrics-server = ["axum", "tower", "tower-http"]
-caching = ["redis"]
+caching = ["dep:redis"]
 rate-limiting = ["governor", "nonzero_ext"]
 tui = ["ratatui", "crossterm"]
 mcp = ["dep:rmcp"]
-full = ["web-api", "metrics-server", "caching", "rate-limiting", "tui"]
+dashboard = ["axum", "tower", "tower-http", "tokio-stream", "dep:async-stream"]
+distributed = ["dep:async-nats", "dep:redis"]
+full = ["web-api", "metrics-server", "caching", "rate-limiting", "tui", "dashboard"]
 ```
 
 **Build with all features:**
@@ -539,14 +580,18 @@ export VLLM_URL="http://localhost:8000"
 # Redis (optional)
 export REDIS_URL="redis://localhost:6379"
 
+# Distributed clustering (Phase 5)
+export NATS_URL="nats://localhost:4222"
+
 # Server config
 export SERVER_PORT="8080"
 export METRICS_PORT="9090"
+export DASHBOARD_PORT="3030"
 ```
 
 ## Testing
 
-**495 tests passing** across unit, integration, property-based, and doc tests.
+**959 tests passing** across unit, integration, property-based, and doc tests.
 
 ```bash
 # Run all tests
@@ -557,11 +602,15 @@ cargo test enhanced::dedup
 cargo test enhanced::circuit_breaker
 cargo test enhanced::retry
 cargo test config::validation
+cargo test routing::
+cargo test distributed::
+cargo test coordination::
 
 # Run integration tests only
 cargo test --test mcp_tests
 cargo test --test enhanced_hardening_tests
 cargo test --test worker_extra_tests
+cargo test --test distributed_integration
 
 # Run benchmarks (criterion)
 cargo bench
@@ -679,18 +728,20 @@ let worker = if rand::random::<f32>() < 0.5 {
 - [x] TUI dashboard (story mode + live Prometheus mode)
 - [x] MCP server for Claude Desktop and Claude Code integration
 - [x] Criterion benchmark harness with performance contracts
-- [x] 495 tests (unit, integration, property-based, doc)
+- [x] Distributed clustering (NATS pub/sub, Redis dedup, leader election)
+- [x] Intelligent model routing (complexity scoring, adaptive thresholds, cost tracking)
+- [x] Agent fleet coordination (task claiming, priority queues, health monitoring)
+- [x] Web dashboard with real-time SSE metrics
+- [x] 959 tests (unit, integration, property-based, doc)
 
 ### Coming Soon
 
 - [ ] OpenAPI/Swagger documentation
 - [ ] Distributed tracing (Jaeger/Zipkin)
-- [ ] Multi-node deployment (NATS/Kafka)
 
 ### Future
 
 - [ ] Streaming inference support
-- [ ] Request deduplication across nodes
 - [ ] Auto-scaling based on queue depth
 - [ ] Model fine-tuning integration
 
@@ -714,15 +765,17 @@ MIT License - see [LICENSE](LICENSE) file for details.
 Built with:
 - [Tokio](https://tokio.rs/) - Async runtime
 - [Axum](https://github.com/tokio-rs/axum) - Web framework
+- [NATS](https://nats.io/) - Distributed messaging
 - [Prometheus](https://prometheus.io/) - Metrics
 - [Tracing](https://tracing.rs/) - Structured logging
 
 ## Project Stats
 
-- **Source Files**: 33 Rust modules across `src/`, `tests/`, `benches/`
-- **Lines of Code**: ~12,200 (src/) + tests and benchmarks
-- **Tests**: 495 passing (unit, integration, property-based, doc)
+- **Source Files**: 45+ Rust modules across `src/`, `tests/`, `benches/`
+- **Lines of Code**: ~23,600 (src/) + tests and benchmarks
+- **Tests**: 959 passing (unit, integration, property-based, doc)
 - **Benchmarks**: 30+ criterion benchmarks with enforced budgets
+- **New Modules**: distributed clustering, model routing, agent coordination, web dashboard
 - **Dependencies**: Minimal, production-grade, feature-gated
 - **Performance**: <1ms overhead for all resilience primitives
 - **Reliability**: 99%+ with default retry configuration

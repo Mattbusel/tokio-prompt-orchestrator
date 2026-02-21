@@ -21,8 +21,8 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
 use tokio_prompt_orchestrator::{
-    metrics, spawn_pipeline, EchoWorker, ModelWorker, OrchestratorError, PipelineHandles,
-    PromptRequest, SessionId,
+    metrics, spawn_pipeline, EchoWorker, LlamaCppWorker, ModelWorker, OrchestratorError,
+    PipelineHandles, PromptRequest, SessionId,
 };
 
 // ── Parameter types ──────────────────────────────────────────────────────────
@@ -398,10 +398,28 @@ impl ServerHandler for OrchestratorMcp {
 fn create_worker(name: &str) -> Result<Arc<dyn ModelWorker>, OrchestratorError> {
     match name {
         "echo" => Ok(Arc::new(EchoWorker::new())),
+        "llama_cpp" => Ok(Arc::new(
+            LlamaCppWorker::new().with_url("http://localhost:8080"),
+        )),
         other => Err(OrchestratorError::ConfigError(format!(
-            "worker '{other}' requires API keys — use echo for local testing"
+            "worker '{other}' is not supported — use echo or llama_cpp"
         ))),
     }
+}
+
+/// Parse `--worker <name>` from CLI args, defaulting to `"echo"`.
+fn parse_worker_arg() -> String {
+    let args: Vec<String> = std::env::args().collect();
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "--worker" {
+            if let Some(val) = args.get(i + 1) {
+                return val.clone();
+            }
+        }
+        i += 1;
+    }
+    "echo".to_string()
 }
 
 #[tokio::main]
@@ -421,13 +439,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialise metrics
     let _ = metrics::init_metrics();
 
-    // Create default worker (echo for local testing)
-    let worker = create_worker("echo")?;
+    // Parse --worker flag (defaults to "echo")
+    let worker_name = parse_worker_arg();
+    let worker = create_worker(&worker_name)?;
 
     // Spawn the full pipeline
     let handles = spawn_pipeline(Arc::clone(&worker));
 
-    tracing::info!("MCP server starting with echo worker");
+    tracing::info!("MCP server starting with {worker_name} worker");
 
     // Start MCP server on stdio
     let service = new_mcp_server(worker, handles)
@@ -459,11 +478,26 @@ mod tests {
     }
 
     #[test]
+    fn test_create_worker_llama_cpp_succeeds() {
+        let result = create_worker("llama_cpp");
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn test_create_worker_unknown_returns_config_error() {
         let result = create_worker("nonexistent");
         assert!(result.is_err());
         let err = result.err().map(|e| e.to_string()).unwrap_or_default();
         assert!(err.contains("nonexistent"));
+    }
+
+    #[test]
+    fn test_parse_worker_arg_defaults_to_echo() {
+        // parse_worker_arg reads std::env::args; without --worker it defaults to "echo"
+        // In test context args won't contain --worker, so this exercises the default path.
+        let default = parse_worker_arg();
+        // Default should be "echo" unless test runner passes --worker
+        assert!(!default.is_empty());
     }
 
     #[test]

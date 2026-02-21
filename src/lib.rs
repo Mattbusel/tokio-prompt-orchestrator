@@ -23,6 +23,7 @@ use tracing_subscriber::EnvFilter;
 pub mod config;
 pub mod enhanced;
 pub mod metrics;
+pub mod routing;
 pub mod stages;
 pub mod worker;
 
@@ -34,6 +35,9 @@ pub mod web_api;
 
 #[cfg(feature = "tui")]
 pub mod tui;
+
+#[cfg(feature = "distributed")]
+pub mod distributed;
 
 // Re-exports for convenience
 pub use stages::{spawn_pipeline, PipelineHandles};
