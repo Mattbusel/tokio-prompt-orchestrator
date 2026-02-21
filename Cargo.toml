@@ -69,6 +69,8 @@ proptest = "1.4"
 tracing-test = "0.2"
 # tempfile: temporary files/dirs for config loading tests
 tempfile = "3.10"
+# criterion: statistical benchmarking for performance contract enforcement
+criterion = { version = "0.5", features = ["async_tokio"] }
 
 [[bin]]
 name = "orchestrator-demo"
@@ -78,4 +80,16 @@ path = "src/main.rs"
 name = "tui"
 path = "src/bin/tui.rs"
 required-features = ["tui"]
+
+[[bench]]
+name = "pipeline"
+harness = false
+
+[[bench]]
+name = "enhanced"
+harness = false
+
+[[bench]]
+name = "workers"
+harness = false
 
