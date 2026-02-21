@@ -20,10 +20,10 @@ pub const THROUGHPUT_HISTORY_CAP: usize = 60;
 pub const LOG_ENTRIES_CAP: usize = 50;
 
 /// Minimum terminal width for the dashboard to render.
-pub const MIN_COLS: u16 = 100;
+pub const MIN_COLS: u16 = 60;
 
 /// Minimum terminal height for the dashboard to render.
-pub const MIN_ROWS: u16 = 40;
+pub const MIN_ROWS: u16 = 20;
 
 /// Pipeline stage names in order.
 pub const STAGE_NAMES: [&str; 5] = ["RAG", "ASSEMBLE", "INFER", "POST", "STREAM"];

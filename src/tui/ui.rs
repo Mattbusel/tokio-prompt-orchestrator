@@ -239,19 +239,19 @@ mod tests {
 
     #[test]
     fn test_min_size_constants() {
-        assert_eq!(MIN_COLS, 100);
-        assert_eq!(MIN_ROWS, 40);
+        assert_eq!(MIN_COLS, 60);
+        assert_eq!(MIN_ROWS, 20);
     }
 
     #[test]
     fn test_too_small_detection_width() {
-        let area = Rect::new(0, 0, 80, 50);
+        let area = Rect::new(0, 0, 50, 30);
         assert!(area.width < MIN_COLS);
     }
 
     #[test]
     fn test_too_small_detection_height() {
-        let area = Rect::new(0, 0, 120, 30);
+        let area = Rect::new(0, 0, 120, 15);
         assert!(area.height < MIN_ROWS);
     }
 
