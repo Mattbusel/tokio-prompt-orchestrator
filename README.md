@@ -4,7 +4,7 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-1173_passing-brightgreen.svg)]()
 
-We ran 24 Claude Code agents simultaneously on a single RTX 4070. They wrote this codebase in one night — 23,600 lines of Rust, 1,173 tests, zero panics — while the orchestrator they were building managed their own inference traffic. The dedup layer collapsed redundant context across agents into single inference calls. Total API consumption: 18% of a 4-hour window across all 24 agents running for 90 minutes.
+We ran 24 Claude Code agents simultaneously on a single RTX 4070. They wrote this codebase in one night — 23,600 lines of Rust, 1,173 tests, zero panics — while the orchestrator they were building managed their own inference traffic. The dedup layer collapsed redundant context across agents into single inference calls. Total API consumption: 46% of a 4-hour window across all 24 agents running for 90 minutes.
 
 Anthropic's documented ceiling is 16 concurrent agents. We hit 24 and the bottleneck was the API rate limit, not the orchestrator.
 
