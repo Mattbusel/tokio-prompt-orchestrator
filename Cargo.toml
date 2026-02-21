@@ -6,7 +6,7 @@ rust-version = "1.79"
 
 [dependencies]
 # Core
-tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "process"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 thiserror = "1.0"
@@ -102,6 +102,10 @@ required-features = ["mcp"]
 name = "dashboard"
 path = "src/bin/dashboard.rs"
 required-features = ["dashboard"]
+
+[[bin]]
+name = "coordinator"
+path = "src/bin/coordinator.rs"
 
 [[bench]]
 name = "pipeline"

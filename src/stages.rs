@@ -55,6 +55,12 @@ pub struct PipelineHandles {
     pub stream: JoinHandle<()>,
     /// Channel sender for submitting new requests to the pipeline.
     pub input_tx: mpsc::Sender<PromptRequest>,
+    /// Receiver for completed pipeline outputs.
+    ///
+    /// Wrapped in `Mutex<Option<...>>` so a single consumer (e.g. the MCP
+    /// collector task) can `.take()` ownership. Callers who do not need
+    /// pipeline output simply ignore this field.
+    pub output_rx: tokio::sync::Mutex<Option<mpsc::Receiver<PostOutput>>>,
 }
 
 /// Spawn the complete 5-stage pipeline
@@ -80,13 +86,14 @@ pub fn spawn_pipeline(worker: Arc<dyn ModelWorker>) -> PipelineHandles {
     let (assemble_tx, assemble_rx) = mpsc::channel::<AssembleOutput>(512);
     let (inference_tx, inference_rx) = mpsc::channel::<InferenceOutput>(1024);
     let (post_tx, post_rx) = mpsc::channel::<PostOutput>(512);
+    let (output_tx, output_rx) = mpsc::channel::<PostOutput>(256);
 
     // Spawn each stage
     let rag = tokio::spawn(rag_stage(input_rx, rag_tx));
     let assemble = tokio::spawn(assemble_stage(rag_rx, assemble_tx));
     let inference = tokio::spawn(inference_stage(assemble_rx, inference_tx, worker));
     let post = tokio::spawn(post_stage(inference_rx, post_tx));
-    let stream = tokio::spawn(stream_stage(post_rx));
+    let stream = tokio::spawn(stream_stage(post_rx, output_tx));
 
     PipelineHandles {
         rag,
@@ -95,6 +102,7 @@ pub fn spawn_pipeline(worker: Arc<dyn ModelWorker>) -> PipelineHandles {
         post,
         stream,
         input_tx,
+        output_rx: tokio::sync::Mutex::new(Some(output_rx)),
     }
 }
 
@@ -394,7 +402,10 @@ async fn post_stage(mut rx: mpsc::Receiver<InferenceOutput>, tx: mpsc::Sender<Po
 ///     async fn emit(&self, session: &SessionId, text: &str) -> Result<()>;
 /// }
 /// ```
-async fn stream_stage(mut rx: mpsc::Receiver<PostOutput>) {
+async fn stream_stage(
+    mut rx: mpsc::Receiver<PostOutput>,
+    output_tx: mpsc::Sender<PostOutput>,
+) {
     info!(target: "orchestrator::pipeline", "Stream stage started");
 
     while let Some(post_output) = rx.recv().await {
@@ -428,6 +439,16 @@ async fn stream_stage(mut rx: mpsc::Receiver<PostOutput>) {
         metrics::record_stage_latency("stream", elapsed);
         Span::current().record("duration_ms", elapsed.as_millis() as u64);
         Span::current().record("outcome", "ok");
+
+        // Forward to output channel (best-effort, non-blocking)
+        if output_tx.try_send(post_output).is_err() {
+            warn!(
+                target: "orchestrator::pipeline",
+                session_id = %session_id,
+                request_id = %request_id,
+                "Output channel full or closed, discarding result"
+            );
+        }
     }
 
     info!(target: "orchestrator::pipeline", "Stream stage shutting down");
@@ -529,5 +550,59 @@ mod tests {
         let summary = crate::metrics::get_metrics_summary();
         // Summary is valid (fields are accessible without panic)
         let _rt = summary.requests_total.len();
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_output_channel_receives_result() {
+        let worker = Arc::new(EchoWorker::with_delay(0));
+        let handles = spawn_pipeline(worker);
+
+        // Take the output receiver
+        let mut output_rx = {
+            let mut guard = handles.output_rx.lock().await;
+            guard.take().expect("output_rx should be available")
+        };
+
+        let request = make_test_request("out-test", "req-out-1", "hello output");
+        handles.input_tx.send(request).await.unwrap_or_else(|_| ());
+
+        // Wait for result with timeout
+        let result = tokio::time::timeout(
+            tokio::time::Duration::from_secs(5),
+            output_rx.recv(),
+        )
+        .await;
+
+        assert!(result.is_ok(), "should receive result within timeout");
+        let post_output = result.unwrap_or(None);
+        assert!(post_output.is_some(), "output channel should yield a PostOutput");
+        let post = post_output.unwrap_or_else(|| crate::PostOutput {
+            session: SessionId::new(""),
+            request_id: String::new(),
+            text: String::new(),
+        });
+        assert_eq!(post.request_id, "req-out-1");
+        assert!(!post.text.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_output_channel_ignored_does_not_block() {
+        let worker = Arc::new(EchoWorker::with_delay(0));
+        let handles = spawn_pipeline(worker);
+
+        // Do NOT take output_rx — simulate callers who ignore pipeline output.
+        // Send several requests and verify the pipeline does not deadlock.
+        for i in 0..5 {
+            let request = make_test_request(
+                &format!("no-consume-{i}"),
+                &format!("req-nc-{i}"),
+                "ignore output",
+            );
+            handles.input_tx.send(request).await.unwrap_or_else(|_| ());
+        }
+
+        drop(handles.input_tx);
+        // If the pipeline deadlocks this will hang; the test runner timeout catches it.
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     }
 }

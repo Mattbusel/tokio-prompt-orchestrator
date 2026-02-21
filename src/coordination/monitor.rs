@@ -16,7 +16,6 @@
 
 use crate::coordination::config::CoordinationConfig;
 use crate::coordination::queue::TaskQueue;
-use crate::coordination::CoordinationError;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -371,8 +370,14 @@ mod tests {
     fn test_fleet_snapshot_unhealthy_count() {
         let mut agents = HashMap::new();
         agents.insert("a1".to_string(), AgentHealth::Healthy);
-        agents.insert("a2".to_string(), AgentHealth::Unhealthy("crash".to_string()));
-        agents.insert("a3".to_string(), AgentHealth::Unhealthy("timeout".to_string()));
+        agents.insert(
+            "a2".to_string(),
+            AgentHealth::Unhealthy("crash".to_string()),
+        );
+        agents.insert(
+            "a3".to_string(),
+            AgentHealth::Unhealthy("timeout".to_string()),
+        );
         let snapshot = FleetSnapshot {
             agents,
             pending: 0,
@@ -431,45 +436,51 @@ mod tests {
 
     #[tokio::test]
     async fn test_monitor_register_agent() {
-        let dir = tempfile::tempdir().unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
         let config = test_config(&dir);
         let queue = Arc::new(
-            TaskQueue::from_tasks(config.clone(), vec![]).await.ok().unwrap(),
+            TaskQueue::from_tasks(config.clone(), vec![])
+                .await
+                .ok()
+                .unwrap(),
         );
         let monitor = AgentMonitor::new(config, queue);
 
         monitor.register_agent("agent-1").await;
         let snapshot = monitor.snapshot().await;
-        assert_eq!(
-            snapshot.agents.get("agent-1"),
-            Some(&AgentHealth::Healthy)
-        );
+        assert_eq!(snapshot.agents.get("agent-1"), Some(&AgentHealth::Healthy));
     }
 
     #[tokio::test]
     async fn test_monitor_mark_finished() {
-        let dir = tempfile::tempdir().unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
         let config = test_config(&dir);
         let queue = Arc::new(
-            TaskQueue::from_tasks(config.clone(), vec![]).await.ok().unwrap(),
+            TaskQueue::from_tasks(config.clone(), vec![])
+                .await
+                .ok()
+                .unwrap(),
         );
         let monitor = AgentMonitor::new(config, queue);
 
         monitor.register_agent("agent-1").await;
         monitor.mark_finished("agent-1").await;
         let snapshot = monitor.snapshot().await;
-        assert_eq!(
-            snapshot.agents.get("agent-1"),
-            Some(&AgentHealth::Finished)
-        );
+        assert_eq!(snapshot.agents.get("agent-1"), Some(&AgentHealth::Finished));
     }
 
     #[tokio::test]
     async fn test_monitor_mark_unhealthy() {
-        let dir = tempfile::tempdir().unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
         let config = test_config(&dir);
         let queue = Arc::new(
-            TaskQueue::from_tasks(config.clone(), vec![]).await.ok().unwrap(),
+            TaskQueue::from_tasks(config.clone(), vec![])
+                .await
+                .ok()
+                .unwrap(),
         );
         let monitor = AgentMonitor::new(config, queue);
 
@@ -484,14 +495,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_monitor_snapshot_includes_task_counts() {
-        let dir = tempfile::tempdir().unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
         let config = test_config(&dir);
-        let tasks = vec![
-            Task::new("t1", "p1", 1),
-            Task::new("t2", "p2", 2),
-        ];
+        let tasks = vec![Task::new("t1", "p1", 1), Task::new("t2", "p2", 2)];
         let queue = Arc::new(
-            TaskQueue::from_tasks(config.clone(), tasks).await.ok().unwrap(),
+            TaskQueue::from_tasks(config.clone(), tasks)
+                .await
+                .ok()
+                .unwrap(),
         );
         let monitor = AgentMonitor::new(config, queue);
         let snapshot = monitor.snapshot().await;
@@ -501,14 +513,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_monitor_start_monitoring_can_be_stopped() {
-        let dir = tempfile::tempdir().unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
         let config = Arc::new(CoordinationConfig {
             health_interval_secs: 1,
             lock_dir: dir.path().join("locks"),
             ..(*test_config(&dir)).clone()
         });
         let queue = Arc::new(
-            TaskQueue::from_tasks(config.clone(), vec![]).await.ok().unwrap(),
+            TaskQueue::from_tasks(config.clone(), vec![])
+                .await
+                .ok()
+                .unwrap(),
         );
         let monitor = AgentMonitor::new(config, queue);
 
@@ -520,19 +536,20 @@ mod tests {
 
         // Send shutdown
         let _ = shutdown_tx.send(true);
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            handle,
-        ).await;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_monitor_multiple_agents() {
-        let dir = tempfile::tempdir().unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
         let config = test_config(&dir);
         let queue = Arc::new(
-            TaskQueue::from_tasks(config.clone(), vec![]).await.ok().unwrap(),
+            TaskQueue::from_tasks(config.clone(), vec![])
+                .await
+                .ok()
+                .unwrap(),
         );
         let monitor = AgentMonitor::new(config, queue);
 

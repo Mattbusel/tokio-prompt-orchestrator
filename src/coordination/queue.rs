@@ -31,12 +31,13 @@ struct LockInfo {
     timestamp: u64,
 }
 
-impl LockInfo {
-    /// Serialize to lock file format: `agent_id\ntimestamp`.
-    fn to_string(&self) -> String {
-        format!("{}\n{}", self.agent_id, self.timestamp)
+impl std::fmt::Display for LockInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}\n{}", self.agent_id, self.timestamp)
     }
+}
 
+impl LockInfo {
     /// Parse from lock file contents.
     ///
     /// # Returns
@@ -124,7 +125,7 @@ impl TaskQueue {
         // Read task file
         let content = tokio::task::spawn_blocking(move || std::fs::read_to_string(&task_file_path))
             .await
-            .map_err(|e| CoordinationError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?
+            .map_err(|e| CoordinationError::Io(std::io::Error::other(e)))?
             .map_err(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
                     CoordinationError::TaskFileNotFound {
@@ -141,9 +142,7 @@ impl TaskQueue {
         let lock_dir_clone = lock_dir.clone();
         tokio::task::spawn_blocking(move || std::fs::create_dir_all(&lock_dir_clone))
             .await
-            .map_err(|e| {
-                CoordinationError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
-            })??;
+            .map_err(|e| CoordinationError::Io(std::io::Error::other(e)))??;
 
         // Reconcile task statuses with existing lock files
         let mut tasks = task_file.tasks;
@@ -192,9 +191,7 @@ impl TaskQueue {
         let lock_dir_clone = lock_dir.clone();
         tokio::task::spawn_blocking(move || std::fs::create_dir_all(&lock_dir_clone))
             .await
-            .map_err(|e| {
-                CoordinationError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
-            })??;
+            .map_err(|e| CoordinationError::Io(std::io::Error::other(e)))??;
 
         Ok(Self {
             config,
@@ -225,26 +222,23 @@ impl TaskQueue {
     pub async fn claim_next(&self, agent_id: &str) -> Result<Option<Task>, CoordinationError> {
         let mut tasks = self.tasks.lock().await;
 
-        // Sort pending tasks by priority
-        let mut pending_indices: Vec<usize> = tasks
+        // Consider both pending and claimed tasks (stale locks can be stolen)
+        let mut candidate_indices: Vec<usize> = tasks
             .iter()
             .enumerate()
-            .filter(|(_, t)| t.status.is_claimable())
+            .filter(|(_, t)| !t.status.is_terminal())
             .map(|(i, _)| i)
             .collect();
 
-        pending_indices.sort_by_key(|&i| tasks[i].priority);
+        candidate_indices.sort_by_key(|&i| tasks[i].priority);
 
-        for idx in pending_indices {
+        for idx in candidate_indices {
             let task_id = tasks[idx].id.clone();
             let lock_path = self.claimed_path(&task_id);
 
-            match self
-                .try_create_lock(&lock_path, agent_id)
-                .await
-            {
+            match self.try_create_lock(&lock_path, agent_id).await {
                 Ok(true) => {
-                    // Successfully claimed
+                    // Successfully claimed (no lock file existed)
                     tasks[idx].status = TaskStatus::Claimed;
                     tasks[idx].claimed_by = agent_id.to_string();
                     return Ok(Some(tasks[idx].clone()));
@@ -252,7 +246,7 @@ impl TaskQueue {
                 Ok(false) => {
                     // Lock exists — check if stale
                     if self.is_lock_stale(&lock_path).await? {
-                        // Steal the lock
+                        // Steal the lock from a dead/stale agent
                         self.steal_lock(&lock_path, agent_id).await?;
                         tasks[idx].status = TaskStatus::Claimed;
                         tasks[idx].claimed_by = agent_id.to_string();
@@ -285,19 +279,14 @@ impl TaskQueue {
     /// # Panics
     ///
     /// This function never panics.
-    pub async fn complete(
-        &self,
-        task_id: &str,
-        agent_id: &str,
-    ) -> Result<(), CoordinationError> {
+    pub async fn complete(&self, task_id: &str, agent_id: &str) -> Result<(), CoordinationError> {
         let mut tasks = self.tasks.lock().await;
 
-        let task = tasks
-            .iter_mut()
-            .find(|t| t.id == task_id)
-            .ok_or_else(|| CoordinationError::TaskNotFound {
+        let task = tasks.iter_mut().find(|t| t.id == task_id).ok_or_else(|| {
+            CoordinationError::TaskNotFound {
                 id: task_id.to_string(),
-            })?;
+            }
+        })?;
 
         task.status = TaskStatus::Completed;
 
@@ -313,7 +302,7 @@ impl TaskQueue {
             Ok::<(), std::io::Error>(())
         })
         .await
-        .map_err(|e| CoordinationError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))??;
+        .map_err(|e| CoordinationError::Io(std::io::Error::other(e)))??;
 
         Ok(())
     }
@@ -344,12 +333,11 @@ impl TaskQueue {
     ) -> Result<(), CoordinationError> {
         let mut tasks = self.tasks.lock().await;
 
-        let task = tasks
-            .iter_mut()
-            .find(|t| t.id == task_id)
-            .ok_or_else(|| CoordinationError::TaskNotFound {
+        let task = tasks.iter_mut().find(|t| t.id == task_id).ok_or_else(|| {
+            CoordinationError::TaskNotFound {
                 id: task_id.to_string(),
-            })?;
+            }
+        })?;
 
         task.status = TaskStatus::Failed;
         task.failure_reason = reason.to_string();
@@ -364,7 +352,7 @@ impl TaskQueue {
             Ok::<(), std::io::Error>(())
         })
         .await
-        .map_err(|e| CoordinationError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))??;
+        .map_err(|e| CoordinationError::Io(std::io::Error::other(e)))??;
 
         Ok(())
     }
@@ -388,12 +376,11 @@ impl TaskQueue {
     pub async fn release(&self, task_id: &str) -> Result<(), CoordinationError> {
         let mut tasks = self.tasks.lock().await;
 
-        let task = tasks
-            .iter_mut()
-            .find(|t| t.id == task_id)
-            .ok_or_else(|| CoordinationError::TaskNotFound {
+        let task = tasks.iter_mut().find(|t| t.id == task_id).ok_or_else(|| {
+            CoordinationError::TaskNotFound {
                 id: task_id.to_string(),
-            })?;
+            }
+        })?;
 
         task.status = TaskStatus::Pending;
         task.claimed_by.clear();
@@ -403,7 +390,7 @@ impl TaskQueue {
             let _ = std::fs::remove_file(&claimed_path);
         })
         .await
-        .map_err(|e| CoordinationError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        .map_err(|e| CoordinationError::Io(std::io::Error::other(e)))?;
 
         Ok(())
     }
@@ -425,13 +412,22 @@ impl TaskQueue {
     /// This function never panics.
     pub async fn summary(&self) -> (usize, usize, usize, usize) {
         let tasks = self.tasks.lock().await;
-        let pending = tasks.iter().filter(|t| t.status == TaskStatus::Pending).count();
+        let pending = tasks
+            .iter()
+            .filter(|t| t.status == TaskStatus::Pending)
+            .count();
         let claimed = tasks
             .iter()
             .filter(|t| t.status == TaskStatus::Claimed || t.status == TaskStatus::Running)
             .count();
-        let completed = tasks.iter().filter(|t| t.status == TaskStatus::Completed).count();
-        let failed = tasks.iter().filter(|t| t.status == TaskStatus::Failed).count();
+        let completed = tasks
+            .iter()
+            .filter(|t| t.status == TaskStatus::Completed)
+            .count();
+        let failed = tasks
+            .iter()
+            .filter(|t| t.status == TaskStatus::Failed)
+            .count();
         (pending, claimed, completed, failed)
     }
 
@@ -490,7 +486,7 @@ impl TaskQueue {
             }
         })
         .await
-        .map_err(|e| CoordinationError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))??;
+        .map_err(|e| CoordinationError::Io(std::io::Error::other(e)))??;
 
         Ok(result)
     }
@@ -516,17 +512,13 @@ impl TaskQueue {
             }
         })
         .await
-        .map_err(|e| CoordinationError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))??;
+        .map_err(|e| CoordinationError::Io(std::io::Error::other(e)))??;
 
         Ok(result)
     }
 
     /// Steal a stale lock by removing and recreating it.
-    async fn steal_lock(
-        &self,
-        path: &Path,
-        agent_id: &str,
-    ) -> Result<(), CoordinationError> {
+    async fn steal_lock(&self, path: &Path, agent_id: &str) -> Result<(), CoordinationError> {
         let path = path.to_path_buf();
         let content = LockInfo {
             agent_id: agent_id.to_string(),
@@ -539,7 +531,7 @@ impl TaskQueue {
             std::fs::write(&path, content)
         })
         .await
-        .map_err(|e| CoordinationError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))??;
+        .map_err(|e| CoordinationError::Io(std::io::Error::other(e)))??;
 
         Ok(())
     }
@@ -609,7 +601,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_queue_from_tasks_creates_lock_dir() {
-        let dir = TempDir::new().ok().unwrap_or_else(|| TempDir::new().ok().unwrap_or_else(|| panic!("cannot create temp dir")));
+        let dir = TempDir::new().ok().unwrap_or_else(|| {
+            TempDir::new()
+                .ok()
+                .unwrap_or_else(|| panic!("cannot create temp dir"))
+        });
         let config = test_config(&dir);
         let lock_dir = config.lock_dir.clone();
         let queue = TaskQueue::from_tasks(config, test_tasks()).await;
@@ -619,7 +615,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_queue_claim_next_returns_highest_priority() {
-        let dir = tempfile::tempdir().unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
         let config = test_config(&dir);
         let tasks = vec![
             Task::new("low", "low priority", 10),
@@ -638,7 +635,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_queue_claim_next_returns_none_when_all_claimed() {
-        let dir = tempfile::tempdir().unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
         let config = test_config(&dir);
         let tasks = vec![Task::new("only-task", "the only task", 1)];
         let queue = TaskQueue::from_tasks(config, tasks).await;
@@ -658,7 +656,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_queue_claim_next_empty_queue_returns_none() {
-        let dir = tempfile::tempdir().unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
         let config = test_config(&dir);
         let queue = TaskQueue::from_tasks(config, vec![]).await;
         assert!(queue.is_ok());
@@ -670,7 +669,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_queue_complete_updates_status() {
-        let dir = tempfile::tempdir().unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
         let config = test_config(&dir);
         let queue = TaskQueue::from_tasks(config, test_tasks()).await;
         assert!(queue.is_ok());
@@ -696,7 +696,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_queue_fail_updates_status_and_reason() {
-        let dir = tempfile::tempdir().unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
         let config = test_config(&dir);
         let queue = TaskQueue::from_tasks(config, test_tasks()).await;
         assert!(queue.is_ok());
@@ -714,15 +715,13 @@ mod tests {
         let tasks = queue.status().await;
         let failed_task = tasks.iter().find(|t| t.id == task.id);
         assert!(failed_task.is_some());
-        assert_eq!(
-            failed_task.map(|t| &t.status),
-            Some(&TaskStatus::Failed)
-        );
+        assert_eq!(failed_task.map(|t| &t.status), Some(&TaskStatus::Failed));
     }
 
     #[tokio::test]
     async fn test_queue_complete_nonexistent_task_returns_error() {
-        let dir = tempfile::tempdir().unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
         let config = test_config(&dir);
         let queue = TaskQueue::from_tasks(config, test_tasks()).await;
         assert!(queue.is_ok());
@@ -734,7 +733,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_queue_fail_nonexistent_task_returns_error() {
-        let dir = tempfile::tempdir().unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
         let config = test_config(&dir);
         let queue = TaskQueue::from_tasks(config, test_tasks()).await;
         assert!(queue.is_ok());
@@ -746,7 +746,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_queue_release_makes_task_claimable_again() {
-        let dir = tempfile::tempdir().unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
         let config = test_config(&dir);
         let tasks = vec![Task::new("releasable", "release me", 1)];
         let queue = TaskQueue::from_tasks(config, tasks).await;
@@ -767,12 +768,16 @@ mod tests {
         assert!(reclaimed.is_ok());
         let task = reclaimed.ok().unwrap();
         assert!(task.is_some());
-        assert_eq!(task.as_ref().map(|t| t.claimed_by.as_str()), Some("agent-2"));
+        assert_eq!(
+            task.as_ref().map(|t| t.claimed_by.as_str()),
+            Some("agent-2")
+        );
     }
 
     #[tokio::test]
     async fn test_queue_release_nonexistent_task_returns_error() {
-        let dir = tempfile::tempdir().unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
         let config = test_config(&dir);
         let queue = TaskQueue::from_tasks(config, vec![]).await;
         assert!(queue.is_ok());
@@ -784,7 +789,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_queue_summary_counts_correctly() {
-        let dir = tempfile::tempdir().unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
         let config = test_config(&dir);
         let queue = TaskQueue::from_tasks(config, test_tasks()).await;
         assert!(queue.is_ok());
@@ -807,7 +813,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_queue_all_done_initially_false() {
-        let dir = tempfile::tempdir().unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
         let config = test_config(&dir);
         let queue = TaskQueue::from_tasks(config, test_tasks()).await;
         assert!(queue.is_ok());
@@ -818,7 +825,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_queue_all_done_empty_queue_returns_true() {
-        let dir = tempfile::tempdir().unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
         let config = test_config(&dir);
         let queue = TaskQueue::from_tasks(config, vec![]).await;
         assert!(queue.is_ok());
@@ -829,7 +837,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_queue_all_done_after_completion() {
-        let dir = tempfile::tempdir().unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
         let config = test_config(&dir);
         let tasks = vec![Task::new("single", "one task", 1)];
         let queue = TaskQueue::from_tasks(config, tasks).await;
@@ -843,7 +852,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_queue_from_toml_file() {
-        let dir = tempfile::tempdir().unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
         let toml_content = r#"
 [[tasks]]
 id = "task-from-file"
@@ -869,7 +879,8 @@ priority = 1
 
     #[tokio::test]
     async fn test_queue_new_missing_file_returns_error() {
-        let dir = tempfile::tempdir().unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
         let config = Arc::new(CoordinationConfig {
             task_file: dir.path().join("nonexistent.toml"),
             lock_dir: dir.path().join("locks"),
@@ -881,18 +892,11 @@ priority = 1
 
     #[tokio::test]
     async fn test_queue_multiple_agents_no_double_claim() {
-        let dir = tempfile::tempdir().unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
         let config = test_config(&dir);
-        let tasks = vec![
-            Task::new("t1", "task 1", 1),
-            Task::new("t2", "task 2", 2),
-        ];
-        let queue = Arc::new(
-            TaskQueue::from_tasks(config, tasks)
-                .await
-                .ok()
-                .unwrap(),
-        );
+        let tasks = vec![Task::new("t1", "task 1", 1), Task::new("t2", "task 2", 2)];
+        let queue = Arc::new(TaskQueue::from_tasks(config, tasks).await.ok().unwrap());
 
         // Agent 1 claims first
         let t1 = queue.claim_next("agent-1").await;
@@ -912,7 +916,8 @@ priority = 1
 
     #[tokio::test]
     async fn test_queue_priority_ordering_across_claims() {
-        let dir = tempfile::tempdir().unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
         let config = test_config(&dir);
         let tasks = vec![
             Task::new("p3", "priority 3", 3),
@@ -933,7 +938,8 @@ priority = 1
 
     #[tokio::test]
     async fn test_queue_claimed_lock_file_exists_on_disk() {
-        let dir = tempfile::tempdir().unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
         let config = test_config(&dir);
         let lock_dir = config.lock_dir.clone();
         let tasks = vec![Task::new("disk-check", "check disk", 1)];
@@ -946,7 +952,8 @@ priority = 1
 
     #[tokio::test]
     async fn test_queue_completed_marker_exists_on_disk() {
-        let dir = tempfile::tempdir().unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
         let config = test_config(&dir);
         let lock_dir = config.lock_dir.clone();
         let tasks = vec![Task::new("complete-check", "check complete", 1)];
@@ -960,7 +967,8 @@ priority = 1
 
     #[tokio::test]
     async fn test_queue_failed_marker_exists_on_disk() {
-        let dir = tempfile::tempdir().unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
         let config = test_config(&dir);
         let lock_dir = config.lock_dir.clone();
         let tasks = vec![Task::new("fail-check", "check fail", 1)];

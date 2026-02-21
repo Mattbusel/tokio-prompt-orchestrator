@@ -331,10 +331,7 @@ mod tests {
     #[test]
     fn test_health_interval_returns_duration() {
         let config = CoordinationConfig::default();
-        assert_eq!(
-            config.health_interval(),
-            std::time::Duration::from_secs(10)
-        );
+        assert_eq!(config.health_interval(), std::time::Duration::from_secs(10));
     }
 
     #[test]
@@ -342,8 +339,7 @@ mod tests {
         let config = CoordinationConfig::default();
         let toml_str = toml::to_string_pretty(&config);
         assert!(toml_str.is_ok());
-        let reparsed: Result<CoordinationConfig, _> =
-            toml::from_str(&toml_str.unwrap_or_default());
+        let reparsed: Result<CoordinationConfig, _> = toml::from_str(&toml_str.unwrap_or_default());
         assert!(reparsed.is_ok());
         let reparsed_config = reparsed.ok().unwrap_or_default();
         assert_eq!(reparsed_config.agent_count, config.agent_count);

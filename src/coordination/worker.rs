@@ -108,18 +108,36 @@ impl AgentWorker {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
-            .map_err(|e| CoordinationError::SpawnError(format!(
-                "failed to spawn claude process for agent {}: {e}",
-                self.agent_id
-            )))?;
+            .map_err(|e| {
+                CoordinationError::SpawnError(format!(
+                    "failed to spawn claude process for agent {}: {e}",
+                    self.agent_id
+                ))
+            })?;
 
         let timeout = self.config.task_timeout();
 
-        match tokio::time::timeout(timeout, child.wait_with_output()).await {
-            Ok(Ok(output)) => {
-                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                let success = output.status.success();
+        // Use wait() + take stdout/stderr separately so we can still kill on timeout
+        let stdout_handle = child.stdout.take();
+        let stderr_handle = child.stderr.take();
+
+        match tokio::time::timeout(timeout, child.wait()).await {
+            Ok(Ok(exit_status)) => {
+                let stdout = if let Some(mut out) = stdout_handle {
+                    let mut buf = Vec::new();
+                    let _ = tokio::io::AsyncReadExt::read_to_end(&mut out, &mut buf).await;
+                    String::from_utf8_lossy(&buf).to_string()
+                } else {
+                    String::new()
+                };
+                let stderr = if let Some(mut err) = stderr_handle {
+                    let mut buf = Vec::new();
+                    let _ = tokio::io::AsyncReadExt::read_to_end(&mut err, &mut buf).await;
+                    String::from_utf8_lossy(&buf).to_string()
+                } else {
+                    String::new()
+                };
+                let success = exit_status.success();
 
                 let combined_output = if stderr.is_empty() {
                     stdout

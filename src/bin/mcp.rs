@@ -19,10 +19,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::RwLock;
+use tokio::sync::{oneshot, RwLock};
 use tokio_prompt_orchestrator::{
     metrics, spawn_pipeline, EchoWorker, LlamaCppWorker, ModelWorker, OrchestratorError,
-    PipelineHandles, PromptRequest, SessionId,
+    PipelineHandles, PostOutput, PromptRequest, SessionId,
 };
 
 // ── Parameter types ──────────────────────────────────────────────────────────
@@ -133,13 +133,17 @@ impl Default for PipelineConfig {
 
 // ── MCP Server ───────────────────────────────────────────────────────────────
 
+/// Map of in-flight request IDs to their oneshot response senders.
+type PendingMap = Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<PostOutput>>>>;
+
 /// MCP server that exposes the orchestrator pipeline as Claude-callable tools.
 #[derive(Clone)]
 pub struct OrchestratorMcp {
-    worker: Arc<dyn ModelWorker>,
     pipeline: Arc<PipelineHandles>,
     config: Arc<RwLock<PipelineConfig>>,
     tool_router: ToolRouter<Self>,
+    /// Pending infer requests awaiting pipeline output, keyed by `request_id`.
+    pending: PendingMap,
 }
 
 #[tool_router]
@@ -153,52 +157,64 @@ impl OrchestratorMcp {
             .session_id
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let request_id = uuid::Uuid::new_v4().to_string();
-
         let overall_start = Instant::now();
 
-        // Stage 1: RAG (simulated — context retrieval)
-        let rag_start = Instant::now();
-        let context = format!("[context for: {}]", &params.prompt);
-        let rag_ms = rag_start.elapsed().as_secs_f64() * 1000.0;
+        // Register a oneshot channel for this request so the collector can
+        // route the pipeline output back to us.
+        let (resp_tx, resp_rx) = oneshot::channel::<PostOutput>();
+        {
+            let mut map = self.pending.lock().await;
+            map.insert(request_id.clone(), resp_tx);
+        }
 
-        // Stage 2: Assemble
-        let assemble_start = Instant::now();
-        let assembled = format!("{context}\n\n{}", &params.prompt);
-        let assemble_ms = assemble_start.elapsed().as_secs_f64() * 1000.0;
-
-        // Stage 3: Inference via worker
-        let infer_start = Instant::now();
-        let tokens = match self.worker.infer(&assembled).await {
-            Ok(t) => t,
-            Err(e) => return format!("{{\"error\": \"inference failed: {e}\"}}"),
+        // Build and submit the request through the real pipeline.
+        let request = PromptRequest {
+            session: SessionId::new(session_id.clone()),
+            request_id: request_id.clone(),
+            input: params.prompt,
+            meta: HashMap::new(),
         };
-        let infer_ms = infer_start.elapsed().as_secs_f64() * 1000.0;
 
-        // Stage 4: Post-process
-        let post_start = Instant::now();
-        let output = tokens.join(" ");
-        let post_ms = post_start.elapsed().as_secs_f64() * 1000.0;
+        if let Err(e) = self.pipeline.input_tx.send(request).await {
+            let mut map = self.pending.lock().await;
+            map.remove(&request_id);
+            return format!("{{\"error\": \"pipeline send failed: {e}\"}}");
+        }
 
-        // Stage 5: Stream (no-op for MCP, just measure)
-        let stream_start = Instant::now();
-        let stream_ms = stream_start.elapsed().as_secs_f64() * 1000.0;
+        // Await the result with a timeout.
+        let timeout_duration = tokio::time::Duration::from_secs(30);
+        let result = tokio::time::timeout(timeout_duration, resp_rx).await;
+
+        let output_text = match result {
+            Ok(Ok(post_output)) => post_output.text,
+            Ok(Err(_)) => {
+                // Oneshot sender dropped — request was shed or inference failed.
+                return format!(
+                    "{{\"error\": \"request dropped by pipeline (shed or inference failure)\", \"request_id\": \"{request_id}\"}}"
+                );
+            }
+            Err(_) => {
+                // Timeout — clean up the pending entry.
+                let mut map = self.pending.lock().await;
+                map.remove(&request_id);
+                return format!(
+                    "{{\"error\": \"pipeline timeout after 30s\", \"request_id\": \"{request_id}\"}}"
+                );
+            }
+        };
 
         let total_ms = overall_start.elapsed().as_millis() as u64;
 
-        let mut stage_latencies = HashMap::new();
-        stage_latencies.insert("rag".to_string(), rag_ms);
-        stage_latencies.insert("assemble".to_string(), assemble_ms);
-        stage_latencies.insert("inference".to_string(), infer_ms);
-        stage_latencies.insert("post_process".to_string(), post_ms);
-        stage_latencies.insert("stream".to_string(), stream_ms);
-
+        // Stage latencies are tracked by the real pipeline via global metrics.
+        // The per-call response reports overall wall-clock time; use
+        // pipeline_status for per-stage breakdowns.
         let response = InferResponse {
-            output,
+            output: output_text,
             session_id,
             request_id,
             latency_ms: total_ms,
             deduped: false,
-            stage_latencies,
+            stage_latencies: HashMap::new(),
         };
 
         serde_json::to_string_pretty(&response)
@@ -359,15 +375,49 @@ impl OrchestratorMcp {
 
 /// Create a new [`OrchestratorMcp`] server instance.
 ///
+/// Spawns a background collector task that reads completed pipeline outputs
+/// and dispatches them to the correct waiting `infer` call via oneshot
+/// channels keyed by `request_id`.
+///
 /// # Panics
 ///
 /// This function never panics.
-pub fn new_mcp_server(worker: Arc<dyn ModelWorker>, pipeline: PipelineHandles) -> OrchestratorMcp {
+pub fn new_mcp_server(pipeline: PipelineHandles) -> OrchestratorMcp {
+    let pending: PendingMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let pipeline = Arc::new(pipeline);
+
+    // Spawn a collector task that routes pipeline outputs to waiting callers.
+    let collector_pending = Arc::clone(&pending);
+    let collector_pipeline = Arc::clone(&pipeline);
+    tokio::spawn(async move {
+        let mut output_rx = {
+            let mut guard = collector_pipeline.output_rx.lock().await;
+            match guard.take() {
+                Some(rx) => rx,
+                None => {
+                    tracing::error!("output_rx already taken — collector cannot start");
+                    return;
+                }
+            }
+        };
+
+        while let Some(post_output) = output_rx.recv().await {
+            let request_id = post_output.request_id.clone();
+            let mut map = collector_pending.lock().await;
+            if let Some(sender) = map.remove(&request_id) {
+                // Ignore send error — caller may have timed out already.
+                let _ = sender.send(post_output);
+            }
+            // No pending entry means batch_infer or fire-and-forget — discard.
+        }
+        tracing::info!("Output collector task shutting down");
+    });
+
     OrchestratorMcp {
-        worker,
-        pipeline: Arc::new(pipeline),
+        pipeline,
         config: Arc::new(RwLock::new(PipelineConfig::default())),
         tool_router: OrchestratorMcp::tool_router(),
+        pending,
     }
 }
 
@@ -444,12 +494,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let worker = create_worker(&worker_name)?;
 
     // Spawn the full pipeline
-    let handles = spawn_pipeline(Arc::clone(&worker));
+    let handles = spawn_pipeline(worker);
 
     tracing::info!("MCP server starting with {worker_name} worker");
 
     // Start MCP server on stdio
-    let service = new_mcp_server(worker, handles)
+    let service = new_mcp_server(handles)
         .serve(rmcp::transport::stdio())
         .await?;
 
@@ -629,8 +679,8 @@ mod tests {
     #[tokio::test]
     async fn test_infer_tool_returns_correct_shape() {
         let worker: Arc<dyn ModelWorker> = Arc::new(EchoWorker::new());
-        let handles = spawn_pipeline(Arc::clone(&worker));
-        let server = new_mcp_server(worker, handles);
+        let handles = spawn_pipeline(worker);
+        let server = new_mcp_server(handles);
 
         let params = InferParams {
             prompt: "hello world".to_string(),
@@ -651,22 +701,17 @@ mod tests {
         assert!(parsed.get("latency_ms").is_some());
         assert!(parsed.get("stage_latencies").is_some());
 
+        // stage_latencies is empty at the per-call level; individual stage
+        // metrics are tracked globally via metrics::record_stage_latency.
         let latencies = parsed.get("stage_latencies").and_then(|v| v.as_object());
         assert!(latencies.is_some());
-        let empty_map = serde_json::Map::new();
-        let lat = latencies.unwrap_or(&empty_map);
-        assert!(lat.contains_key("rag"));
-        assert!(lat.contains_key("assemble"));
-        assert!(lat.contains_key("inference"));
-        assert!(lat.contains_key("post_process"));
-        assert!(lat.contains_key("stream"));
     }
 
     #[tokio::test]
     async fn test_infer_tool_generates_session_id_when_absent() {
         let worker: Arc<dyn ModelWorker> = Arc::new(EchoWorker::new());
-        let handles = spawn_pipeline(Arc::clone(&worker));
-        let server = new_mcp_server(worker, handles);
+        let handles = spawn_pipeline(worker);
+        let server = new_mcp_server(handles);
 
         let params = InferParams {
             prompt: "test".to_string(),
@@ -686,8 +731,8 @@ mod tests {
     #[tokio::test]
     async fn test_pipeline_status_returns_all_required_fields() {
         let worker: Arc<dyn ModelWorker> = Arc::new(EchoWorker::new());
-        let handles = spawn_pipeline(Arc::clone(&worker));
-        let server = new_mcp_server(worker, handles);
+        let handles = spawn_pipeline(worker);
+        let server = new_mcp_server(handles);
 
         let result = server.pipeline_status().await;
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap_or_default();
@@ -702,8 +747,8 @@ mod tests {
     #[tokio::test]
     async fn test_pipeline_status_healthy_by_default() {
         let worker: Arc<dyn ModelWorker> = Arc::new(EchoWorker::new());
-        let handles = spawn_pipeline(Arc::clone(&worker));
-        let server = new_mcp_server(worker, handles);
+        let handles = spawn_pipeline(worker);
+        let server = new_mcp_server(handles);
 
         let result = server.pipeline_status().await;
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap_or_default();
@@ -717,8 +762,8 @@ mod tests {
     #[tokio::test]
     async fn test_batch_infer_accepts_array_of_prompts() {
         let worker: Arc<dyn ModelWorker> = Arc::new(EchoWorker::new());
-        let handles = spawn_pipeline(Arc::clone(&worker));
-        let server = new_mcp_server(worker, handles);
+        let handles = spawn_pipeline(worker);
+        let server = new_mcp_server(handles);
 
         let params = BatchInferParams {
             prompts: vec![
@@ -746,8 +791,8 @@ mod tests {
     #[tokio::test]
     async fn test_configure_pipeline_updates_worker() {
         let worker: Arc<dyn ModelWorker> = Arc::new(EchoWorker::new());
-        let handles = spawn_pipeline(Arc::clone(&worker));
-        let server = new_mcp_server(worker, handles);
+        let handles = spawn_pipeline(worker);
+        let server = new_mcp_server(handles);
 
         let params = ConfigureParams {
             worker: Some("anthropic".to_string()),
@@ -773,8 +818,8 @@ mod tests {
     #[tokio::test]
     async fn test_configure_pipeline_invalid_worker_returns_error() {
         let worker: Arc<dyn ModelWorker> = Arc::new(EchoWorker::new());
-        let handles = spawn_pipeline(Arc::clone(&worker));
-        let server = new_mcp_server(worker, handles);
+        let handles = spawn_pipeline(worker);
+        let server = new_mcp_server(handles);
 
         let params = ConfigureParams {
             worker: Some("nonexistent".to_string()),
@@ -791,8 +836,8 @@ mod tests {
     #[tokio::test]
     async fn test_configure_pipeline_invalid_retry_returns_error() {
         let worker: Arc<dyn ModelWorker> = Arc::new(EchoWorker::new());
-        let handles = spawn_pipeline(Arc::clone(&worker));
-        let server = new_mcp_server(worker, handles);
+        let handles = spawn_pipeline(worker);
+        let server = new_mcp_server(handles);
 
         let params = ConfigureParams {
             worker: None,
@@ -809,8 +854,8 @@ mod tests {
     #[tokio::test]
     async fn test_configure_pipeline_zero_threshold_returns_error() {
         let worker: Arc<dyn ModelWorker> = Arc::new(EchoWorker::new());
-        let handles = spawn_pipeline(Arc::clone(&worker));
-        let server = new_mcp_server(worker, handles);
+        let handles = spawn_pipeline(worker);
+        let server = new_mcp_server(handles);
 
         let params = ConfigureParams {
             worker: None,
@@ -826,8 +871,8 @@ mod tests {
     #[tokio::test]
     async fn test_configure_pipeline_zero_rps_returns_error() {
         let worker: Arc<dyn ModelWorker> = Arc::new(EchoWorker::new());
-        let handles = spawn_pipeline(Arc::clone(&worker));
-        let server = new_mcp_server(worker, handles);
+        let handles = spawn_pipeline(worker);
+        let server = new_mcp_server(handles);
 
         let params = ConfigureParams {
             worker: None,
@@ -843,8 +888,8 @@ mod tests {
     #[tokio::test]
     async fn test_configure_pipeline_multiple_changes() {
         let worker: Arc<dyn ModelWorker> = Arc::new(EchoWorker::new());
-        let handles = spawn_pipeline(Arc::clone(&worker));
-        let server = new_mcp_server(worker, handles);
+        let handles = spawn_pipeline(worker);
+        let server = new_mcp_server(handles);
 
         let params = ConfigureParams {
             worker: Some("echo".to_string()),
@@ -874,12 +919,108 @@ mod tests {
     #[tokio::test]
     async fn test_server_info() {
         let worker: Arc<dyn ModelWorker> = Arc::new(EchoWorker::new());
-        let handles = spawn_pipeline(Arc::clone(&worker));
-        let server = new_mcp_server(worker, handles);
+        let handles = spawn_pipeline(worker);
+        let server = new_mcp_server(handles);
 
         let info = server.get_info();
         assert!(info.instructions.is_some());
         let instructions = info.instructions.unwrap_or_default();
         assert!(instructions.contains("tokio-prompt-orchestrator"));
+    }
+
+    #[tokio::test]
+    async fn test_infer_routes_through_pipeline_increments_metrics() {
+        let _ = tokio_prompt_orchestrator::metrics::init_metrics();
+
+        let worker: Arc<dyn ModelWorker> = Arc::new(EchoWorker::new());
+        let handles = spawn_pipeline(worker);
+        let server = new_mcp_server(handles);
+
+        let params = InferParams {
+            prompt: "metrics routing test".to_string(),
+            session_id: Some("metrics-route".to_string()),
+            model: None,
+            priority: None,
+        };
+
+        let result = server.infer(Parameters(params)).await;
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap_or_default();
+
+        // The request should have succeeded through the pipeline
+        assert!(
+            parsed.get("output").is_some(),
+            "infer should return output, got: {result}"
+        );
+        assert!(
+            parsed.get("error").is_none(),
+            "infer should not return an error, got: {result}"
+        );
+
+        // Allow pipeline metrics to flush
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // Verify pipeline metrics incremented (all stages should have fired)
+        let summary = tokio_prompt_orchestrator::metrics::get_metrics_summary();
+        let total: u64 = summary.requests_total.values().sum();
+        assert!(
+            total > 0,
+            "pipeline metrics should show at least 1 request, got {total}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_infer_concurrent_requests_dispatch_correctly() {
+        let worker: Arc<dyn ModelWorker> = Arc::new(EchoWorker::new());
+        let handles = spawn_pipeline(worker);
+        let server = new_mcp_server(handles);
+
+        // Launch 3 concurrent infer calls
+        let mut tasks = Vec::new();
+        for i in 0..3 {
+            let srv = server.clone();
+            tasks.push(tokio::spawn(async move {
+                let params = InferParams {
+                    prompt: format!("concurrent prompt {i}"),
+                    session_id: Some(format!("concurrent-{i}")),
+                    model: None,
+                    priority: None,
+                };
+                srv.infer(Parameters(params)).await
+            }));
+        }
+
+        // All three should complete successfully
+        for task in tasks {
+            let result = task.await.unwrap_or_default();
+            let parsed: serde_json::Value = serde_json::from_str(&result).unwrap_or_default();
+            assert!(
+                parsed.get("output").is_some(),
+                "concurrent infer should return output, got: {result}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_batch_infer_still_works_fire_and_forget() {
+        let worker: Arc<dyn ModelWorker> = Arc::new(EchoWorker::new());
+        let handles = spawn_pipeline(worker);
+        let server = new_mcp_server(handles);
+
+        let params = BatchInferParams {
+            prompts: vec!["batch one".to_string(), "batch two".to_string()],
+            model: None,
+        };
+
+        let result = server.batch_infer(Parameters(params)).await;
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap_or_default();
+
+        assert_eq!(
+            parsed.get("status").and_then(|v| v.as_str()),
+            Some("accepted")
+        );
+        assert_eq!(
+            parsed.get("prompts_submitted").and_then(|v| v.as_u64()),
+            Some(2)
+        );
     }
 }

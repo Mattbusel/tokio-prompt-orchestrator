@@ -261,9 +261,7 @@ impl AgentSpawner {
                             task_id = %task.id,
                             "task execution returned non-zero exit code"
                         );
-                        let _ = queue
-                            .fail(&task.id, agent_id, "non-zero exit code")
-                            .await;
+                        let _ = queue.fail(&task.id, agent_id, "non-zero exit code").await;
                         stats.tasks_failed += 1;
                     }
                 }
@@ -411,7 +409,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_spawn_fleet_creates_correct_count() {
-        let dir = tempfile::tempdir().unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
         let config = Arc::new(CoordinationConfig {
             agent_count: 3,
             lock_dir: dir.path().join("locks"),
@@ -419,7 +418,10 @@ mod tests {
             ..(*test_config()).clone()
         });
         let queue = Arc::new(
-            TaskQueue::from_tasks(config.clone(), vec![]).await.ok().unwrap(),
+            TaskQueue::from_tasks(config.clone(), vec![])
+                .await
+                .ok()
+                .unwrap(),
         );
         let spawner = AgentSpawner::new(config);
         let handles = spawner.spawn_fleet(queue).await;
@@ -437,7 +439,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_spawn_fleet_n_overrides_count() {
-        let dir = tempfile::tempdir().unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
         let config = Arc::new(CoordinationConfig {
             agent_count: 2,
             lock_dir: dir.path().join("locks"),
@@ -445,7 +448,10 @@ mod tests {
             ..(*test_config()).clone()
         });
         let queue = Arc::new(
-            TaskQueue::from_tasks(config.clone(), vec![]).await.ok().unwrap(),
+            TaskQueue::from_tasks(config.clone(), vec![])
+                .await
+                .ok()
+                .unwrap(),
         );
         let spawner = AgentSpawner::new(config);
         let handles = spawner.spawn_fleet_n(5, queue).await;
@@ -455,14 +461,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_agent_loop_with_no_tasks_exits_immediately() {
-        let dir = tempfile::tempdir().unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
         let config = Arc::new(CoordinationConfig {
             lock_dir: dir.path().join("locks"),
             claude_bin: PathBuf::from("echo"),
             ..(*test_config()).clone()
         });
         let queue = Arc::new(
-            TaskQueue::from_tasks(config.clone(), vec![]).await.ok().unwrap(),
+            TaskQueue::from_tasks(config.clone(), vec![])
+                .await
+                .ok()
+                .unwrap(),
         );
         let worker = AgentWorker::new("test-agent".to_string(), config);
         let (_tx, mut rx) = watch::channel(false);
@@ -482,9 +492,7 @@ mod tests {
     async fn test_agent_handle_agent_id() {
         let handle = AgentHandle {
             agent_id: "test-handle".to_string(),
-            join_handle: tokio::spawn(async {
-                Ok(AgentStats::default())
-            }),
+            join_handle: tokio::spawn(async { Ok(AgentStats::default()) }),
         };
         assert_eq!(handle.agent_id, "test-handle");
         let _ = handle.join_handle.await;
@@ -492,7 +500,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_fleet_with_echo_tasks_completes() {
-        let dir = tempfile::tempdir().unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
         let config = Arc::new(CoordinationConfig {
             agent_count: 2,
             lock_dir: dir.path().join("locks"),
@@ -505,7 +514,10 @@ mod tests {
             Task::new("echo-2", "world", 2),
         ];
         let queue = Arc::new(
-            TaskQueue::from_tasks(config.clone(), tasks).await.ok().unwrap(),
+            TaskQueue::from_tasks(config.clone(), tasks)
+                .await
+                .ok()
+                .unwrap(),
         );
         let spawner = AgentSpawner::new(config);
         let handles = spawner.spawn_fleet(queue.clone()).await;

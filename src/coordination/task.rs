@@ -181,8 +181,7 @@ impl TaskFile {
     ///
     /// This function never panics.
     pub fn from_toml(content: &str) -> Result<Self, super::CoordinationError> {
-        toml::from_str(content)
-            .map_err(|e| super::CoordinationError::TaskFileParse(e.to_string()))
+        toml::from_str(content).map_err(|e| super::CoordinationError::TaskFileParse(e.to_string()))
     }
 
     /// Serialize this task file to a TOML string.
@@ -217,7 +216,10 @@ impl TaskFile {
     ///
     /// This function never panics.
     pub fn pending_tasks(&self) -> Vec<&Task> {
-        self.tasks.iter().filter(|t| t.status.is_claimable()).collect()
+        self.tasks
+            .iter()
+            .filter(|t| t.status.is_claimable())
+            .collect()
     }
 }
 
@@ -407,16 +409,11 @@ prompt = "minimal task"
     #[test]
     fn test_task_file_to_toml_roundtrip() {
         let file = TaskFile {
-            tasks: vec![
-                Task::new("t1", "prompt1", 1),
-                Task::new("t2", "prompt2", 2),
-            ],
+            tasks: vec![Task::new("t1", "prompt1", 1), Task::new("t2", "prompt2", 2)],
         };
         let toml_str = file.to_toml();
         assert!(toml_str.is_ok());
-        let reparsed = TaskFile::from_toml(
-            &toml_str.unwrap_or_default(),
-        );
+        let reparsed = TaskFile::from_toml(&toml_str.unwrap_or_default());
         assert!(reparsed.is_ok());
         let reparsed_file = reparsed.ok().unwrap_or_else(|| TaskFile { tasks: vec![] });
         assert_eq!(reparsed_file.tasks.len(), 2);

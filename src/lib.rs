@@ -21,6 +21,7 @@ use thiserror::Error;
 use tracing_subscriber::EnvFilter;
 
 pub mod config;
+pub mod coordination;
 pub mod enhanced;
 pub mod metrics;
 pub mod routing;
