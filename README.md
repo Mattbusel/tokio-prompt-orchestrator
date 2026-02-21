@@ -358,6 +358,34 @@ cargo run --bin tui --features tui -- --live --metrics-url http://host:9090/metr
 
 Keybindings: `q` quit, `p` pause, `r` reset, `h` help, `↑↓` scroll log.
 
+## Claude Desktop Integration
+
+Use tokio-prompt-orchestrator as a native Claude tool via the Model Context Protocol (MCP):
+
+1. Build the MCP server:
+   ```bash
+   cargo build --bin mcp --features mcp --release
+   ```
+
+2. Add to Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+   ```json
+   {
+     "mcpServers": {
+       "tokio-prompt-orchestrator": {
+         "command": "/path/to/target/release/mcp"
+       }
+     }
+   }
+   ```
+
+3. Restart Claude Desktop. You now have these tools available:
+   - `infer` — run prompts through your local pipeline
+   - `pipeline_status` — monitor circuit breakers and throughput
+   - `batch_infer` — process multiple prompts
+   - `configure_pipeline` — hot-swap workers and settings
+
+Example: "Hey Claude, run this prompt through my local pipeline and show me the stage latencies"
+
 ##  Monitoring & Observability
 
 ### Prometheus Metrics
