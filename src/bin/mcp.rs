@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{oneshot, RwLock};
 use tokio_prompt_orchestrator::{
+    enhanced::CircuitStatus,
     metrics, spawn_pipeline, EchoWorker, LlamaCppWorker, ModelWorker, OrchestratorError,
     PipelineHandles, PostOutput, PromptRequest, SessionId,
 };
@@ -238,11 +239,16 @@ impl OrchestratorMcp {
             "healthy"
         };
 
-        let mut circuit_breakers = HashMap::new();
-        circuit_breakers.insert("echo".to_string(), "closed".to_string());
+        let cb_status = self.pipeline.circuit_breaker.status().await;
+        let cb_state = match cb_status {
+            CircuitStatus::Closed => "closed",
+            CircuitStatus::Open => "open",
+            CircuitStatus::HalfOpen => "half-open",
+        };
 
+        let mut circuit_breakers = HashMap::new();
         let config = self.config.read().await;
-        circuit_breakers.insert(config.worker.clone(), "closed".to_string());
+        circuit_breakers.insert(config.worker.clone(), cb_state.to_string());
         drop(config);
 
         let mut channel_depths = HashMap::new();
