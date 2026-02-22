@@ -39,27 +39,39 @@ const ROLLBACK_WINDOW: Duration = Duration::from_secs(30);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ParameterId {
     /// Buffer capacity for pipeline stage 1 (RAG).
+    /// Buffer capacity for pipeline stage 1 (RAG).
     ChannelBufStage1,
+    /// Buffer capacity for pipeline stage 2 (Assemble).
     /// Buffer capacity for pipeline stage 2 (Assemble).
     ChannelBufStage2,
     /// Buffer capacity for pipeline stage 3 (Inference).
+    /// Buffer capacity for pipeline stage 3 (Inference).
     ChannelBufStage3,
+    /// Buffer capacity for pipeline stage 4 (Post-process).
     /// Buffer capacity for pipeline stage 4 (Post-process).
     ChannelBufStage4,
     /// Buffer capacity for pipeline stage 5 (Stream).
+    /// Buffer capacity for pipeline stage 5 (Stream).
     ChannelBufStage5,
+    /// Fraction of queue capacity at which load shedding activates.
     /// Fraction of queue capacity at which load shedding activates.
     BackpressureShedThreshold,
     /// Number of consecutive failures before the circuit breaker opens.
+    /// Number of consecutive failures before the circuit breaker opens.
     CircuitBreakerFailureThreshold,
+    /// Minimum success rate required to keep the circuit breaker closed.
     /// Minimum success rate required to keep the circuit breaker closed.
     CircuitBreakerSuccessRate,
     /// Per-request timeout in milliseconds enforced by the circuit breaker.
+    /// Per-request timeout in milliseconds enforced by the circuit breaker.
     CircuitBreakerTimeoutMs,
+    /// Time-to-live in milliseconds for deduplication cache entries.
     /// Time-to-live in milliseconds for deduplication cache entries.
     DedupTtlMs,
     /// Token refill rate (tokens per second) for the rate limiter.
+    /// Token refill rate (tokens per second) for the rate limiter.
     RateLimiterRefillRate,
+    /// Interval in milliseconds between priority-queue promotion sweeps.
     /// Interval in milliseconds between priority-queue promotion sweeps.
     PriorityQueuePromotionIntervalMs,
 }
@@ -84,6 +96,7 @@ impl ParameterId {
     }
 
     /// Return the canonical snake_case name for this parameter.
+    /// Return the canonical snake_case name for this parameter.
     pub fn name(self) -> &'static str {
         match self {
             ParameterId::ChannelBufStage1 => "channel_buf_stage1",
@@ -104,16 +117,23 @@ impl ParameterId {
 
 // ─── ParameterSpec ───────────────────────────────────────────────────────────
 
+/// Constraints and rollback policy for a single tunable parameter.
 #[derive(Debug, Clone)]
 pub struct ParameterSpec {
+    /// Minimum allowed value (inclusive).
     pub min: f64,
+    /// Maximum allowed value (inclusive).
     pub max: f64,
+    /// Smallest increment the PID output is quantised to.
     pub step: f64,
+    /// Minimum time between consecutive changes to this parameter.
     pub cooldown: Duration,
+    /// Relative degradation that triggers automatic rollback (e.g. 0.10 = 10%).
     pub rollback_threshold: f64,
 }
 
 impl ParameterSpec {
+    /// Return the default [`ParameterSpec`] for the given parameter ID.
     pub fn default_for(id: ParameterId) -> Self {
         match id {
             ParameterId::ChannelBufStage1
@@ -186,17 +206,25 @@ impl ParameterSpec {
 
 // ─── PidState ────────────────────────────────────────────────────────────────
 
+/// State for a single PID controller instance.
 #[derive(Debug, Clone)]
 pub struct PidState {
+    /// Proportional gain.
     pub kp: f64,
+    /// Integral gain.
     pub ki: f64,
+    /// Derivative gain.
     pub kd: f64,
+    /// Accumulated integral term (clamped to +/-100 to prevent windup).
     pub integral: f64,
+    /// Error value from the previous update tick.
     pub prev_error: f64,
+    /// Wall-clock time of the last update call.
     pub last_update: Instant,
 }
 
 impl PidState {
+    /// Create a new [`PidState`] with the given PID gains and zeroed accumulator.
     pub fn new(kp: f64, ki: f64, kd: f64) -> Self {
         Self {
             kp,
@@ -208,6 +236,8 @@ impl PidState {
         }
     }
 
+    /// Advance the controller by one tick. `error` is target minus actual; `dt` is elapsed seconds.
+    /// Returns control output clamped to `[-1.0, 1.0]`.
     pub fn update(&mut self, error: f64, dt: f64) -> f64 {
         if dt <= 0.0 {
             return 0.0;
@@ -243,6 +273,7 @@ impl ParameterValue {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+/// Round `value` to the nearest multiple of `step`.
 pub fn pid_round_to_step(value: f64, step: f64) -> f64 {
     if step <= 0.0 {
         return value;
@@ -250,6 +281,7 @@ pub fn pid_round_to_step(value: f64, step: f64) -> f64 {
     (value / step).round() * step
 }
 
+/// Compute the mean p95 latency (ms) across all stages with samples.
 pub fn avg_p95_ms(snap: &TelemetrySnapshot) -> f64 {
     let stages: Vec<&StageMetrics> = snap
         .stages
@@ -262,6 +294,7 @@ pub fn avg_p95_ms(snap: &TelemetrySnapshot) -> f64 {
     stages.iter().map(|s| s.latency.p95_ms as f64).sum::<f64>() / stages.len() as f64
 }
 
+/// Compute the mean throughput (requests/sec) across all pipeline stages.
 pub fn avg_throughput_rps(snap: &TelemetrySnapshot) -> f64 {
     if snap.stages.is_empty() {
         return 0.0;
@@ -290,15 +323,19 @@ fn avg_p99_ms(snap: &TelemetrySnapshot) -> f64 {
 
 // ─── TuningController ────────────────────────────────────────────────────────
 
+/// Top-level PID controller that tunes all 12 pipeline parameters simultaneously.
 pub struct TuningController {
     specs: HashMap<ParameterId, ParameterSpec>,
     values: HashMap<ParameterId, ParameterValue>,
     pid_states: HashMap<ParameterId, PidState>,
+    /// Target p95 latency in milliseconds.
     pub target_p95_ms: f64,
+    /// Target aggregate throughput in requests per second.
     pub target_throughput_rps: f64,
 }
 
 impl TuningController {
+    /// Create a new controller with the given latency and throughput targets.
     pub fn new(target_p95_ms: f64, target_throughput_rps: f64) -> Self {
         let mut specs = HashMap::new();
         let mut values = HashMap::new();
@@ -319,6 +356,7 @@ impl TuningController {
         }
     }
 
+    /// Return the current recommended value for `id`, or `0.0` if not found.
     pub fn get(&self, id: ParameterId) -> f64 {
         self.values.get(&id).map(|v| v.current).unwrap_or(0.0)
     }
