@@ -117,3 +117,8 @@ path = "src/bin/coordinator.rs"
 name = "dashboard"
 path = "src/bin/dashboard.rs"
 required-features = ["dashboard"]
+
+[[bin]]
+name = "self-improve"
+path = "src/bin/self_improve.rs"
+required-features = ["self-improving"]
