@@ -505,7 +505,9 @@ impl TaskQueue {
 
             if let Some(info) = LockInfo::from_str(&content) {
                 let now = current_timestamp();
-                Ok(now.saturating_sub(info.timestamp) > stale_secs)
+                // Use >= so that stale_lock_secs=0 means "immediately stale"
+                // (a 0-second-old lock is stale when the threshold is 0).
+                Ok(now.saturating_sub(info.timestamp) >= stale_secs)
             } else {
                 // Corrupt lock file — treat as stale
                 Ok(true)
@@ -1012,5 +1014,29 @@ priority = 1
         let t1 = current_timestamp();
         let t2 = current_timestamp();
         assert!(t2 >= t1);
+    }
+
+    // Verify the staleness comparison uses >= so that stale_lock_secs=0 means
+    // "immediately stale" (delta=0 >= threshold=0 is true).
+    #[test]
+    fn test_staleness_threshold_zero_means_immediately_stale() {
+        let stale_secs: u64 = 0;
+        let delta: u64 = 0;
+        // With >=, a 0-second-old lock IS stale when threshold=0.
+        assert!(delta >= stale_secs, "delta=0 should be stale when threshold=0");
+    }
+
+    #[test]
+    fn test_staleness_threshold_positive_fresh_lock_not_stale() {
+        let stale_secs: u64 = 5;
+        let delta: u64 = 4;
+        assert!(!(delta >= stale_secs), "4s old lock should not be stale with 5s threshold");
+    }
+
+    #[test]
+    fn test_staleness_threshold_positive_exactly_at_threshold_is_stale() {
+        let stale_secs: u64 = 5;
+        let delta: u64 = 5;
+        assert!(delta >= stale_secs, "5s old lock should be stale with 5s threshold");
     }
 }

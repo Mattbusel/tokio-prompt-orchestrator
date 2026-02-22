@@ -25,7 +25,7 @@ fn test_config(dir: &tempfile::TempDir) -> CoordinationConfig {
         claude_bin: PathBuf::from("echo"),
         project_path: PathBuf::from("."),
         timeout_secs: 10,
-        stale_lock_secs: 1, // short for tests
+        stale_lock_secs: 60, // generous timeout — tests shouldn't trigger stale detection
         health_interval_secs: 1,
     }
 }
@@ -108,7 +108,10 @@ async fn test_crashed_agent_task_reclaimed_by_healthy_agent() {
     });
     let config = Arc::new(CoordinationConfig {
         agent_count: 2,
-        stale_lock_secs: 0, // immediate stale detection for tests
+        // Crash recovery is simulated via explicit release() calls, not via
+        // stale-lock detection. Use a large timeout so in-flight claims are
+        // never incorrectly treated as stale during this test.
+        stale_lock_secs: 60,
         ..test_config(&dir)
     });
 
