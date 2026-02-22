@@ -46,12 +46,14 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::config::WorkerKind;
 use crate::intelligence::{
     autoscale::{AutoscaleRecommendation, Autoscaler, AutoscalerConfig},
     feedback::{FeedbackCollector, FeedbackEntry, FeedbackSource},
     quality::{QualityEstimator, QualityEstimatorConfig},
     router::{LearnedRouter, RequestFeatures, RouterConfig},
 };
+use crate::routing::{ModelRouter, RoutingConfig};
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -75,6 +77,12 @@ pub struct BridgeConfig {
     pub autoscaler_history_capacity: usize,
     /// Minimum history points before autoscaler will produce a recommendation.
     pub autoscaler_min_history: usize,
+    /// Optional complexity-based routing configuration.
+    ///
+    /// When set, `route_prompt()` uses the `ModelRouter` to decide between
+    /// local and cloud workers. When `None`, routing falls back to the
+    /// complexity heuristic built into `advise_model()`.
+    pub routing: Option<RoutingConfig>,
 }
 
 impl Default for BridgeConfig {
@@ -90,6 +98,7 @@ impl Default for BridgeConfig {
             max_feedback_entries: 10_000,
             autoscaler_history_capacity: 720, // 1h at 5-second samples
             autoscaler_min_history: 12,
+            routing: None,
         }
     }
 }
@@ -108,6 +117,11 @@ pub struct IntelligenceBridge {
     pub quality: Arc<QualityEstimator>,
     /// Predictive load forecaster using exponential smoothing.
     pub autoscaler: Arc<Autoscaler>,
+    /// Optional complexity-based router for Local/Cloud/Fallback decisions.
+    ///
+    /// `None` when no `RoutingConfig` was provided at construction time;
+    /// `route_prompt()` falls back to a heuristic in that case.
+    pub model_router: Option<Arc<ModelRouter>>,
 }
 
 impl IntelligenceBridge {
@@ -125,6 +139,9 @@ impl IntelligenceBridge {
             min_history_points: config.autoscaler_min_history,
             ..AutoscalerConfig::default()
         };
+        let model_router = config
+            .routing
+            .map(|rc| Arc::new(ModelRouter::new(rc)));
         Self {
             learned_router: Arc::new(LearnedRouter::new(config.router)),
             feedback: Arc::new(FeedbackCollector::new(config.max_feedback_entries)),
@@ -133,6 +150,7 @@ impl IntelligenceBridge {
                 autoscale_cfg,
                 config.autoscaler_history_capacity,
             )),
+            model_router,
         }
     }
 
@@ -143,6 +161,60 @@ impl IntelligenceBridge {
     /// This function never panics.
     pub fn with_defaults() -> Self {
         Self::new(BridgeConfig::default())
+    }
+
+    /// Attach a `ModelRouter` built from the given `RoutingConfig`.
+    ///
+    /// Replaces any previously attached router. Returns `self` for chaining.
+    ///
+    /// # Arguments
+    ///
+    /// * `routing_config` — Thresholds and cost rates for the complexity router.
+    ///
+    /// # Panics
+    ///
+    /// This function never panics.
+    pub fn with_model_router(mut self, routing_config: RoutingConfig) -> Self {
+        self.model_router = Some(Arc::new(ModelRouter::new(routing_config)));
+        self
+    }
+
+    /// Recommend a `WorkerKind` for the given prompt.
+    ///
+    /// Uses the attached `ModelRouter` when available; otherwise falls back to
+    /// a simple token-count heuristic: prompts with more than 200 estimated
+    /// tokens go to `Cloud`, everything else to `LlamaCpp`.
+    ///
+    /// This is the primary integration point between complexity-based routing
+    /// and the pipeline's worker selection logic.
+    ///
+    /// # Arguments
+    ///
+    /// * `prompt` — The assembled prompt text.
+    ///
+    /// # Returns
+    ///
+    /// A `WorkerKind` indicating which backend should serve this request.
+    ///
+    /// # Panics
+    ///
+    /// This function never panics.
+    pub fn route_prompt(&self, prompt: &str) -> WorkerKind {
+        if let Some(ref router) = self.model_router {
+            let decision = router.route(prompt);
+            return match decision {
+                crate::routing::RoutingDecision::Cloud { .. } => WorkerKind::Anthropic,
+                crate::routing::RoutingDecision::Local { .. } => WorkerKind::LlamaCpp,
+                crate::routing::RoutingDecision::LocalWithFallback { .. } => WorkerKind::LlamaCpp,
+            };
+        }
+        // Fallback heuristic: long/complex prompts go cloud.
+        let tokens = estimate_tokens(prompt);
+        if tokens > 200 {
+            WorkerKind::Anthropic
+        } else {
+            WorkerKind::LlamaCpp
+        }
     }
 
     /// Register a model name with the learned router.
@@ -760,5 +832,79 @@ mod tests {
 
         // Capped at max_feedback_entries
         assert!(bridge.feedback_count() <= 5);
+    }
+
+    // ── route_prompt / model_router ─────────────────────────────────────
+
+    #[test]
+    fn test_route_prompt_without_model_router_short_is_local() {
+        let bridge = make_bridge();
+        // "hi" → ~1 token → falls below 200 threshold → LlamaCpp
+        let kind = bridge.route_prompt("hi");
+        assert_eq!(kind, crate::config::WorkerKind::LlamaCpp);
+    }
+
+    #[test]
+    fn test_route_prompt_without_model_router_long_is_cloud() {
+        let bridge = make_bridge();
+        // Build a prompt with > 200 estimated tokens (> ~154 words × 1.3)
+        let long_prompt = "word ".repeat(200);
+        let kind = bridge.route_prompt(&long_prompt);
+        assert_eq!(kind, crate::config::WorkerKind::Anthropic);
+    }
+
+    #[test]
+    fn test_route_prompt_no_model_router_field_is_none() {
+        let bridge = make_bridge();
+        assert!(bridge.model_router.is_none());
+    }
+
+    #[test]
+    fn test_with_model_router_attaches_router() {
+        let bridge = IntelligenceBridge::with_defaults()
+            .with_model_router(crate::routing::RoutingConfig::default());
+        assert!(bridge.model_router.is_some());
+    }
+
+    #[test]
+    fn test_route_prompt_with_model_router_short_is_local() {
+        let bridge = IntelligenceBridge::with_defaults()
+            .with_model_router(crate::routing::RoutingConfig::default());
+        // Very short prompt → complexity scorer should route Local → LlamaCpp
+        let kind = bridge.route_prompt("hello");
+        assert_eq!(kind, crate::config::WorkerKind::LlamaCpp);
+    }
+
+    #[test]
+    fn test_route_prompt_with_model_router_low_threshold_cloud() {
+        // Use a config with cloud_threshold=0 so every prompt routes Cloud.
+        let routing_cfg = crate::routing::RoutingConfig {
+            cloud_threshold: -1.0,
+            local_threshold: -2.0,
+            ..crate::routing::RoutingConfig::default()
+        };
+        let bridge = IntelligenceBridge::with_defaults().with_model_router(routing_cfg);
+        let kind = bridge.route_prompt("hello");
+        assert_eq!(kind, crate::config::WorkerKind::Anthropic);
+    }
+
+    #[test]
+    fn test_bridge_config_with_routing_constructs_model_router() {
+        let config = BridgeConfig {
+            routing: Some(crate::routing::RoutingConfig::default()),
+            ..BridgeConfig::default()
+        };
+        let bridge = IntelligenceBridge::new(config);
+        assert!(bridge.model_router.is_some());
+    }
+
+    #[test]
+    fn test_bridge_config_without_routing_no_model_router() {
+        let config = BridgeConfig {
+            routing: None,
+            ..BridgeConfig::default()
+        };
+        let bridge = IntelligenceBridge::new(config);
+        assert!(bridge.model_router.is_none());
     }
 }
