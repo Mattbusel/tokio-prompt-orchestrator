@@ -1,0 +1,811 @@
+//! # Self-Improvement Loop
+//!
+//! The top-level wiring that connects all self-tuning and self-modifying
+//! subsystems into a single running background service.
+//!
+//! ## Architecture
+//!
+//! ```text
+//!   TelemetryBus
+//!       │  subscribe()
+//!       ▼
+//!   AnomalyDetector  ──── critical anomalies ──► TuningController
+//!       │                                               │  process(snap)
+//!       │ anomalies                                     │  tuning adjustments
+//!       ▼                                               ▼
+//!   MetaTaskGenerator ◄─────────────────────── SnapshotStore
+//!       │  process_snapshot()                  create_snapshot()
+//!       │  generated tasks
+//!       ▼
+//!   ValidationGate
+//!       │  evaluate()
+//!       ▼
+//!   AgentMemory
+//!       │  insert_modification()
+//!       └── loop status / metrics
+//! ```
+//!
+//! ## Usage
+//!
+//! ```rust,no_run
+//! use std::sync::Arc;
+//! use tokio::sync::watch;
+//! use tokio_prompt_orchestrator::self_tune::{
+//!     telemetry_bus::{TelemetryBus, TelemetryBusConfig, PipelineCounters},
+//!     anomaly::AnomalyDetector,
+//!     controller::TuningController,
+//!     snapshot::SnapshotStore,
+//! };
+//! use tokio_prompt_orchestrator::self_modify::{
+//!     MetaTaskGenerator, ValidationGate, GateConfig, AgentMemory,
+//! };
+//! use tokio_prompt_orchestrator::self_improve_loop::{SelfImprovementLoop, LoopConfig};
+//!
+//! #[tokio::main]
+//! async fn main() {
+//!     let counters   = PipelineCounters::new();
+//!     let bus        = Arc::new(TelemetryBus::new(TelemetryBusConfig::default(), counters));
+//!     bus.start();
+//!
+//!     let loop_cfg   = LoopConfig::default();
+//!     let sil        = SelfImprovementLoop::new(loop_cfg, Arc::clone(&bus));
+//!
+//!     let (tx, rx) = watch::channel(false);
+//!     let handle = tokio::spawn(async move { sil.run(rx).await });
+//!
+//!     // … run your pipeline …
+//!     tx.send(true).ok();
+//!     handle.await.ok();
+//! }
+//! ```
+//!
+//! ## Feature flag
+//!
+//! This module requires both `self-tune` **and** `self-modify`.
+
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex,
+    },
+    time::{Duration, Instant},
+};
+
+use tokio::sync::watch;
+use tracing::{debug, error, info, warn};
+
+use crate::self_modify::{
+    AgentMemory, GateConfig, GeneratedTask, MetaTaskGenerator, ModificationOutcome,
+    ModificationRecord, ValidationGate,
+};
+use crate::self_tune::{
+    anomaly::{AnomalyDetector, Severity},
+    controller::TuningController,
+    snapshot::{SnapshotSource, SnapshotStore},
+    telemetry_bus::TelemetryBus,
+};
+
+// ---------------------------------------------------------------------------
+// LoopConfig
+// ---------------------------------------------------------------------------
+
+/// Configuration for the self-improvement loop.
+#[derive(Debug, Clone)]
+pub struct LoopConfig {
+    /// How often to run one loop iteration when no telemetry snapshot arrives.
+    /// Default: 5 seconds.
+    pub poll_interval: Duration,
+
+    /// Maximum number of tasks to generate per loop iteration.
+    /// Prevents runaway task generation on noisy metrics.
+    /// Default: 3.
+    pub max_tasks_per_iteration: usize,
+
+    /// Minimum severity level required to trigger task generation.
+    /// Default: `Severity::Warning`.
+    pub task_generation_threshold: Severity,
+
+    /// Whether the gate should actually run `cargo test` and `cargo clippy`.
+    /// Set to `false` in unit tests.
+    /// Default: `true`.
+    pub run_gate_commands: bool,
+
+    /// Snapshot store capacity.
+    /// Default: 256.
+    pub max_snapshots: usize,
+
+    /// AgentMemory capacity (max modification records).
+    /// Default: 512.
+    pub max_memory_records: usize,
+
+    /// PID controller target P95 latency in milliseconds.
+    /// Default: 50.0 ms.
+    pub target_p95_ms: f64,
+
+    /// PID controller target throughput in requests/second.
+    /// Default: 1000.0.
+    pub target_throughput_rps: f64,
+}
+
+impl Default for LoopConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval: Duration::from_secs(5),
+            max_tasks_per_iteration: 3,
+            task_generation_threshold: Severity::Warning,
+            run_gate_commands: true,
+            max_snapshots: 256,
+            max_memory_records: 512,
+            target_p95_ms: 50.0,
+            target_throughput_rps: 1_000.0,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LoopStatus
+// ---------------------------------------------------------------------------
+
+/// Live status of the self-improvement loop.
+#[derive(Debug, Clone)]
+pub struct LoopStatus {
+    /// Total telemetry snapshots processed.
+    pub snapshots_processed: u64,
+    /// Total anomalies detected.
+    pub anomalies_detected: u64,
+    /// Total tuning adjustments applied by the PID controller.
+    pub tuning_adjustments: u64,
+    /// Total tasks generated by the MetaTaskGenerator.
+    pub tasks_generated: u64,
+    /// Total gate evaluations run.
+    pub gate_evaluations: u64,
+    /// Number of gate evaluations that passed.
+    pub gate_passes: u64,
+    /// Number of gate evaluations that failed.
+    pub gate_failures: u64,
+    /// Whether the loop is currently running.
+    pub running: bool,
+    /// Uptime of the loop.
+    pub uptime: Duration,
+}
+
+// ---------------------------------------------------------------------------
+// SelfImprovementLoop — internal state
+// ---------------------------------------------------------------------------
+
+struct Inner {
+    snapshots_processed: AtomicU64,
+    anomalies_detected: AtomicU64,
+    tuning_adjustments: AtomicU64,
+    tasks_generated: AtomicU64,
+    gate_evaluations: AtomicU64,
+    gate_passes: AtomicU64,
+    gate_failures: AtomicU64,
+    running: AtomicBool,
+    started_at: Mutex<Option<Instant>>,
+}
+
+impl Inner {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            snapshots_processed: AtomicU64::new(0),
+            anomalies_detected: AtomicU64::new(0),
+            tuning_adjustments: AtomicU64::new(0),
+            tasks_generated: AtomicU64::new(0),
+            gate_evaluations: AtomicU64::new(0),
+            gate_passes: AtomicU64::new(0),
+            gate_failures: AtomicU64::new(0),
+            running: AtomicBool::new(false),
+            started_at: Mutex::new(None),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SelfImprovementLoop
+// ---------------------------------------------------------------------------
+
+/// The self-improvement loop wires all self-tuning and self-modifying
+/// subsystems into a single background task.
+///
+/// # Ownership
+///
+/// `SelfImprovementLoop` is cheaply cloneable (all state behind `Arc`).
+/// Call `run(shutdown_rx)` to drive it.
+pub struct SelfImprovementLoop {
+    cfg: LoopConfig,
+    bus: Arc<TelemetryBus>,
+    anomaly: Arc<AnomalyDetector>,
+    controller: Mutex<TuningController>,
+    snapshots: Arc<SnapshotStore>,
+    task_gen: Arc<MetaTaskGenerator>,
+    gate: Arc<ValidationGate>,
+    memory: Arc<AgentMemory>,
+    inner: Arc<Inner>,
+}
+
+impl SelfImprovementLoop {
+    /// Create a new self-improvement loop with default subsystems.
+    ///
+    /// All subsystems are constructed from `cfg` defaults; no external
+    /// dependencies are required.
+    pub fn new(cfg: LoopConfig, bus: Arc<TelemetryBus>) -> Self {
+        let anomaly = Arc::new(AnomalyDetector::with_defaults());
+        let controller = Mutex::new(TuningController::new(
+            cfg.target_p95_ms,
+            cfg.target_throughput_rps,
+        ));
+        let snapshots = Arc::new(SnapshotStore::new(cfg.max_snapshots));
+        let task_gen = Arc::new(MetaTaskGenerator::new());
+        let gate_cfg = GateConfig::default();
+        let gate = Arc::new(ValidationGate::new(gate_cfg));
+        let memory = Arc::new(AgentMemory::new(cfg.max_memory_records));
+        let inner = Inner::new();
+
+        Self {
+            cfg,
+            bus,
+            anomaly,
+            controller,
+            snapshots,
+            task_gen,
+            gate,
+            memory,
+            inner,
+        }
+    }
+
+    /// Build with externally provided subsystems (useful in tests and when
+    /// integrating into a larger system that already owns these components).
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_components(
+        cfg: LoopConfig,
+        bus: Arc<TelemetryBus>,
+        anomaly: Arc<AnomalyDetector>,
+        controller: TuningController,
+        snapshots: Arc<SnapshotStore>,
+        task_gen: Arc<MetaTaskGenerator>,
+        gate: Arc<ValidationGate>,
+        memory: Arc<AgentMemory>,
+    ) -> Self {
+        Self {
+            cfg,
+            bus,
+            anomaly,
+            controller: Mutex::new(controller),
+            snapshots,
+            task_gen,
+            gate,
+            memory,
+            inner: Inner::new(),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Status
+    // -----------------------------------------------------------------------
+
+    /// Return a snapshot of the loop's current counters.
+    pub fn status(&self) -> LoopStatus {
+        let uptime = self
+            .inner
+            .started_at
+            .lock()
+            .ok()
+            .and_then(|g| g.map(|t| t.elapsed()))
+            .unwrap_or_default();
+
+        LoopStatus {
+            snapshots_processed: self.inner.snapshots_processed.load(Ordering::Relaxed),
+            anomalies_detected: self.inner.anomalies_detected.load(Ordering::Relaxed),
+            tuning_adjustments: self.inner.tuning_adjustments.load(Ordering::Relaxed),
+            tasks_generated: self.inner.tasks_generated.load(Ordering::Relaxed),
+            gate_evaluations: self.inner.gate_evaluations.load(Ordering::Relaxed),
+            gate_passes: self.inner.gate_passes.load(Ordering::Relaxed),
+            gate_failures: self.inner.gate_failures.load(Ordering::Relaxed),
+            running: self.inner.running.load(Ordering::Relaxed),
+            uptime,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Main run loop
+    // -----------------------------------------------------------------------
+
+    /// Drive the self-improvement loop until `shutdown_rx` is set to `true`.
+    ///
+    /// This method is designed to be spawned in a `tokio::spawn` call:
+    ///
+    /// ```rust,ignore
+    /// let handle = tokio::spawn(async move { sil.run(shutdown_rx).await });
+    /// ```
+    pub async fn run(&self, mut shutdown_rx: watch::Receiver<bool>) {
+        info!("SelfImprovementLoop starting");
+        self.inner.running.store(true, Ordering::SeqCst);
+        if let Ok(mut g) = self.inner.started_at.lock() {
+            *g = Some(Instant::now());
+        }
+
+        let mut telemetry_rx = self.bus.subscribe();
+        let tick = tokio::time::interval(self.cfg.poll_interval);
+        tokio::pin!(tick);
+
+        loop {
+            tokio::select! {
+                // Prefer shutdown over all else.
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        info!("SelfImprovementLoop received shutdown signal");
+                        break;
+                    }
+                }
+                // Process a new telemetry snapshot as soon as it arrives.
+                snap_result = telemetry_rx.recv() => {
+                    match snap_result {
+                        Ok(snap) => {
+                            if let Err(e) = self.process_snapshot(snap).await {
+                                warn!("SelfImprovementLoop iteration error: {e}");
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            warn!("SelfImprovementLoop lagged by {n} telemetry snapshots");
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            error!("TelemetryBus broadcast channel closed; loop stopping");
+                            break;
+                        }
+                    }
+                }
+                // Fall-through tick so the loop doesn't starve when no
+                // telemetry arrives (e.g., quiet system).
+                _ = tick.tick() => {
+                    debug!("SelfImprovementLoop heartbeat tick (no new telemetry)");
+                }
+            }
+        }
+
+        info!("SelfImprovementLoop stopped");
+        self.inner.running.store(false, Ordering::SeqCst);
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-snapshot processing
+    // -----------------------------------------------------------------------
+
+    async fn process_snapshot(
+        &self,
+        snap: crate::self_tune::telemetry_bus::TelemetrySnapshot,
+    ) -> Result<(), LoopError> {
+        let snap_id = self
+            .inner
+            .snapshots_processed
+            .fetch_add(1, Ordering::Relaxed);
+        debug!("Processing telemetry snapshot #{snap_id}");
+
+        // ── 1. Anomaly detection ─────────────────────────────────────────
+        let anomalies = self.run_anomaly_detection(&snap)?;
+        let critical_count = anomalies
+            .iter()
+            .filter(|a| a.severity == Severity::Critical)
+            .count();
+        if !anomalies.is_empty() {
+            self.inner
+                .anomalies_detected
+                .fetch_add(anomalies.len() as u64, Ordering::Relaxed);
+            debug!(
+                "Snapshot #{snap_id}: {} anomalies ({critical_count} critical)",
+                anomalies.len()
+            );
+        }
+
+        // ── 2. PID tuning controller ─────────────────────────────────────
+        let adjustments = self.run_tuning_controller(&snap);
+        if !adjustments.is_empty() {
+            self.inner
+                .tuning_adjustments
+                .fetch_add(adjustments.len() as u64, Ordering::Relaxed);
+            info!(
+                "Snapshot #{snap_id}: {} tuning adjustments",
+                adjustments.len()
+            );
+        }
+
+        // ── 3. Snapshot store — record current config ────────────────────
+        self.record_config_snapshot(&snap, &adjustments)?;
+
+        // ── 4. Task generation ───────────────────────────────────────────
+        // Only generate tasks when anomaly severity meets the threshold.
+        let should_generate = anomalies
+            .iter()
+            .any(|a| severity_gte(&a.severity, &self.cfg.task_generation_threshold));
+
+        if should_generate {
+            let tasks = self.run_task_generation(&snap);
+            let generated = tasks
+                .iter()
+                .take(self.cfg.max_tasks_per_iteration)
+                .cloned()
+                .collect::<Vec<_>>();
+
+            if !generated.is_empty() {
+                self.inner
+                    .tasks_generated
+                    .fetch_add(generated.len() as u64, Ordering::Relaxed);
+                info!("Snapshot #{snap_id}: {} tasks generated", generated.len());
+
+                // ── 5. Validate each task through the gate ────────────────
+                for task in &generated {
+                    self.run_gate_and_record(task, snap_id).await;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    fn run_anomaly_detection(
+        &self,
+        snap: &crate::self_tune::telemetry_bus::TelemetrySnapshot,
+    ) -> Result<Vec<crate::self_tune::anomaly::Anomaly>, LoopError> {
+        // Build a flat metric map from the snapshot.
+        let metrics = snapshot_to_metrics(snap);
+        let mut all_anomalies = Vec::new();
+        for (name, value) in &metrics {
+            match self.anomaly.ingest(name, *value) {
+                Ok(detected) => all_anomalies.extend(detected),
+                Err(e) => {
+                    warn!("Anomaly detection error for metric '{name}': {e}");
+                }
+            }
+        }
+        Ok(all_anomalies)
+    }
+
+    fn run_tuning_controller(
+        &self,
+        snap: &crate::self_tune::telemetry_bus::TelemetrySnapshot,
+    ) -> Vec<(crate::self_tune::controller::ParameterId, f64)> {
+        match self.controller.lock() {
+            Ok(mut ctrl) => ctrl.process(snap),
+            Err(e) => {
+                error!("TuningController lock poisoned: {e}");
+                Vec::new()
+            }
+        }
+    }
+
+    fn record_config_snapshot(
+        &self,
+        snap: &crate::self_tune::telemetry_bus::TelemetrySnapshot,
+        adjustments: &[(crate::self_tune::controller::ParameterId, f64)],
+    ) -> Result<(), LoopError> {
+        let parameters: HashMap<String, f64> = adjustments
+            .iter()
+            .map(|(id, val)| (id.name().to_string(), *val))
+            .collect();
+
+        let metrics = snapshot_to_metrics(snap);
+
+        let source = if adjustments.is_empty() {
+            SnapshotSource::Manual
+        } else {
+            SnapshotSource::PidAdjustment
+        };
+
+        self.snapshots
+            .create_snapshot(parameters, metrics, source, "auto snapshot from loop")
+            .map_err(|e| LoopError::Snapshot(e.to_string()))?;
+
+        Ok(())
+    }
+
+    fn run_task_generation(
+        &self,
+        snap: &crate::self_tune::telemetry_bus::TelemetrySnapshot,
+    ) -> Vec<GeneratedTask> {
+        match self.task_gen.process_snapshot(snap) {
+            Ok(tasks) => tasks,
+            Err(e) => {
+                warn!("MetaTaskGenerator error: {e}");
+                Vec::new()
+            }
+        }
+    }
+
+    async fn run_gate_and_record(&self, task: &GeneratedTask, snap_id: u64) {
+        let proposal_id = format!("loop-{snap_id}-{}", task.id);
+        self.inner.gate_evaluations.fetch_add(1, Ordering::Relaxed);
+
+        let report = self.gate.evaluate(&proposal_id).await;
+
+        let outcome = if report.overall_pass {
+            self.inner.gate_passes.fetch_add(1, Ordering::Relaxed);
+            info!("Gate passed for proposal '{proposal_id}'");
+            ModificationOutcome::Deployed
+        } else {
+            self.inner.gate_failures.fetch_add(1, Ordering::Relaxed);
+            warn!(
+                "Gate failed for proposal '{proposal_id}': {:?}",
+                report.recommended_action
+            );
+            ModificationOutcome::Rejected
+        };
+
+        let record = ModificationRecord::new(
+            &proposal_id,
+            &task.description,
+            vec![format!("task:{}", task.id)],
+        );
+
+        if let Err(e) = self.memory.insert_modification(record.clone()) {
+            warn!("Failed to insert modification record: {e}");
+            return;
+        }
+
+        if let Err(e) = self
+            .memory
+            .update_outcome(&record.id, outcome, HashMap::new())
+        {
+            warn!("Failed to update modification outcome: {e}");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LoopError
+// ---------------------------------------------------------------------------
+
+/// Errors that can occur within a single loop iteration.
+#[derive(Debug, thiserror::Error)]
+pub enum LoopError {
+    /// Snapshot store failed to persist the current configuration.
+    #[error("Snapshot store error: {0}")]
+    Snapshot(String),
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Convert a `TelemetrySnapshot` into a flat `HashMap<String, f64>` suitable
+/// for feeding to the anomaly detector.
+fn snapshot_to_metrics(
+    snap: &crate::self_tune::telemetry_bus::TelemetrySnapshot,
+) -> HashMap<String, f64> {
+    let mut m = HashMap::new();
+
+    // Global counters / pressure
+    m.insert("pressure".into(), snap.pressure);
+    m.insert("cache_hit_rate".into(), snap.cache_hit_rate);
+    m.insert("dedup_collision_rate".into(), snap.dedup_collision_rate);
+    m.insert("total_completed".into(), snap.total_completed as f64);
+    m.insert("total_dropped".into(), snap.total_dropped as f64);
+    m.insert("total_errors".into(), snap.total_errors as f64);
+
+    // Derived error rate: total_errors / (total_completed + total_errors) clamped to [0,1]
+    let denominator = (snap.total_completed + snap.total_errors) as f64;
+    let error_rate = if denominator > 0.0 {
+        snap.total_errors as f64 / denominator
+    } else {
+        0.0
+    };
+    m.insert("error_rate".into(), error_rate);
+
+    // Per-stage latency and throughput
+    for stage in &snap.stages {
+        let name = &stage.stage;
+        m.insert(format!("{name}.p50_ms"), stage.latency.p50_ms as f64);
+        m.insert(format!("{name}.p95_ms"), stage.latency.p95_ms as f64);
+        m.insert(format!("{name}.error_rate"), stage.error_rate);
+        m.insert(format!("{name}.throughput_rps"), stage.throughput_rps);
+        m.insert(format!("{name}.queue_depth"), stage.queue_depth as f64);
+    }
+
+    m
+}
+
+/// Returns `true` if `a >= b` in severity ordering.
+fn severity_gte(a: &Severity, b: &Severity) -> bool {
+    severity_rank(a) >= severity_rank(b)
+}
+
+fn severity_rank(s: &Severity) -> u8 {
+    match s {
+        Severity::Info => 1,
+        Severity::Warning => 2,
+        Severity::Critical => 3,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::self_tune::telemetry_bus::{PipelineCounters, TelemetryBusConfig};
+
+    fn make_bus() -> Arc<TelemetryBus> {
+        let counters = PipelineCounters::new();
+        let cfg = TelemetryBusConfig {
+            sample_interval: Duration::from_millis(50),
+            ..TelemetryBusConfig::default()
+        };
+        Arc::new(TelemetryBus::new(cfg, counters))
+    }
+
+    fn make_loop(run_gate: bool) -> SelfImprovementLoop {
+        let bus = make_bus();
+        let cfg = LoopConfig {
+            run_gate_commands: run_gate,
+            poll_interval: Duration::from_millis(50),
+            ..LoopConfig::default()
+        };
+        SelfImprovementLoop::new(cfg, bus)
+    }
+
+    // ── status ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_status_initial_state_all_zeros() {
+        let sil = make_loop(false);
+        let s = sil.status();
+        assert_eq!(s.snapshots_processed, 0);
+        assert_eq!(s.anomalies_detected, 0);
+        assert_eq!(s.tuning_adjustments, 0);
+        assert_eq!(s.tasks_generated, 0);
+        assert_eq!(s.gate_evaluations, 0);
+        assert!(!s.running);
+    }
+
+    // ── snapshot_to_metrics ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_snapshot_to_metrics_includes_error_rate() {
+        use crate::self_tune::telemetry_bus::TelemetrySnapshot;
+        let mut snap = TelemetrySnapshot::default();
+        snap.total_errors = 5;
+        snap.total_completed = 95;
+        let m = snapshot_to_metrics(&snap);
+        assert!(m.contains_key("error_rate"));
+        assert!((m["error_rate"] - 0.05).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_snapshot_to_metrics_per_stage_keys() {
+        use crate::self_tune::telemetry_bus::{StageMetrics, TelemetrySnapshot};
+        let mut snap = TelemetrySnapshot::default();
+        let mut sm = StageMetrics::default();
+        sm.stage = "dedup".into();
+        snap.stages.push(sm);
+        let m = snapshot_to_metrics(&snap);
+        assert!(m.contains_key("dedup.p50_ms"));
+        assert!(m.contains_key("dedup.p95_ms"));
+        assert!(m.contains_key("dedup.error_rate"));
+    }
+
+    // ── severity helpers ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_severity_gte_critical_ge_warn() {
+        assert!(severity_gte(&Severity::Critical, &Severity::Warning));
+    }
+
+    #[test]
+    fn test_severity_gte_info_lt_warn() {
+        assert!(!severity_gte(&Severity::Info, &Severity::Warning));
+    }
+
+    #[test]
+    fn test_severity_gte_same_level() {
+        assert!(severity_gte(&Severity::Warning, &Severity::Warning));
+    }
+
+    // ── LoopConfig defaults ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_loop_config_defaults_sane() {
+        let cfg = LoopConfig::default();
+        assert_eq!(cfg.max_tasks_per_iteration, 3);
+        assert!(cfg.poll_interval <= Duration::from_secs(60));
+        assert!(cfg.target_p95_ms > 0.0);
+        assert!(cfg.target_throughput_rps > 0.0);
+    }
+
+    // ── run + shutdown ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_run_stops_on_shutdown_signal() {
+        let sil = Arc::new(make_loop(false));
+        let (tx, rx) = watch::channel(false);
+
+        let sil_clone = Arc::clone(&sil);
+        let handle = tokio::spawn(async move { sil_clone.run(rx).await });
+
+        // Give it a moment to start.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        tx.send(true).expect("shutdown send");
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("loop should stop within 2s")
+            .expect("join error");
+
+        assert!(!sil.inner.running.load(Ordering::Relaxed));
+    }
+
+    // ── process_snapshot counter increments ──────────────────────────────────
+
+    #[tokio::test]
+    async fn test_process_snapshot_increments_counter() {
+        use crate::self_tune::telemetry_bus::TelemetrySnapshot;
+        let sil = make_loop(false);
+        let snap = TelemetrySnapshot::default();
+        sil.process_snapshot(snap).await.expect("should not error");
+        assert_eq!(sil.inner.snapshots_processed.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn test_process_snapshot_records_config_snapshot() {
+        use crate::self_tune::telemetry_bus::TelemetrySnapshot;
+        let sil = make_loop(false);
+        let snap = TelemetrySnapshot::default();
+        sil.process_snapshot(snap).await.expect("ok");
+        assert!(sil.snapshots.version_count() >= 1);
+    }
+
+    // ── gate counters ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_run_gate_increments_gate_evaluations() {
+        use crate::self_modify::{Complexity, TaskPriority};
+        let sil = make_loop(false);
+        let task = GeneratedTask {
+            id: "test-task-id".into(),
+            name: "test-task".into(),
+            description: "do something".into(),
+            affected_files: vec![],
+            acceptance_criteria: "metric below threshold".into(),
+            priority: TaskPriority::High,
+            estimated_complexity: Complexity::Small,
+            trigger_metric: "error_rate".into(),
+            trigger_value: 0.1,
+            target_value: 0.05,
+            created_at_secs: 0,
+        };
+        sil.run_gate_and_record(&task, 0).await;
+        assert_eq!(
+            sil.inner.gate_evaluations.load(Ordering::Relaxed),
+            1,
+            "gate_evaluations should be 1"
+        );
+    }
+
+    // ── with_components constructor ──────────────────────────────────────────
+
+    #[test]
+    fn test_with_components_constructs_without_panic() {
+        use crate::self_modify::{AgentMemory, GateConfig, MetaTaskGenerator, ValidationGate};
+        use crate::self_tune::{
+            anomaly::AnomalyDetector, controller::TuningController, snapshot::SnapshotStore,
+        };
+        let bus = make_bus();
+        let cfg = LoopConfig::default();
+        let _sil = SelfImprovementLoop::with_components(
+            cfg.clone(),
+            bus,
+            Arc::new(AnomalyDetector::with_defaults()),
+            TuningController::new(cfg.target_p95_ms, cfg.target_throughput_rps),
+            Arc::new(SnapshotStore::new(64)),
+            Arc::new(MetaTaskGenerator::new()),
+            Arc::new(ValidationGate::new(GateConfig::default())),
+            Arc::new(AgentMemory::new(64)),
+        );
+    }
+}

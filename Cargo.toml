@@ -78,6 +78,22 @@ tempfile = "3"
 wiremock = "0.6"
 tower = { version = "0.4", features = ["util"] }
 
+[[example]]
+name = "rest_api"
+required-features = ["web-api"]
+
+[[example]]
+name = "sse_stream"
+required-features = ["web-api"]
+
+[[example]]
+name = "websocket_api"
+required-features = ["web-api"]
+
+[[example]]
+name = "web_api_demo"
+required-features = ["web-api"]
+
 [[bin]]
 name = "orchestrator-demo"
 path = "src/main.rs"

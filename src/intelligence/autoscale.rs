@@ -64,6 +64,7 @@ pub struct LoadPoint {
     pub timestamp_ms: u64,
 }
 
+#[derive(Debug)]
 pub struct Autoscaler {
     history: Arc<Mutex<VecDeque<LoadPoint>>>,
     config: AutoscalerConfig,
@@ -273,8 +274,12 @@ mod tests {
     #[test]
     fn test_forecast_prewarm_triggered_by_spike() {
         let s = make_scaler(3);
-        // Low baseline first, then spike
-        for _ in 0..5 {
+        // Low baseline: 15 points of 1.0 to establish a low average (~1.0).
+        // Then spike to 1000.0. After exponential smoothing (α=0.3):
+        //   smoothed ≈ 0.3*1000 + 0.7*1 ≈ 300.7
+        // avg of 16 values = (15*1 + 1000)/16 ≈ 63.4
+        // prewarm condition: 300.7 > 63.4 * 2.0 = 126.8 → true
+        for _ in 0..15 {
             s.record_rps(1.0);
         }
         s.record_rps(1000.0);

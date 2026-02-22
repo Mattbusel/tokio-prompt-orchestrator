@@ -489,6 +489,283 @@ async fn stream_stage(mut rx: mpsc::Receiver<PostOutput>, output_tx: mpsc::Sende
     info!(target: "orchestrator::pipeline", "Stream stage shutting down");
 }
 
+// ── Intelligence-wired pipeline variant ──────────────────────────────────────
+
+#[cfg(feature = "intelligence")]
+use crate::intelligence::bridge::IntelligenceBridge;
+
+/// Spawn the complete 5-stage pipeline with an active [`IntelligenceBridge`].
+///
+/// Identical to [`spawn_pipeline`] but wires the bridge into the RAG and
+/// inference stages so that:
+///
+/// - Every arriving request records its RPS on the autoscaler.
+/// - Every completed inference records quality + outcome on the learned router.
+///
+/// The returned [`PipelineHandles`] is identical — callers can use the same
+/// send/receive API regardless of which spawn function they called.
+///
+/// # Panics
+///
+/// This function never panics.
+#[cfg(feature = "intelligence")]
+pub fn spawn_pipeline_with_intelligence(
+    worker: Arc<dyn ModelWorker>,
+    bridge: Arc<IntelligenceBridge>,
+    worker_name: &str,
+) -> PipelineHandles {
+    let (input_tx, input_rx) = mpsc::channel::<PromptRequest>(512);
+    let (rag_tx, rag_rx) = mpsc::channel::<RagOutput>(512);
+    let (assemble_tx, assemble_rx) = mpsc::channel::<AssembleOutput>(512);
+    let (inference_tx, inference_rx) = mpsc::channel::<InferenceOutput>(1024);
+    let (post_tx, post_rx) = mpsc::channel::<PostOutput>(512);
+    let (output_tx, output_rx) = mpsc::channel::<PostOutput>(256);
+
+    let circuit_breaker = CircuitBreaker::new(5, 0.8, std::time::Duration::from_secs(60));
+
+    // Shared request counter for RPS estimation.
+    let req_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+    let rag = {
+        let bridge_clone = Arc::clone(&bridge);
+        let counter = Arc::clone(&req_counter);
+        tokio::spawn(rag_stage_tracked(input_rx, rag_tx, bridge_clone, counter))
+    };
+    let assemble = tokio::spawn(assemble_stage(rag_rx, assemble_tx));
+    let inference = {
+        let bridge_clone = Arc::clone(&bridge);
+        let name = worker_name.to_string();
+        tokio::spawn(inference_stage_with_intelligence(
+            assemble_rx,
+            inference_tx,
+            worker,
+            circuit_breaker.clone(),
+            bridge_clone,
+            name,
+        ))
+    };
+    let post = tokio::spawn(post_stage(inference_rx, post_tx));
+    let stream = tokio::spawn(stream_stage(post_rx, output_tx));
+
+    PipelineHandles {
+        rag,
+        assemble,
+        inference,
+        post,
+        stream,
+        input_tx,
+        output_rx: tokio::sync::Mutex::new(Some(output_rx)),
+        circuit_breaker,
+    }
+}
+
+/// RAG stage variant that notifies the intelligence bridge on each request.
+///
+/// Records an approximate RPS value derived from the rolling request counter.
+///
+/// # Panics
+///
+/// This function never panics.
+#[cfg(feature = "intelligence")]
+async fn rag_stage_tracked(
+    mut rx: mpsc::Receiver<PromptRequest>,
+    tx: mpsc::Sender<RagOutput>,
+    bridge: Arc<IntelligenceBridge>,
+    req_counter: Arc<std::sync::atomic::AtomicU64>,
+) {
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    info!(target: "orchestrator::pipeline", "RAG stage (intelligence-tracked) started");
+
+    // Track a 10-second window for RPS estimation.
+    let window_start = Instant::now();
+
+    while let Some(request) = rx.recv().await {
+        let start = Instant::now();
+        let session_id = request.session.as_str().to_string();
+        let request_id = request.request_id.clone();
+
+        let span = tracing::info_span!(
+            "pipeline.rag",
+            session_id = %session_id,
+            request_id = %request_id,
+            stage = "rag",
+            duration_ms = tracing::field::Empty,
+            outcome = tracing::field::Empty,
+        );
+        let _enter = span.enter();
+
+        metrics::inc_request("rag");
+
+        // Estimate RPS: requests / elapsed seconds.
+        let count = req_counter.fetch_add(1, Ordering::Relaxed) + 1;
+        let elapsed_secs = window_start.elapsed().as_secs_f64().max(1.0);
+        let rps = count as f64 / elapsed_secs;
+        bridge.notify_request(rps);
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        let session = request.session.clone();
+        let output = RagOutput {
+            session: session.clone(),
+            context: format!(
+                "CONTEXT: Retrieved documents for '{}'",
+                request.input.chars().take(50).collect::<String>()
+            ),
+            original: request,
+        };
+
+        let elapsed = start.elapsed();
+        metrics::record_stage_latency("rag", elapsed);
+        Span::current().record("duration_ms", elapsed.as_millis() as u64);
+        Span::current().record("outcome", "ok");
+
+        if let Err(e) = send_with_shed(&tx, output, "rag").await {
+            warn!(
+                target: "orchestrator::pipeline",
+                session_id = %session_id,
+                request_id = %request_id,
+                error = ?e,
+                "RAG stage (tracked) send failed"
+            );
+            metrics::inc_error("rag", "channel_closed");
+            break;
+        }
+    }
+
+    info!(target: "orchestrator::pipeline", "RAG stage (intelligence-tracked) shutting down");
+}
+
+/// Inference stage variant that records outcomes on the intelligence bridge.
+///
+/// On success: estimates quality and records a positive outcome.
+/// On failure: records a failure outcome so the bandit can penalise the model.
+///
+/// # Panics
+///
+/// This function never panics.
+#[cfg(feature = "intelligence")]
+async fn inference_stage_with_intelligence(
+    mut rx: mpsc::Receiver<AssembleOutput>,
+    tx: mpsc::Sender<InferenceOutput>,
+    worker: Arc<dyn ModelWorker>,
+    breaker: CircuitBreaker,
+    bridge: Arc<IntelligenceBridge>,
+    worker_name: String,
+) {
+    info!(target: "orchestrator::pipeline", "Inference stage (intelligence-tracked) started");
+
+    while let Some(assemble_output) = rx.recv().await {
+        let start = Instant::now();
+        let session_id = assemble_output.session.as_str().to_string();
+        let request_id = assemble_output.request_id.clone();
+
+        let span = tracing::info_span!(
+            "pipeline.inference",
+            session_id = %session_id,
+            request_id = %request_id,
+            stage = "inference",
+            duration_ms = tracing::field::Empty,
+            outcome = tracing::field::Empty,
+            error_kind = tracing::field::Empty,
+        );
+        let _enter = span.enter();
+
+        metrics::inc_request("inference");
+
+        let prompt = assemble_output.prompt.clone();
+        let w = Arc::clone(&worker);
+        let cb_result = breaker.call(|| async move { w.infer(&prompt).await }).await;
+
+        let elapsed = start.elapsed();
+        let latency_ms = elapsed.as_secs_f64() * 1000.0;
+
+        match cb_result {
+            Ok(tokens) => {
+                metrics::record_stage_latency("inference", elapsed);
+                Span::current().record("duration_ms", elapsed.as_millis() as u64);
+                Span::current().record("outcome", "ok");
+
+                // Notify bridge: quality estimation + bandit update.
+                let response_text = tokens.join(" ");
+                bridge.notify_completion(
+                    &worker_name,
+                    "pipeline",
+                    &assemble_output.prompt,
+                    &response_text,
+                    latency_ms,
+                    true,
+                );
+
+                let output = InferenceOutput {
+                    session: assemble_output.session,
+                    request_id: request_id.clone(),
+                    tokens,
+                };
+
+                if let Err(e) = send_with_shed(&tx, output, "inference").await {
+                    warn!(
+                        target: "orchestrator::pipeline",
+                        session_id = %session_id,
+                        request_id = %request_id,
+                        error = ?e,
+                        "Inference stage (tracked) send failed"
+                    );
+                    metrics::inc_error("inference", "channel_closed");
+                    break;
+                }
+            }
+            Err(crate::enhanced::circuit_breaker::CircuitBreakerError::Open) => {
+                metrics::record_stage_latency("inference", elapsed);
+                Span::current().record("duration_ms", elapsed.as_millis() as u64);
+                Span::current().record("outcome", "err");
+                Span::current().record("error_kind", "circuit_open");
+                bridge.notify_completion(
+                    &worker_name,
+                    "pipeline",
+                    &assemble_output.prompt,
+                    "",
+                    latency_ms,
+                    false,
+                );
+                warn!(
+                    target: "orchestrator::pipeline",
+                    session_id = %session_id,
+                    request_id = %request_id,
+                    "Inference rejected: circuit breaker open"
+                );
+                metrics::inc_error("inference", "circuit_open");
+                metrics::inc_shed("inference");
+            }
+            Err(crate::enhanced::circuit_breaker::CircuitBreakerError::Failed(e)) => {
+                metrics::record_stage_latency("inference", elapsed);
+                Span::current().record("duration_ms", elapsed.as_millis() as u64);
+                Span::current().record("outcome", "err");
+                Span::current().record("error_kind", "inference_failure");
+                bridge.notify_completion(
+                    &worker_name,
+                    "pipeline",
+                    &assemble_output.prompt,
+                    "",
+                    latency_ms,
+                    false,
+                );
+                warn!(
+                    target: "orchestrator::pipeline",
+                    session_id = %session_id,
+                    request_id = %request_id,
+                    error = %e,
+                    "Inference failed"
+                );
+                metrics::inc_error("inference", "inference_failure");
+            }
+        }
+    }
+
+    info!(target: "orchestrator::pipeline", "Inference stage (intelligence-tracked) shutting down");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

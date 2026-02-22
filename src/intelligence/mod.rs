@@ -3,6 +3,7 @@
 //! All items require the `intelligence` feature flag.
 
 pub mod autoscale;
+pub mod bridge;
 pub mod feedback;
 pub mod prompt_opt;
 pub mod quality;

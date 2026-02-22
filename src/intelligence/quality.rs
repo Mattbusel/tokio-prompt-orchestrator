@@ -68,6 +68,7 @@ pub struct QualityRecord {
     pub backend: String,
 }
 
+#[derive(Debug)]
 pub struct QualityEstimator {
     history: Arc<Mutex<VecDeque<QualityRecord>>>,
     config: QualityEstimatorConfig,

@@ -7,3 +7,5 @@ pub mod cost;
 pub mod experiment;
 pub mod snapshot;
 pub mod telemetry_bus;
+#[cfg(feature = "self-tune")]
+pub mod wiring;
