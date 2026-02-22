@@ -142,7 +142,7 @@ impl FeedbackCollector {
     ///
     /// This function never panics.
     pub fn record(&self, mut entry: FeedbackEntry) -> Result<(), FeedbackError> {
-        entry.score = entry.score.max(0.0).min(1.0);
+        entry.score = entry.score.clamp(0.0, 1.0);
 
         let mut inner = self.inner.lock().map_err(|_| FeedbackError::LockPoisoned)?;
         inner.entries.push_back(entry);
