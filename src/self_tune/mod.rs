@@ -6,6 +6,7 @@ pub mod anomaly;
 pub mod controller;
 pub mod cost;
 pub mod experiment;
+pub mod helix_probe;
 pub mod snapshot;
 pub mod telemetry_bus;
 #[cfg(feature = "self-tune")]

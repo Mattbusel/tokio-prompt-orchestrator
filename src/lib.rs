@@ -43,6 +43,9 @@ pub mod evolution;
 #[cfg(all(feature = "self-tune", feature = "self-modify", feature = "intelligence"))]
 pub mod self_improve;
 
+#[cfg(all(feature = "self-tune", feature = "self-modify"))]
+pub mod self_improve_loop;
+
 #[cfg(feature = "tui")]
 pub mod tui;
 

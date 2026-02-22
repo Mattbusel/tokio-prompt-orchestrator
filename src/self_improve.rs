@@ -62,6 +62,8 @@ use crate::intelligence::{
     router::{LearnedRouter, RouterConfig},
 };
 
+use crate::self_tune::helix_probe::HelixProbeConfig;
+
 // ─── Configuration ────────────────────────────────────────────────────────────
 
 /// Configuration for the self-improving control loop.
@@ -89,6 +91,14 @@ pub struct LoopConfig {
     pub target_p95_ms: f64,
     /// Target aggregate throughput (req/s) for the PID controller.
     pub target_throughput_rps: f64,
+    /// Optional HelixRouter pressure probe configuration.
+    ///
+    /// When set, the loop spawns a background [`HelixPressureProbe`] that polls
+    /// HelixRouter's `/api/stats` and feeds its `pressure_score` into the
+    /// `TelemetryBus`, closing the cross-repo feedback loop.
+    ///
+    /// Set to `None` (the default) to disable HelixRouter integration.
+    pub helix_probe: Option<HelixProbeConfig>,
 }
 
 impl Default for LoopConfig {
@@ -105,6 +115,7 @@ impl Default for LoopConfig {
             snapshot_every_n_ticks: 12, // every ~60 s at default 5 s bus interval
             target_p95_ms: 200.0,
             target_throughput_rps: 50.0,
+            helix_probe: None,
         }
     }
 }
@@ -194,11 +205,24 @@ impl SelfImprovingLoop {
 
     /// Spawn the background control loop as a detached Tokio task.
     ///
+    /// If `LoopConfig::helix_probe` is `Some`, a [`HelixPressureProbe`] background
+    /// task is also spawned to feed HelixRouter's pressure signal into the bus.
+    ///
     /// The loop runs until the telemetry bus is dropped (broadcast channel closes).
     pub fn spawn(self) -> tokio::task::JoinHandle<()> {
         let mut rx = self.bus.subscribe();
         let handles = self.handles;
         let cfg = self.cfg;
+
+        // If configured, start the HelixRouter pressure probe as a background task.
+        // The probe feeds HelixRouter's pressure_score into the TelemetryBus so
+        // the anomaly detector and controller react to downstream backpressure.
+        if let Some(probe_cfg) = cfg.helix_probe.clone() {
+            use crate::self_tune::helix_probe::HelixPressureProbe;
+            let probe = HelixPressureProbe::new(probe_cfg, self.bus.clone());
+            tokio::spawn(async move { probe.run().await });
+            info!("HelixPressureProbe started — cross-repo pressure feedback active");
+        }
 
         tokio::spawn(async move {
             let mut tick: u64 = 0;

@@ -1152,7 +1152,7 @@ pub fn parse_mock_arg() -> bool {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Initialise tracing
-    let _ = tokio_prompt_orchestrator::init_tracing();
+    tokio_prompt_orchestrator::init_tracing();
 
     // Initialise metrics
     metrics::init_metrics()

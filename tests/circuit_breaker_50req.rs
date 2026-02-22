@@ -47,7 +47,6 @@ struct RequestLog {
     outcome: String,
     circuit_status: CircuitStatus,
     failures: usize,
-    successes: usize,
     success_rate: f64,
 }
 
@@ -99,7 +98,6 @@ async fn test_50_rapid_requests_circuit_breaker_behavior() {
             outcome,
             circuit_status: stats.status.clone(),
             failures: stats.failures,
-            successes: stats.successes,
             success_rate: stats.success_rate,
         });
 

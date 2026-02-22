@@ -309,6 +309,8 @@ struct BusInner {
     tx: broadcast::Sender<TelemetrySnapshot>,
     started_at: Instant,
     publish_errors: AtomicU64,
+    /// External pressure signal injected from HelixRouter (stored as pressure*1000 as u64).
+    external_pressure_milli: AtomicU64,
 }
 
 impl std::fmt::Debug for BusInner {
@@ -365,6 +367,7 @@ impl TelemetryBus {
                 tx,
                 started_at: Instant::now(),
                 publish_errors: AtomicU64::new(0),
+                external_pressure_milli: AtomicU64::new(0),
             }),
         }
     }
@@ -465,6 +468,34 @@ impl TelemetryBus {
         self.inner.publish_errors.load(Ordering::Relaxed)
     }
 
+    /// Inject an external pressure signal (e.g. from HelixRouter's `pressure_score`).
+    ///
+    /// `pressure` is clamped to `[0.0, 1.0]`. This value is blended with the
+    /// internally-computed queue-fill pressure on the next snapshot tick using
+    /// a 50/50 average, making Tokio Prompt's self-improvement loop aware of
+    /// HelixRouter's downstream backpressure.
+    ///
+    /// Calling this with `0.0` disables the external signal (default).
+    ///
+    /// # Panics
+    /// This function never panics.
+    pub fn set_external_pressure(&self, pressure: f64) {
+        let clamped = pressure.clamp(0.0, 1.0);
+        // Store as fixed-point milli (0–1000) to avoid f64 atomics.
+        let milli = (clamped * 1000.0) as u64;
+        self.inner
+            .external_pressure_milli
+            .store(milli, Ordering::Relaxed);
+    }
+
+    /// Read the currently injected external pressure (0.0 – 1.0).
+    ///
+    /// Returns `0.0` when no external signal has been set.
+    pub fn external_pressure(&self) -> f64 {
+        let milli = self.inner.external_pressure_milli.load(Ordering::Relaxed);
+        milli as f64 / 1000.0
+    }
+
     // ── Internal ──────────────────────────────────────────────────────────
 
     async fn collect(inner: &Arc<BusInner>) -> TelemetrySnapshot {
@@ -505,8 +536,10 @@ impl TelemetryBus {
         let cache_hit_rate = inner.counters.cache_hit_rate();
         let dedup_collision_rate = inner.counters.dedup_collision_rate();
 
-        // Composite pressure: average of queue fill ratios weighted by stage count
-        let pressure = if stages.is_empty() {
+        // Composite pressure: average of queue fill ratios weighted by stage count,
+        // blended 50/50 with any externally-injected signal (e.g. HelixRouter's
+        // pressure_score) when that signal is non-zero.
+        let internal_pressure = if stages.is_empty() {
             0.0
         } else {
             let fill_sum: f64 = stages
@@ -520,6 +553,15 @@ impl TelemetryBus {
                 })
                 .sum();
             (fill_sum / stages.len() as f64).min(1.0)
+        };
+        let ext_milli = inner
+            .external_pressure_milli
+            .load(Ordering::Relaxed);
+        let pressure = if ext_milli > 0 {
+            let ext = ext_milli as f64 / 1000.0;
+            ((internal_pressure + ext) / 2.0).min(1.0)
+        } else {
+            internal_pressure
         };
 
         TelemetrySnapshot {
@@ -877,5 +919,85 @@ mod tests {
         assert_eq!(l.p95_ms, 0);
         assert_eq!(l.p99_ms, 0);
         assert_eq!(l.sample_count, 0);
+    }
+
+    // ── External pressure injection (HelixRouter integration) ─────────────
+
+    #[test]
+    fn test_external_pressure_default_is_zero() {
+        let bus = make_bus();
+        assert_eq!(bus.external_pressure(), 0.0);
+    }
+
+    #[test]
+    fn test_set_external_pressure_stores_value() {
+        let bus = make_bus();
+        bus.set_external_pressure(0.75);
+        let v = bus.external_pressure();
+        assert!((v - 0.75).abs() < 0.002, "expected ~0.75, got {v}");
+    }
+
+    #[test]
+    fn test_set_external_pressure_clamps_above_one() {
+        let bus = make_bus();
+        bus.set_external_pressure(2.0);
+        let v = bus.external_pressure();
+        assert!(v <= 1.0, "pressure must not exceed 1.0: {v}");
+        assert!((v - 1.0).abs() < 0.002);
+    }
+
+    #[test]
+    fn test_set_external_pressure_clamps_below_zero() {
+        let bus = make_bus();
+        bus.set_external_pressure(-0.5);
+        let v = bus.external_pressure();
+        assert!(v >= 0.0, "pressure must not be negative: {v}");
+        assert_eq!(v, 0.0);
+    }
+
+    #[test]
+    fn test_set_external_pressure_zero_disables_signal() {
+        let bus = make_bus();
+        bus.set_external_pressure(0.8);
+        bus.set_external_pressure(0.0);
+        let v = bus.external_pressure();
+        assert_eq!(v, 0.0, "setting 0.0 should disable the external signal");
+    }
+
+    #[test]
+    fn test_set_external_pressure_overwrite() {
+        let bus = make_bus();
+        bus.set_external_pressure(0.3);
+        bus.set_external_pressure(0.9);
+        let v = bus.external_pressure();
+        assert!((v - 0.9).abs() < 0.002, "expected ~0.9 after overwrite, got {v}");
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_blends_external_pressure_when_set() {
+        let bus = make_bus();
+        // No stages → internal pressure = 0.0. External = 0.6.
+        // Blended = (0.0 + 0.6) / 2 = 0.3.
+        bus.set_external_pressure(0.6);
+        let snap = bus.tick_now().await;
+        assert!(snap.pressure > 0.0, "blended pressure should be > 0 when external is set");
+        assert!((snap.pressure - 0.3).abs() < 0.002, "expected 0.3, got {}", snap.pressure);
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_uses_internal_pressure_when_external_zero() {
+        let bus = make_bus();
+        // No stages → internal = 0.0, external = 0.0 → pressure = 0.0.
+        let snap = bus.tick_now().await;
+        assert_eq!(snap.pressure, 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_external_pressure_clamped_in_blend() {
+        let bus = make_bus();
+        // External = 1.0, internal = 0.0 → blended = 0.5
+        bus.set_external_pressure(1.0);
+        let snap = bus.tick_now().await;
+        assert!((snap.pressure - 0.5).abs() < 0.002, "expected 0.5, got {}", snap.pressure);
     }
 }
