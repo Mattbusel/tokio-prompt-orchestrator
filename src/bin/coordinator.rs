@@ -170,25 +170,22 @@ async fn main() {
     let monitor_handle = monitor.start_monitoring(shutdown_rx.clone());
 
     // Optional: self-improvement loop (requires self-improving feature flag)
-    #[cfg(all(feature = "self-tune", feature = "self-modify"))]
+    #[cfg(all(feature = "self-tune", feature = "self-modify", feature = "intelligence"))]
     let _sil_handle = if args.self_improve {
-        use std::sync::Arc as StdArc;
         use tokio_prompt_orchestrator::{
-            self_improve_loop::{LoopConfig, SelfImprovementLoop},
+            self_improve::{LoopConfig, SelfImprovingLoop},
             self_tune::telemetry_bus::{PipelineCounters, TelemetryBus, TelemetryBusConfig},
         };
         let counters = PipelineCounters::new();
-        let bus = StdArc::new(TelemetryBus::new(TelemetryBusConfig::default(), counters));
+        let bus = TelemetryBus::new(TelemetryBusConfig::default(), counters);
         bus.start();
-        let sil = StdArc::new(SelfImprovementLoop::new(LoopConfig::default(), bus));
-        let sil_clone = StdArc::clone(&sil);
-        let sil_rx = shutdown_rx.clone();
+        let sil = SelfImprovingLoop::new(LoopConfig::default(), bus);
         eprintln!("Self-improvement loop enabled");
-        Some(tokio::spawn(async move { sil_clone.run(sil_rx).await }))
+        Some(sil.spawn())
     } else {
         None
     };
-    #[cfg(not(all(feature = "self-tune", feature = "self-modify")))]
+    #[cfg(not(all(feature = "self-tune", feature = "self-modify", feature = "intelligence")))]
     if args.self_improve {
         eprintln!("Warning: --self-improve requires --features self-improving at compile time");
     }
