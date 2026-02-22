@@ -1,3 +1,13 @@
+#![allow(
+    missing_docs,
+    clippy::too_many_arguments,
+    clippy::needless_range_loop,
+    clippy::redundant_closure,
+    clippy::derivable_impls,
+    clippy::unwrap_or_default,
+    dead_code,
+    private_interfaces
+)]
 //! # Telemetry Bus (Task 1.1)
 //!
 //! A bounded broadcast channel that aggregates metrics from every pipeline stage

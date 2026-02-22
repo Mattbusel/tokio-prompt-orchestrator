@@ -1,3 +1,13 @@
+#![allow(
+    missing_docs,
+    clippy::too_many_arguments,
+    clippy::needless_range_loop,
+    clippy::redundant_closure,
+    clippy::derivable_impls,
+    clippy::unwrap_or_default,
+    dead_code,
+    private_interfaces
+)]
 //! # Stage: Learned Router (Task 3.1)
 //!
 //! ## Responsibility

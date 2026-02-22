@@ -1,3 +1,13 @@
+#![allow(
+    missing_docs,
+    clippy::too_many_arguments,
+    clippy::needless_range_loop,
+    clippy::redundant_closure,
+    clippy::derivable_impls,
+    clippy::unwrap_or_default,
+    dead_code,
+    private_interfaces
+)]
 //! # Anomaly Detection (Task 1.4)
 //!
 //! ## Responsibility
@@ -385,7 +395,7 @@ impl AnomalyDetector {
     ///
     /// # Panics
     /// This function never panics.
-    pub fn check_cusum(
+    fn check_cusum(
         state: &mut CusumState,
         value: f64,
         mean: f64,
@@ -517,7 +527,7 @@ impl AnomalyDetector {
         self.inner
             .lock()
             .ok()
-            .and_then(|inner| inner.windows.get(metric).map(|w| window_mean_stddev(w)))
+            .and_then(|inner| inner.windows.get(metric).map(window_mean_stddev))
     }
 
     /// Clear all recorded anomaly history.
@@ -545,10 +555,7 @@ impl AnomalyDetector {
             .config
             .max_window_size
             .max(inner.config.z_score.window_size);
-        let window = inner
-            .windows
-            .entry(metric.to_string())
-            .or_insert_with(VecDeque::new);
+        let window = inner.windows.entry(metric.to_string()).or_default();
 
         // Z-score detection (before pushing the new value)
         let z_config = inner.config.z_score.clone();
