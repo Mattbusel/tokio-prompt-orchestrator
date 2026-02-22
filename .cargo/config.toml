@@ -1,0 +1,11 @@
+[build]
+# Isolate build artifacts for this workspace.
+# Each parallel agent session should set CARGO_TARGET_DIR in the environment
+# to a unique path (e.g., target/agent-<uuid>) to avoid LNK1104 file lock
+# contention on Windows. This fallback keeps Claude Code sessions off the
+# default `target/` directory used by editors (e.g., rust-analyzer / VS Code).
+#
+# Agents: export CARGO_TARGET_DIR=target/agent-$(date +%s%N) before cargo commands.
+# If you hit LNK1104 or file lock errors: wait 30 seconds, then retry once.
+# Do NOT spawn parallel build attempts to resolve lock errors.
+target-dir = "target/claude"

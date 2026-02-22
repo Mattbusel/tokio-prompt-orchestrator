@@ -342,6 +342,41 @@ When multiple agents work on this codebase simultaneously:
 - **Test agents run in parallel** — writing tests for existing code can happen concurrently with new feature development in different modules
 - **Breaking changes require a deprecation cycle** — mark old API `#[deprecated]`, add new API, migrate call sites, remove old in next phase
 
+### Build Isolation (Windows / parallel agents)
+
+Each agent session **must** isolate its build artifacts to avoid LNK1104 file-lock contention:
+
+```bash
+# Set at the start of every agent session (use a unique suffix per agent):
+export CARGO_TARGET_DIR=target/agent-$(date +%s)
+```
+
+`.cargo/config.toml` sets a shared fallback of `target/claude`. Agents that set
+`CARGO_TARGET_DIR` explicitly will override this and get full isolation.
+
+**LNK1104 / file lock retry policy:**
+- If a `cargo build` or `cargo test` command fails with LNK1104 (file in use):
+  1. Wait **30 seconds** (do not retry immediately)
+  2. Retry the **same command once**
+  3. If it fails again, report the error — do **not** spawn parallel build attempts
+
+### Commit & Push Workflow
+
+The pre-commit git hook is **disabled** (`.git/hooks/pre-commit.disabled`).
+`scripts/pre_commit.sh` is a **manual-only** script — it does NOT run automatically.
+
+**Required workflow before every `git push`:**
+
+```bash
+# Run ONCE manually before pushing (not before every commit):
+cargo test --features "full,mcp"
+
+# Only push if the above passes:
+git push
+```
+
+Do **not** run `cargo test` before every individual commit. Run it once before the final push.
+
 ---
 
 ## 11. The Definition of Done
