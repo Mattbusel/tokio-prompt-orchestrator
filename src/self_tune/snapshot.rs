@@ -74,6 +74,10 @@ pub enum SnapshotError {
         /// The highest version number currently stored.
         latest: u64,
     },
+
+    /// A Redis operation failed (only available with the `distributed` feature).
+    #[error("redis error: {0}")]
+    Redis(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -657,6 +661,342 @@ impl SnapshotStore {
         // Sort for deterministic output.
         changes.sort_by(|a, b| a.name.cmp(&b.name));
         changes
+    }
+}
+
+// ============================================================================
+// RedisSnapshotStore (distributed feature)
+// ============================================================================
+
+/// A snapshot store backed by both in-memory storage and Redis persistence.
+///
+/// # Responsibility
+/// Wraps the in-memory [`SnapshotStore`] and mirrors snapshot data to Redis for
+/// cross-node visibility and crash recovery. Operates in "degraded mode"
+/// (pure in-memory) when Redis is unavailable.
+///
+/// # Guarantees
+/// - **Best-effort persistence**: Redis writes are fire-and-forget; failures
+///   are logged but never propagated to callers.
+/// - **Fast reads**: the in-memory store is always consulted first.
+/// - **Fallback**: if a snapshot is missing from memory (e.g. after restart),
+///   the store attempts to fetch it from Redis.
+/// - **Zero panics**: no `unwrap()`, `expect()`, or `panic!()` in any code path.
+///
+/// # NOT Responsible For
+/// - Distributed locking or leader election
+/// - Cache invalidation across nodes (consumers should use pub/sub)
+/// - Redis cluster topology management
+#[cfg(feature = "distributed")]
+pub struct RedisSnapshotStore {
+    /// Fast in-memory store for local reads.
+    inner: SnapshotStore,
+    /// Redis connection manager, if available. `None` means degraded mode.
+    redis: Option<redis::aio::ConnectionManager>,
+    /// The Redis URL used for connecting (stored for diagnostics).
+    redis_url: String,
+}
+
+#[cfg(feature = "distributed")]
+impl std::fmt::Debug for RedisSnapshotStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RedisSnapshotStore")
+            .field("inner", &self.inner)
+            .field("redis_connected", &self.redis.is_some())
+            .field("redis_url", &self.redis_url)
+            .finish()
+    }
+}
+
+#[cfg(feature = "distributed")]
+impl RedisSnapshotStore {
+    /// Redis key prefix for snapshots.
+    const KEY_PREFIX: &'static str = "helix:snapshot:";
+
+    /// Create a new Redis-backed snapshot store.
+    ///
+    /// Attempts to connect to Redis at `redis_url`. If the connection fails,
+    /// the store operates in degraded mode (in-memory only) and logs a warning.
+    ///
+    /// # Arguments
+    /// * `max_snapshots` — Maximum number of snapshots to retain in memory.
+    /// * `redis_url` — Redis connection string (e.g. `redis://127.0.0.1:6379`).
+    ///
+    /// # Panics
+    /// This function never panics.
+    pub async fn new(max_snapshots: usize, redis_url: &str) -> Self {
+        let inner = SnapshotStore::new(max_snapshots);
+        let redis = Self::try_connect(redis_url).await;
+        Self {
+            inner,
+            redis,
+            redis_url: redis_url.to_string(),
+        }
+    }
+
+    /// Attempt to open a Redis connection manager.
+    ///
+    /// Returns `None` (and logs a warning) on failure.
+    async fn try_connect(redis_url: &str) -> Option<redis::aio::ConnectionManager> {
+        let client = match redis::Client::open(redis_url) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    redis_url = redis_url,
+                    error = %e,
+                    "Failed to create Redis client; operating in degraded mode"
+                );
+                return None;
+            }
+        };
+        match client.get_connection_manager().await {
+            Ok(mgr) => Some(mgr),
+            Err(e) => {
+                tracing::warn!(
+                    redis_url = redis_url,
+                    error = %e,
+                    "Failed to connect to Redis; operating in degraded mode"
+                );
+                None
+            }
+        }
+    }
+
+    /// Return `true` if a Redis connection is available.
+    pub fn is_redis_connected(&self) -> bool {
+        self.redis.is_some()
+    }
+
+    /// Build the Redis key for a given snapshot version.
+    fn redis_key(version: u64) -> String {
+        format!("{}{}", Self::KEY_PREFIX, version)
+    }
+
+    /// Best-effort write of a snapshot to Redis. Logs a warning on failure.
+    async fn persist_to_redis(&self, snapshot: &ConfigSnapshot) {
+        let Some(ref conn) = self.redis else { return };
+        let mut conn = conn.clone();
+
+        let json = match serde_json::to_string(snapshot) {
+            Ok(j) => j,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to serialize snapshot for Redis");
+                return;
+            }
+        };
+
+        let key = Self::redis_key(snapshot.version);
+        let result: Result<(), redis::RedisError> =
+            redis::cmd("SET").arg(&key).arg(&json).query_async(&mut conn).await;
+
+        if let Err(e) = result {
+            tracing::warn!(
+                key = key.as_str(),
+                error = %e,
+                "Failed to persist snapshot to Redis"
+            );
+        }
+    }
+
+    /// Try to load a snapshot from Redis by version.
+    async fn load_from_redis(&self, version: u64) -> Result<Option<ConfigSnapshot>, SnapshotError> {
+        let Some(ref conn) = self.redis else {
+            return Ok(None);
+        };
+        let mut conn = conn.clone();
+
+        let key = Self::redis_key(version);
+        let result: Result<Option<String>, redis::RedisError> =
+            redis::cmd("GET").arg(&key).query_async(&mut conn).await;
+
+        match result {
+            Ok(Some(json)) => {
+                let snapshot: ConfigSnapshot = serde_json::from_str(&json)
+                    .map_err(|e| SnapshotError::Redis(format!("deserialization failed: {e}")))?;
+                Ok(Some(snapshot))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => {
+                tracing::warn!(key = key.as_str(), error = %e, "Redis GET failed");
+                Ok(None)
+            }
+        }
+    }
+
+    /// Best-effort delete of a snapshot from Redis.
+    async fn delete_from_redis(&self, version: u64) {
+        let Some(ref conn) = self.redis else { return };
+        let mut conn = conn.clone();
+
+        let key = Self::redis_key(version);
+        let result: Result<(), redis::RedisError> =
+            redis::cmd("DEL").arg(&key).query_async(&mut conn).await;
+
+        if let Err(e) = result {
+            tracing::warn!(key = key.as_str(), error = %e, "Failed to delete snapshot from Redis");
+        }
+    }
+
+    /// Create and store a new configuration snapshot.
+    ///
+    /// The snapshot is written to the in-memory store first, then persisted to
+    /// Redis on a best-effort basis.
+    ///
+    /// # Arguments
+    /// * `parameters` — The full set of tunable parameters.
+    /// * `metric_scores` — Metric values at the time of this snapshot.
+    /// * `source` — What triggered this snapshot.
+    /// * `description` — Human-readable note.
+    ///
+    /// # Returns
+    /// The newly created [`ConfigSnapshot`].
+    ///
+    /// # Errors
+    /// Returns [`SnapshotError::LockPoisoned`] if the internal lock is poisoned.
+    ///
+    /// # Panics
+    /// This function never panics.
+    pub async fn create_snapshot(
+        &self,
+        parameters: HashMap<String, f64>,
+        metric_scores: HashMap<String, f64>,
+        source: SnapshotSource,
+        description: impl Into<String>,
+    ) -> Result<ConfigSnapshot, SnapshotError> {
+        let snapshot = self.inner.create_snapshot(parameters, metric_scores, source, description)?;
+        self.persist_to_redis(&snapshot).await;
+        Ok(snapshot)
+    }
+
+    /// Retrieve a snapshot by its version number.
+    ///
+    /// Checks the in-memory store first. If not found, attempts to load from
+    /// Redis as a fallback.
+    ///
+    /// # Arguments
+    /// * `version` — The version number to look up.
+    ///
+    /// # Returns
+    /// A clone of the matching [`ConfigSnapshot`].
+    ///
+    /// # Errors
+    /// - [`SnapshotError::SnapshotNotFound`] if not found in memory or Redis.
+    /// - [`SnapshotError::LockPoisoned`] if the internal lock is poisoned.
+    /// - [`SnapshotError::Redis`] if Redis returns corrupt data.
+    ///
+    /// # Panics
+    /// This function never panics.
+    pub async fn get(&self, version: u64) -> Result<ConfigSnapshot, SnapshotError> {
+        match self.inner.get(version) {
+            Ok(snap) => Ok(snap),
+            Err(SnapshotError::SnapshotNotFound(_)) => {
+                // Try Redis fallback.
+                match self.load_from_redis(version).await? {
+                    Some(snap) => Ok(snap),
+                    None => Err(SnapshotError::SnapshotNotFound(version)),
+                }
+            }
+            Err(other) => Err(other),
+        }
+    }
+
+    /// Return the most recent snapshot from the in-memory store.
+    ///
+    /// # Errors
+    /// - [`SnapshotError::EmptyHistory`] if no snapshots have been recorded.
+    /// - [`SnapshotError::LockPoisoned`] if the internal lock is poisoned.
+    ///
+    /// # Panics
+    /// This function never panics.
+    pub fn latest(&self) -> Result<ConfigSnapshot, SnapshotError> {
+        self.inner.latest()
+    }
+
+    /// Compute the diff between two snapshot versions.
+    ///
+    /// Delegates to the in-memory store.
+    ///
+    /// # Panics
+    /// This function never panics.
+    pub fn diff(&self, from: u64, to: u64) -> Result<ConfigDiff, SnapshotError> {
+        self.inner.diff(from, to)
+    }
+
+    /// Rollback to a previous version.
+    ///
+    /// Creates a new snapshot in both the in-memory store and Redis.
+    ///
+    /// # Arguments
+    /// * `to_version` — The version whose parameters should be restored.
+    ///
+    /// # Returns
+    /// The newly created rollback [`ConfigSnapshot`].
+    ///
+    /// # Errors
+    /// - [`SnapshotError::SnapshotNotFound`] if the target version does not exist.
+    /// - [`SnapshotError::LockPoisoned`] if the internal lock is poisoned.
+    ///
+    /// # Panics
+    /// This function never panics.
+    pub async fn rollback(&self, to_version: u64) -> Result<ConfigSnapshot, SnapshotError> {
+        let snapshot = self.inner.rollback(to_version)?;
+        self.persist_to_redis(&snapshot).await;
+        Ok(snapshot)
+    }
+
+    /// Return the last N snapshots, newest first.
+    ///
+    /// # Panics
+    /// This function never panics.
+    pub fn history(&self, n: usize) -> Vec<ConfigSnapshot> {
+        self.inner.history(n)
+    }
+
+    /// Return the number of snapshots currently stored in memory.
+    ///
+    /// # Panics
+    /// This function never panics.
+    pub fn version_count(&self) -> usize {
+        self.inner.version_count()
+    }
+
+    /// Return the version number of the most recent snapshot, or `None`.
+    ///
+    /// # Panics
+    /// This function never panics.
+    pub fn latest_version(&self) -> Option<u64> {
+        self.inner.latest_version()
+    }
+
+    /// Find all snapshots created by the given source type.
+    ///
+    /// # Panics
+    /// This function never panics.
+    pub fn find_by_source(&self, source: &SnapshotSource) -> Vec<ConfigSnapshot> {
+        self.inner.find_by_source(source)
+    }
+
+    /// Remove all snapshots from the in-memory store.
+    ///
+    /// Note: this does **not** clear Redis. Use with care.
+    ///
+    /// # Errors
+    /// Returns [`SnapshotError::LockPoisoned`] if the internal lock is poisoned.
+    ///
+    /// # Panics
+    /// This function never panics.
+    pub fn clear(&self) -> Result<(), SnapshotError> {
+        self.inner.clear()
+    }
+
+    /// Find the best snapshot in a time window.
+    ///
+    /// Delegates to the in-memory store.
+    ///
+    /// # Panics
+    /// This function never panics.
+    pub fn best_in_window(&self, window_secs: u64) -> Result<ConfigSnapshot, SnapshotError> {
+        self.inner.best_in_window(window_secs)
     }
 }
 
@@ -1357,6 +1697,341 @@ mod tests {
             let json = serde_json::to_string(src).unwrap();
             let deser: SnapshotSource = serde_json::from_str(&json).unwrap();
             assert_eq!(&deser, src);
+        }
+    }
+
+    // --- SnapshotError::Redis variant ---
+
+    #[test]
+    fn test_snapshot_error_redis_variant() {
+        let err = SnapshotError::Redis("connection refused".to_string());
+        let msg = format!("{err}");
+        assert!(msg.contains("redis error"));
+        assert!(msg.contains("connection refused"));
+    }
+
+    // ========================================================================
+    // RedisSnapshotStore tests (distributed feature)
+    //
+    // These tests exercise the degraded-mode path because no real Redis is
+    // available in the test environment. The store should behave identically
+    // to the in-memory SnapshotStore when Redis is unreachable.
+    // ========================================================================
+
+    #[cfg(feature = "distributed")]
+    mod redis_store_tests {
+        use super::*;
+        use crate::self_tune::snapshot::RedisSnapshotStore;
+
+        /// Helper: create a RedisSnapshotStore in degraded mode (bad URL).
+        async fn degraded_store(max: usize) -> RedisSnapshotStore {
+            // Use an invalid URL so the store falls back to in-memory only.
+            RedisSnapshotStore::new(max, "redis://invalid-host-that-does-not-exist:1").await
+        }
+
+        #[tokio::test]
+        async fn test_redis_snapshot_store_creation() {
+            let store = degraded_store(10).await;
+            assert!(!store.is_redis_connected());
+            assert_eq!(store.version_count(), 0);
+            assert!(store.latest_version().is_none());
+        }
+
+        #[tokio::test]
+        async fn test_redis_snapshot_store_create_and_get() {
+            let store = degraded_store(10).await;
+            let snap = store
+                .create_snapshot(
+                    params(&[("rate", 0.5)]),
+                    metrics(&[("throughput", 100.0)]),
+                    SnapshotSource::Manual,
+                    "first snapshot",
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(snap.version, 0);
+            assert_eq!(snap.description, "first snapshot");
+            assert!((snap.parameters["rate"] - 0.5).abs() < f64::EPSILON);
+
+            let fetched = store.get(0).await.unwrap();
+            assert_eq!(fetched.version, 0);
+            assert!((fetched.parameters["rate"] - 0.5).abs() < f64::EPSILON);
+        }
+
+        #[tokio::test]
+        async fn test_redis_snapshot_store_falls_back_to_memory() {
+            let store = degraded_store(10).await;
+            // In degraded mode, get() for a missing version should fail cleanly.
+            let result = store.get(999).await;
+            assert!(matches!(result, Err(SnapshotError::SnapshotNotFound(999))));
+        }
+
+        #[tokio::test]
+        async fn test_redis_snapshot_store_rollback_works() {
+            let store = degraded_store(10).await;
+            store
+                .create_snapshot(
+                    params(&[("rate", 0.1), ("depth", 5.0)]),
+                    HashMap::new(),
+                    SnapshotSource::Manual,
+                    "v0",
+                )
+                .await
+                .unwrap();
+            store
+                .create_snapshot(
+                    params(&[("rate", 0.9), ("depth", 10.0)]),
+                    HashMap::new(),
+                    SnapshotSource::Manual,
+                    "v1",
+                )
+                .await
+                .unwrap();
+
+            let rollback_snap = store.rollback(0).await.unwrap();
+            assert_eq!(rollback_snap.version, 2);
+            assert!((rollback_snap.parameters["rate"] - 0.1).abs() < f64::EPSILON);
+            assert!((rollback_snap.parameters["depth"] - 5.0).abs() < f64::EPSILON);
+            assert!(matches!(
+                rollback_snap.source,
+                SnapshotSource::Rollback { from_version: 1 }
+            ));
+        }
+
+        #[tokio::test]
+        async fn test_redis_snapshot_store_history() {
+            let store = degraded_store(10).await;
+            for i in 0..5 {
+                store
+                    .create_snapshot(
+                        params(&[("v", i as f64)]),
+                        HashMap::new(),
+                        SnapshotSource::Manual,
+                        format!("snap {i}"),
+                    )
+                    .await
+                    .unwrap();
+            }
+
+            let history = store.history(3);
+            assert_eq!(history.len(), 3);
+            assert_eq!(history[0].version, 4);
+            assert_eq!(history[1].version, 3);
+            assert_eq!(history[2].version, 2);
+        }
+
+        #[tokio::test]
+        async fn test_redis_snapshot_store_diff() {
+            let store = degraded_store(10).await;
+            store
+                .create_snapshot(
+                    params(&[("alpha", 1.0)]),
+                    metrics(&[("throughput", 100.0)]),
+                    SnapshotSource::Manual,
+                    "base",
+                )
+                .await
+                .unwrap();
+            store
+                .create_snapshot(
+                    params(&[("alpha", 3.0)]),
+                    metrics(&[("throughput", 200.0)]),
+                    SnapshotSource::PidAdjustment,
+                    "changed",
+                )
+                .await
+                .unwrap();
+
+            let diff = store.diff(0, 1).unwrap();
+            assert_eq!(diff.from_version, 0);
+            assert_eq!(diff.to_version, 1);
+            assert_eq!(diff.changes.len(), 1);
+            assert_eq!(diff.changes[0].name, "alpha");
+            assert!((diff.changes[0].delta - 2.0).abs() < f64::EPSILON);
+        }
+
+        #[tokio::test]
+        async fn test_redis_snapshot_store_version_count() {
+            let store = degraded_store(10).await;
+            assert_eq!(store.version_count(), 0);
+
+            store
+                .create_snapshot(
+                    params(&[("a", 1.0)]),
+                    HashMap::new(),
+                    SnapshotSource::Manual,
+                    "v0",
+                )
+                .await
+                .unwrap();
+            assert_eq!(store.version_count(), 1);
+
+            store
+                .create_snapshot(
+                    params(&[("a", 2.0)]),
+                    HashMap::new(),
+                    SnapshotSource::Manual,
+                    "v1",
+                )
+                .await
+                .unwrap();
+            assert_eq!(store.version_count(), 2);
+        }
+
+        #[tokio::test]
+        async fn test_redis_snapshot_store_latest() {
+            let store = degraded_store(10).await;
+            assert!(store.latest().is_err());
+
+            store
+                .create_snapshot(
+                    params(&[("a", 1.0)]),
+                    HashMap::new(),
+                    SnapshotSource::Manual,
+                    "v0",
+                )
+                .await
+                .unwrap();
+            let latest = store.latest().unwrap();
+            assert_eq!(latest.version, 0);
+
+            store
+                .create_snapshot(
+                    params(&[("a", 2.0)]),
+                    HashMap::new(),
+                    SnapshotSource::Manual,
+                    "v1",
+                )
+                .await
+                .unwrap();
+            let latest = store.latest().unwrap();
+            assert_eq!(latest.version, 1);
+        }
+
+        #[tokio::test]
+        async fn test_redis_snapshot_store_find_by_source() {
+            let store = degraded_store(10).await;
+            store
+                .create_snapshot(
+                    params(&[("a", 1.0)]),
+                    HashMap::new(),
+                    SnapshotSource::Manual,
+                    "manual",
+                )
+                .await
+                .unwrap();
+            store
+                .create_snapshot(
+                    params(&[("a", 2.0)]),
+                    HashMap::new(),
+                    SnapshotSource::PidAdjustment,
+                    "pid",
+                )
+                .await
+                .unwrap();
+            store
+                .create_snapshot(
+                    params(&[("a", 3.0)]),
+                    HashMap::new(),
+                    SnapshotSource::Manual,
+                    "manual2",
+                )
+                .await
+                .unwrap();
+
+            let manuals = store.find_by_source(&SnapshotSource::Manual);
+            assert_eq!(manuals.len(), 2);
+
+            let pids = store.find_by_source(&SnapshotSource::PidAdjustment);
+            assert_eq!(pids.len(), 1);
+        }
+
+        #[tokio::test]
+        async fn test_redis_snapshot_store_clear() {
+            let store = degraded_store(10).await;
+            store
+                .create_snapshot(
+                    params(&[("a", 1.0)]),
+                    HashMap::new(),
+                    SnapshotSource::Manual,
+                    "v0",
+                )
+                .await
+                .unwrap();
+            assert_eq!(store.version_count(), 1);
+
+            store.clear().unwrap();
+            assert_eq!(store.version_count(), 0);
+            assert!(store.latest().is_err());
+        }
+
+        #[tokio::test]
+        async fn test_redis_snapshot_store_eviction() {
+            let store = degraded_store(3).await;
+            for i in 0..5 {
+                store
+                    .create_snapshot(
+                        params(&[("v", i as f64)]),
+                        HashMap::new(),
+                        SnapshotSource::Manual,
+                        format!("snap {i}"),
+                    )
+                    .await
+                    .unwrap();
+            }
+
+            assert_eq!(store.version_count(), 3);
+            // Oldest two (versions 0 and 1) should be evicted from memory.
+            assert!(store.get(0).await.is_err());
+            assert!(store.get(1).await.is_err());
+            assert!(store.get(2).await.is_ok());
+            assert!(store.get(3).await.is_ok());
+            assert!(store.get(4).await.is_ok());
+        }
+
+        #[tokio::test]
+        async fn test_redis_snapshot_store_best_in_window() {
+            let store = degraded_store(10).await;
+            store
+                .create_snapshot(
+                    params(&[("v", 1.0)]),
+                    metrics(&[("tp", 100.0)]),
+                    SnapshotSource::Manual,
+                    "low",
+                )
+                .await
+                .unwrap();
+            store
+                .create_snapshot(
+                    params(&[("v", 2.0)]),
+                    metrics(&[("tp", 200.0)]),
+                    SnapshotSource::Manual,
+                    "high",
+                )
+                .await
+                .unwrap();
+
+            // No score metric configured, so returns latest.
+            let best = store.best_in_window(3600).unwrap();
+            assert_eq!(best.version, 1);
+        }
+
+        #[tokio::test]
+        async fn test_redis_snapshot_store_debug_format() {
+            let store = degraded_store(10).await;
+            let debug = format!("{:?}", store);
+            assert!(debug.contains("RedisSnapshotStore"));
+            assert!(debug.contains("redis_connected"));
+        }
+
+        #[tokio::test]
+        async fn test_redis_snapshot_store_redis_key_format() {
+            let key = RedisSnapshotStore::redis_key(42);
+            assert_eq!(key, "helix:snapshot:42");
+
+            let key = RedisSnapshotStore::redis_key(0);
+            assert_eq!(key, "helix:snapshot:0");
         }
     }
 }

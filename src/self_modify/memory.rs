@@ -42,6 +42,10 @@ pub enum MemoryError {
     /// The internal store is poisoned (thread-safety violation).
     #[error("memory store lock poisoned")]
     LockPoisoned,
+
+    /// A Redis operation failed (distributed feature only).
+    #[error("Redis error: {0}")]
+    Redis(String),
 }
 
 // ─── Modification record ──────────────────────────────────────────────────────
@@ -464,6 +468,305 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
+// ─── Redis-backed memory (distributed feature) ──────────────────────────────
+
+#[cfg(feature = "distributed")]
+mod redis_memory {
+    use super::*;
+    use redis::aio::ConnectionManager;
+    use redis::AsyncCommands;
+    use std::collections::HashMap;
+
+    /// Redis-backed agent memory with in-memory fast path.
+    ///
+    /// Wraps an [`AgentMemory`] for fast local reads and writes, then
+    /// best-effort persists every mutation to Redis.  If Redis is unavailable
+    /// at construction time, or if any individual write fails, the store
+    /// degrades gracefully to pure in-memory mode.
+    ///
+    /// # Redis key layout
+    /// - `agent:modification:{id}` — JSON-serialised [`ModificationRecord`]
+    /// - `agent:pattern:{name}` — JSON-serialised [`CodePattern`]
+    /// - `agent:baseline:{module}` — JSON-serialised [`PerformanceBaseline`]
+    /// - `agent:deadend:{module}:{hash}` — JSON-serialised [`DeadEnd`]
+    ///
+    /// # Panics
+    /// This type never panics.
+    #[derive(Clone)]
+    pub struct RedisAgentMemory {
+        inner: AgentMemory,
+        redis: Option<ConnectionManager>,
+    }
+
+    impl RedisAgentMemory {
+        /// Create a new Redis-backed memory store.
+        ///
+        /// If the Redis connection cannot be established, the store falls back
+        /// to pure in-memory mode (no error is raised).
+        ///
+        /// # Arguments
+        /// * `max_modifications` — cap on in-memory modification history
+        /// * `redis_url` — Redis connection string (e.g. `"redis://127.0.0.1/"`)
+        pub async fn new(max_modifications: usize, redis_url: &str) -> Self {
+            let redis = Self::try_connect(redis_url).await;
+            Self {
+                inner: AgentMemory::new(max_modifications),
+                redis,
+            }
+        }
+
+        /// Create a `RedisAgentMemory` that operates in degraded (in-memory only) mode.
+        ///
+        /// Useful for testing without a running Redis instance.
+        pub fn degraded(max_modifications: usize) -> Self {
+            Self {
+                inner: AgentMemory::new(max_modifications),
+                redis: None,
+            }
+        }
+
+        /// Whether the Redis connection is live.
+        pub fn has_redis(&self) -> bool {
+            self.redis.is_some()
+        }
+
+        /// Return a reference to the underlying in-memory store.
+        pub fn inner(&self) -> &AgentMemory {
+            &self.inner
+        }
+
+        // ── Connection helper ────────────────────────────────────────────
+
+        async fn try_connect(url: &str) -> Option<ConnectionManager> {
+            let client = redis::Client::open(url).ok()?;
+            ConnectionManager::new(client).await.ok()
+        }
+
+        // ── Best-effort Redis helpers ────────────────────────────────────
+
+        async fn redis_set(&self, key: &str, value: &str) {
+            if let Some(mut conn) = self.redis.clone() {
+                let _: Result<(), _> = conn.set(key, value).await;
+            }
+        }
+
+        #[allow(dead_code)]
+        async fn redis_get(&self, key: &str) -> Option<String> {
+            if let Some(mut conn) = self.redis.clone() {
+                let result: Result<String, _> = conn.get(key).await;
+                return result.ok();
+            }
+            None
+        }
+
+        // ── Modification records ─────────────────────────────────────────
+
+        /// Insert a new modification record.
+        ///
+        /// Writes to the in-memory store first, then best-effort persists to Redis.
+        ///
+        /// # Errors
+        /// Returns [`MemoryError::DuplicateRecord`] if the ID already exists.
+        ///
+        /// # Panics
+        /// This function never panics.
+        pub async fn insert_modification(
+            &self,
+            record: ModificationRecord,
+        ) -> Result<(), MemoryError> {
+            self.inner.insert_modification(record.clone())?;
+            let key = format!("agent:modification:{}", record.id);
+            if let Ok(json) = serde_json::to_string(&record) {
+                self.redis_set(&key, &json).await;
+            }
+            Ok(())
+        }
+
+        /// Update the outcome and metric deltas of an existing record.
+        ///
+        /// Updates the in-memory store first, then best-effort persists to Redis.
+        ///
+        /// # Errors
+        /// Returns [`MemoryError::NotFound`] if the ID does not exist.
+        ///
+        /// # Panics
+        /// This function never panics.
+        pub async fn update_outcome(
+            &self,
+            id: &str,
+            outcome: ModificationOutcome,
+            deltas: HashMap<String, f64>,
+        ) -> Result<(), MemoryError> {
+            self.inner
+                .update_outcome(id, outcome.clone(), deltas.clone())?;
+            // Re-read the full record from memory to persist the updated version.
+            if let Some(record) = self.get_modification(id) {
+                let key = format!("agent:modification:{}", id);
+                if let Ok(json) = serde_json::to_string(&record) {
+                    self.redis_set(&key, &json).await;
+                }
+            }
+            Ok(())
+        }
+
+        /// Retrieve a modification record by ID from the in-memory store.
+        ///
+        /// # Panics
+        /// This function never panics.
+        pub fn get_modification(&self, id: &str) -> Option<ModificationRecord> {
+            self.inner
+                .modifications()
+                .into_iter()
+                .find(|r| r.id == id)
+        }
+
+        /// Return all modification records (newest first).
+        pub fn modifications(&self) -> Vec<ModificationRecord> {
+            self.inner.modifications()
+        }
+
+        /// Return modifications that match a given tag.
+        ///
+        /// # Panics
+        /// This function never panics.
+        pub fn modifications_by_tag(&self, tag: &str) -> Vec<ModificationRecord> {
+            self.inner
+                .modifications()
+                .into_iter()
+                .filter(|r| r.tag.as_deref() == Some(tag))
+                .collect()
+        }
+
+        // ── Code patterns ────────────────────────────────────────────────
+
+        /// Record or update a code pattern.
+        ///
+        /// Writes to the in-memory store first, then best-effort persists to Redis.
+        ///
+        /// # Errors
+        /// Returns [`MemoryError::LockPoisoned`] on internal lock failure.
+        ///
+        /// # Panics
+        /// This function never panics.
+        pub async fn insert_pattern(&self, pattern: CodePattern) -> Result<(), MemoryError> {
+            self.inner.record_pattern(pattern.clone())?;
+            let key = format!("agent:pattern:{}", pattern.name);
+            if let Ok(json) = serde_json::to_string(&pattern) {
+                self.redis_set(&key, &json).await;
+            }
+            Ok(())
+        }
+
+        /// Look up a pattern by name.
+        pub fn get_pattern(&self, name: &str) -> Option<CodePattern> {
+            self.inner.get_pattern(name)
+        }
+
+        // ── Performance baselines ────────────────────────────────────────
+
+        /// Record a performance baseline for a module.
+        ///
+        /// Writes to the in-memory store first, then best-effort persists to Redis.
+        ///
+        /// # Errors
+        /// Returns [`MemoryError::LockPoisoned`] on internal lock failure.
+        ///
+        /// # Panics
+        /// This function never panics.
+        pub async fn record_baseline(
+            &self,
+            baseline: PerformanceBaseline,
+        ) -> Result<(), MemoryError> {
+            self.inner.record_baseline(baseline.clone())?;
+            let key = format!("agent:baseline:{}", baseline.module);
+            if let Ok(json) = serde_json::to_string(&baseline) {
+                self.redis_set(&key, &json).await;
+            }
+            Ok(())
+        }
+
+        /// Return the latest baseline for a module.
+        pub fn get_baseline(&self, module: &str) -> Option<PerformanceBaseline> {
+            self.inner.get_baseline(module)
+        }
+
+        // ── Dead ends ────────────────────────────────────────────────────
+
+        /// Record a failed approach to prevent agents retrying it.
+        ///
+        /// Writes to the in-memory store first, then best-effort persists to Redis.
+        /// The Redis key includes a simple hash of the description to avoid collisions.
+        ///
+        /// # Errors
+        /// Returns [`MemoryError::LockPoisoned`] on internal lock failure.
+        ///
+        /// # Panics
+        /// This function never panics.
+        pub async fn record_dead_end(&self, dead_end: DeadEnd) -> Result<(), MemoryError> {
+            self.inner.record_dead_end(dead_end.clone())?;
+            let hash = Self::simple_hash(&dead_end.description);
+            let key = format!("agent:deadend:{}:{}", dead_end.module, hash);
+            if let Ok(json) = serde_json::to_string(&dead_end) {
+                self.redis_set(&key, &json).await;
+            }
+            Ok(())
+        }
+
+        /// Return dead ends for a specific module.
+        pub fn dead_ends_for_module(&self, module: &str) -> Vec<DeadEnd> {
+            self.inner.dead_ends_for_module(module)
+        }
+
+        /// Return all known dead ends.
+        pub fn dead_ends(&self) -> Vec<DeadEnd> {
+            self.inner.dead_ends()
+        }
+
+        // ── Dependency graph pass-through ────────────────────────────────
+
+        /// Return all modules that are safe to edit in parallel (not claimed).
+        pub fn parallelizable_modules(&self) -> Vec<String> {
+            self.inner.parallelizable_modules()
+        }
+
+        /// Register or update a module node.
+        pub fn upsert_module(&self, node: ModuleNode) -> Result<(), MemoryError> {
+            self.inner.upsert_module(node)
+        }
+
+        /// Claim a module for an agent.
+        pub fn claim_module(&self, path: &str, agent_id: &str) -> bool {
+            self.inner.claim_module(path, agent_id)
+        }
+
+        /// Release a claim on a module.
+        pub fn release_module(&self, path: &str) {
+            self.inner.release_module(path);
+        }
+
+        /// Return a count summary of stored records.
+        pub fn summary(&self) -> MemorySummary {
+            self.inner.summary()
+        }
+
+        // ── Internal helpers ─────────────────────────────────────────────
+
+        /// Produce a cheap, deterministic hash of a string for use in Redis keys.
+        fn simple_hash(s: &str) -> u64 {
+            // FNV-1a 64-bit
+            let mut hash: u64 = 0xcbf29ce484222325;
+            for byte in s.as_bytes() {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+            hash
+        }
+    }
+}
+
+#[cfg(feature = "distributed")]
+pub use redis_memory::RedisAgentMemory;
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -763,5 +1066,202 @@ mod tests {
     fn test_modification_new_default_outcome_in_progress() {
         let rec = ModificationRecord::new("x", "desc", vec![]);
         assert_eq!(rec.outcome, ModificationOutcome::InProgress);
+    }
+}
+
+// ─── Redis memory tests (distributed feature) ───────────────────────────────
+
+#[cfg(test)]
+#[cfg(feature = "distributed")]
+mod redis_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn make_record(id: &str) -> ModificationRecord {
+        ModificationRecord::new(id, "test modification", vec!["src/foo.rs".to_string()])
+    }
+
+    fn make_tagged_record(id: &str, tag: &str) -> ModificationRecord {
+        let mut rec = make_record(id);
+        rec.tag = Some(tag.to_string());
+        rec
+    }
+
+    fn make_pattern(name: &str, module: &str) -> CodePattern {
+        CodePattern {
+            name: name.to_string(),
+            module: module.to_string(),
+            description: format!("pattern {name}"),
+            verdict: PatternVerdict::Success,
+            observation_count: 1,
+            last_seen_secs: 0,
+        }
+    }
+
+    fn make_baseline(module: &str) -> PerformanceBaseline {
+        PerformanceBaseline {
+            module: module.to_string(),
+            throughput_rps: 500.0,
+            p95_latency_ms: 2.0,
+            error_rate: 0.01,
+            recorded_at_secs: 0,
+        }
+    }
+
+    fn make_dead_end(module: &str, desc: &str) -> DeadEnd {
+        DeadEnd {
+            description: desc.to_string(),
+            module: module.to_string(),
+            reason: "did not work".to_string(),
+            evidence_ids: vec!["ev-1".to_string()],
+            recorded_at_secs: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_redis_memory_creation() {
+        let mem = RedisAgentMemory::degraded(100);
+        assert!(!mem.has_redis());
+        assert_eq!(mem.summary().modification_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_redis_memory_insert_modification() {
+        let mem = RedisAgentMemory::degraded(100);
+        let rec = make_record("rm-1");
+        assert!(mem.insert_modification(rec).await.is_ok());
+        assert_eq!(mem.modifications().len(), 1);
+        assert_eq!(mem.modifications()[0].id, "rm-1");
+    }
+
+    #[tokio::test]
+    async fn test_redis_memory_update_outcome() {
+        let mem = RedisAgentMemory::degraded(100);
+        mem.insert_modification(make_record("rm-2")).await.unwrap();
+
+        let mut deltas = HashMap::new();
+        deltas.insert("throughput".to_string(), 42.0);
+        mem.update_outcome("rm-2", ModificationOutcome::Deployed, deltas)
+            .await
+            .unwrap();
+
+        let rec = mem.get_modification("rm-2");
+        assert!(rec.is_some());
+        let rec = rec.unwrap();
+        assert_eq!(rec.outcome, ModificationOutcome::Deployed);
+        assert_eq!(*rec.metric_deltas.get("throughput").unwrap(), 42.0);
+    }
+
+    #[tokio::test]
+    async fn test_redis_memory_get_modification() {
+        let mem = RedisAgentMemory::degraded(100);
+        assert!(mem.get_modification("nonexistent").is_none());
+
+        mem.insert_modification(make_record("rm-3")).await.unwrap();
+        let found = mem.get_modification("rm-3");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().id, "rm-3");
+    }
+
+    #[tokio::test]
+    async fn test_redis_memory_insert_pattern() {
+        let mem = RedisAgentMemory::degraded(100);
+        let pat = make_pattern("bounded-chan", "src/stages.rs");
+        mem.insert_pattern(pat).await.unwrap();
+
+        let got = mem.get_pattern("bounded-chan");
+        assert!(got.is_some());
+        assert_eq!(got.unwrap().module, "src/stages.rs");
+    }
+
+    #[tokio::test]
+    async fn test_redis_memory_record_baseline() {
+        let mem = RedisAgentMemory::degraded(100);
+        let bl = make_baseline("src/dedup.rs");
+        mem.record_baseline(bl).await.unwrap();
+
+        let got = mem.get_baseline("src/dedup.rs");
+        assert!(got.is_some());
+        assert!((got.unwrap().throughput_rps - 500.0).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn test_redis_memory_record_dead_end() {
+        let mem = RedisAgentMemory::degraded(100);
+        let de = make_dead_end("src/rag.rs", "tried LRU eviction");
+        mem.record_dead_end(de).await.unwrap();
+
+        let all = mem.dead_ends();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].description, "tried LRU eviction");
+    }
+
+    #[tokio::test]
+    async fn test_redis_memory_modifications_by_tag() {
+        let mem = RedisAgentMemory::degraded(100);
+        mem.insert_modification(make_tagged_record("t1", "perf"))
+            .await
+            .unwrap();
+        mem.insert_modification(make_tagged_record("t2", "bugfix"))
+            .await
+            .unwrap();
+        mem.insert_modification(make_tagged_record("t3", "perf"))
+            .await
+            .unwrap();
+
+        let perf = mem.modifications_by_tag("perf");
+        assert_eq!(perf.len(), 2);
+        assert!(perf.iter().all(|r| r.tag.as_deref() == Some("perf")));
+    }
+
+    #[tokio::test]
+    async fn test_redis_memory_safe_to_edit_parallel() {
+        let mem = RedisAgentMemory::degraded(100);
+        mem.upsert_module(ModuleNode {
+            path: "x.rs".into(),
+            dependents: vec![],
+            dependencies: vec![],
+            p95_latency_ms: 0.0,
+            claimed_by: None,
+        })
+        .unwrap();
+        mem.upsert_module(ModuleNode {
+            path: "y.rs".into(),
+            dependents: vec![],
+            dependencies: vec![],
+            p95_latency_ms: 0.0,
+            claimed_by: None,
+        })
+        .unwrap();
+
+        // Both unclaimed — both parallelizable
+        let free = mem.parallelizable_modules();
+        assert_eq!(free.len(), 2);
+
+        // Claim one — only one left
+        mem.claim_module("x.rs", "agent-a");
+        let free = mem.parallelizable_modules();
+        assert_eq!(free.len(), 1);
+        assert!(free.contains(&"y.rs".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_redis_memory_dead_ends_for_module() {
+        let mem = RedisAgentMemory::degraded(100);
+        mem.record_dead_end(make_dead_end("mod_a", "approach 1"))
+            .await
+            .unwrap();
+        mem.record_dead_end(make_dead_end("mod_b", "approach 2"))
+            .await
+            .unwrap();
+        mem.record_dead_end(make_dead_end("mod_a", "approach 3"))
+            .await
+            .unwrap();
+
+        let a_ends = mem.dead_ends_for_module("mod_a");
+        assert_eq!(a_ends.len(), 2);
+
+        let b_ends = mem.dead_ends_for_module("mod_b");
+        assert_eq!(b_ends.len(), 1);
     }
 }

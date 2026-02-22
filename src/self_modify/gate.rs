@@ -156,12 +156,23 @@ impl Default for GateConfig {
     }
 }
 
+// ─── Smoke test runner trait ─────────────────────────────────────────────────
+
+/// Pluggable smoke test runner. Implementations should exercise the pipeline
+/// with synthetic traffic and report whether it handles requests correctly.
+pub trait SmokeTestRunner: Send + Sync {
+    /// Run the smoke test. Return Ok(()) if all requests completed successfully,
+    /// or Err(description) if any failed.
+    fn run_smoke_test(&self) -> Result<(), String>;
+}
+
 // ─── Gate runner ─────────────────────────────────────────────────────────────
 
 struct GateInner {
     cfg: GateConfig,
     benchmark_baselines: HashMap<String, BenchmarkSnapshot>,
     report_history: Vec<GateReport>,
+    smoke_runner: Option<Arc<dyn SmokeTestRunner>>,
 }
 
 /// Validation gate that evaluates agent-proposed changes.
@@ -178,6 +189,7 @@ impl ValidationGate {
                 cfg,
                 benchmark_baselines: HashMap::new(),
                 report_history: Vec::new(),
+                smoke_runner: None,
             })),
         }
     }
@@ -200,6 +212,16 @@ impl ValidationGate {
     pub fn set_trust_level(&self, level: u8) -> Result<(), GateError> {
         let mut inner = self.inner.lock().map_err(|_| GateError::LockPoisoned)?;
         inner.cfg.trust_level = level.min(2);
+        Ok(())
+    }
+
+    /// Set a pluggable smoke test runner.
+    ///
+    /// When set, `evaluate()` will invoke the runner instead of skipping the
+    /// smoke-test gate.
+    pub fn set_smoke_runner(&self, runner: Arc<dyn SmokeTestRunner>) -> Result<(), GateError> {
+        let mut inner = self.inner.lock().map_err(|_| GateError::LockPoisoned)?;
+        inner.smoke_runner = Some(runner);
         Ok(())
     }
 
@@ -249,12 +271,18 @@ impl ValidationGate {
             );
         }
 
-        // Gate 4: smoke test (100 requests through pipeline) — stubbed as pass
-        // A real implementation would spin up the pipeline and pump 100 requests.
-        gates.insert(
-            "smoke_test".to_string(),
-            GateOutcome::Skipped("smoke test not yet wired to live pipeline".to_string()),
-        );
+        // Gate 4: smoke test
+        let smoke_result = {
+            let runner = self.inner.lock().ok().and_then(|i| i.smoke_runner.clone());
+            match runner {
+                Some(r) => match r.run_smoke_test() {
+                    Ok(()) => GateOutcome::Pass,
+                    Err(msg) => GateOutcome::Fail(format!("smoke test failed: {msg}")),
+                },
+                None => GateOutcome::Skipped("no smoke test runner configured".to_string()),
+            }
+        };
+        gates.insert("smoke_test".to_string(), smoke_result);
 
         // Overall: fail if any mandatory gate explicitly failed
         let mandatory = ["cargo_test", "cargo_clippy"];
@@ -324,23 +352,114 @@ impl ValidationGate {
 
     // ── Private ───────────────────────────────────────────────────────────
 
-    async fn check_benchmark_regression(&self, _workspace: &str) -> GateOutcome {
-        // In a real implementation this would:
-        // 1. Run `cargo bench --message-format=json`
-        // 2. Parse Criterion output
-        // 3. Compare against stored baselines
-        // For now: pass if no baselines exist, else stub pass
-        let has_baselines = self
-            .inner
-            .lock()
-            .map(|i| !i.benchmark_baselines.is_empty())
-            .unwrap_or(false);
+    async fn check_benchmark_regression(&self, workspace: &str) -> GateOutcome {
+        use tokio::process::Command;
 
-        if !has_baselines {
+        // Extract baselines and config under the lock, then drop it before spawning.
+        let (baselines, max_regression) = {
+            let inner = match self.inner.lock() {
+                Ok(i) => i,
+                Err(_) => return GateOutcome::Error("lock poisoned".to_string()),
+            };
+            (
+                inner.benchmark_baselines.clone(),
+                inner.cfg.max_benchmark_regression,
+            )
+        };
+
+        if baselines.is_empty() {
             return GateOutcome::Skipped("no baselines recorded".to_string());
         }
 
-        GateOutcome::Pass
+        // Spawn `cargo bench --message-format=json`
+        let result = Command::new("cargo")
+            .args(["bench", "--message-format=json"])
+            .current_dir(workspace)
+            .output()
+            .await;
+
+        let output = match result {
+            Ok(o) => o,
+            Err(e) => return GateOutcome::Error(format!("spawn error: {e}")),
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        // Parse benchmark results from output lines.
+        // Look for JSON lines with "reason":"benchmark-complete" or lines with "bench:"
+        let mut regressions: Vec<String> = Vec::new();
+
+        for line in stdout.lines() {
+            // Try JSON format first (Criterion / cargo bench --message-format=json)
+            if line.contains("\"reason\":\"benchmark-complete\"") {
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) {
+                    let bench_name = parsed
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    let new_mean = parsed
+                        .get("mean")
+                        .and_then(|m| m.get("estimate"))
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+
+                    if let Some(baseline) = baselines.get(bench_name) {
+                        if baseline.mean_ns > 0.0 {
+                            let regression = (new_mean - baseline.mean_ns) / baseline.mean_ns;
+                            if regression > max_regression {
+                                regressions.push(format!(
+                                    "{bench_name}: {:.1}% regression (baseline={:.0}ns, new={:.0}ns)",
+                                    regression * 100.0,
+                                    baseline.mean_ns,
+                                    new_mean,
+                                ));
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // Fallback: plain-text bench output ("bench: NNN ns/iter")
+            if line.contains("bench:") {
+                // Format: "test <name> ... bench:  <nanos> ns/iter (+/- <var>)"
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                // Find the benchmark name (after "test") and mean (after "bench:")
+                if let (Some(name_pos), Some(bench_pos)) = (
+                    parts.iter().position(|&p| p == "test"),
+                    parts.iter().position(|&p| p == "bench:"),
+                ) {
+                    if name_pos + 1 < parts.len() && bench_pos + 1 < parts.len() {
+                        let bench_name = parts[name_pos + 1];
+                        if let Ok(new_mean) = parts[bench_pos + 1].replace(',', "").parse::<f64>() {
+                            if let Some(baseline) = baselines.get(bench_name) {
+                                if baseline.mean_ns > 0.0 {
+                                    let regression =
+                                        (new_mean - baseline.mean_ns) / baseline.mean_ns;
+                                    if regression > max_regression {
+                                        regressions.push(format!(
+                                            "{bench_name}: {:.1}% regression (baseline={:.0}ns, new={:.0}ns)",
+                                            regression * 100.0,
+                                            baseline.mean_ns,
+                                            new_mean,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if regressions.is_empty() {
+            GateOutcome::Pass
+        } else {
+            GateOutcome::Fail(format!(
+                "benchmark regressions detected:\n{}",
+                regressions.join("\n")
+            ))
+        }
     }
 
     fn error_report(&self, proposal_id: String, reason: &str, elapsed_ms: u64) -> GateReport {
@@ -584,6 +703,92 @@ mod tests {
         let json = serde_json::to_string(&o).unwrap();
         let back: GateOutcome = serde_json::from_str(&json).unwrap();
         assert_eq!(back, o);
+    }
+
+    // --- Smoke test runner tests ---
+
+    struct PassingSmokeRunner;
+    impl SmokeTestRunner for PassingSmokeRunner {
+        fn run_smoke_test(&self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    struct FailingSmokeRunner;
+    impl SmokeTestRunner for FailingSmokeRunner {
+        fn run_smoke_test(&self) -> Result<(), String> {
+            Err("3 of 100 requests failed".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_smoke_test_skipped_when_no_runner() {
+        let gate = make_gate(0);
+        let report = gate.evaluate("p").await;
+        let smoke = report.gates.get("smoke_test").unwrap();
+        assert!(matches!(smoke, GateOutcome::Skipped(_)));
+    }
+
+    #[tokio::test]
+    async fn test_smoke_test_passes_with_passing_runner() {
+        let gate = make_gate(0);
+        gate.set_smoke_runner(Arc::new(PassingSmokeRunner)).unwrap();
+        let report = gate.evaluate("p").await;
+        let smoke = report.gates.get("smoke_test").unwrap();
+        assert!(matches!(smoke, GateOutcome::Pass));
+    }
+
+    #[tokio::test]
+    async fn test_smoke_test_fails_with_failing_runner() {
+        let gate = make_gate(0);
+        gate.set_smoke_runner(Arc::new(FailingSmokeRunner)).unwrap();
+        let report = gate.evaluate("p").await;
+        let smoke = report.gates.get("smoke_test").unwrap();
+        assert!(matches!(smoke, GateOutcome::Fail(_)));
+    }
+
+    // --- Benchmark regression tests ---
+
+    #[tokio::test]
+    async fn test_benchmark_regression_skipped_when_no_baselines() {
+        let gate = ValidationGate::new(GateConfig {
+            run_benchmarks: true,
+            ..Default::default()
+        });
+        let report = gate.evaluate("p").await;
+        let bench = report.gates.get("benchmark_regression").unwrap();
+        assert!(matches!(bench, GateOutcome::Skipped(_)));
+    }
+
+    #[test]
+    fn test_set_smoke_runner_works() {
+        let gate = make_gate(0);
+        let result = gate.set_smoke_runner(Arc::new(PassingSmokeRunner));
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_benchmark_with_baselines_runs_check() {
+        let gate = ValidationGate::new(GateConfig {
+            run_benchmarks: true,
+            workspace_path: ".".to_string(),
+            ..Default::default()
+        });
+        gate.record_baseline(BenchmarkSnapshot {
+            name: "test_bench".to_string(),
+            mean_ns: 1000.0,
+            recorded_at_secs: 0,
+        })
+        .unwrap();
+        // With baselines, the check should attempt to run cargo bench
+        // On most CI/dev machines, cargo bench may error out — that's fine,
+        // we just verify it doesn't return Skipped anymore
+        let report = gate.evaluate("p").await;
+        let bench = report.gates.get("benchmark_regression").unwrap();
+        assert!(
+            !matches!(bench, GateOutcome::Skipped(_)),
+            "should attempt to run benchmarks when baselines exist"
+        );
     }
 
     #[test]

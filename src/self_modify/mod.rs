@@ -27,6 +27,9 @@ pub use deployment::{
 };
 pub use discover::{CapabilityDiscovery, DiscoveryConfig, DiscoveryFinding, FindingCategory};
 pub use docs::{ChangelogEntry, MetricDelta, SelfDocGenerator};
-pub use gate::{GateConfig, GateOutcome, GateReport, RecommendedAction, ValidationGate};
+pub use gate::{
+    BenchmarkSnapshot, GateConfig, GateOutcome, GateReport, RecommendedAction, SmokeTestRunner,
+    ValidationGate,
+};
 pub use memory::{AgentMemory, ModificationOutcome, ModificationRecord};
 pub use task_gen::{Complexity, GeneratedTask, MetaTaskGenerator, TaskPriority};

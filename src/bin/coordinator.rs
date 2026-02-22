@@ -7,7 +7,11 @@
 //!
 //! ```bash
 //! # Spawn 10 agents working through tasks.toml
-//! cargo run --bin coordinator -- --agents 10 --tasks tasks.toml
+//! cargo run --bin coordinator --features self-improving -- --agents 10 --tasks tasks.toml
+//!
+//! # Also start the self-improvement background loop
+//! cargo run --bin coordinator --features self-improving -- \
+//!   --agents 10 --tasks tasks.toml --self-improve
 //!
 //! # Show current status of task queue
 //! cargo run --bin coordinator -- --status --tasks tasks.toml
@@ -32,6 +36,8 @@ struct Args {
     status_only: bool,
     /// Task timeout in seconds.
     timeout_secs: u64,
+    /// Enable the self-improvement background loop (requires `self-improving` feature).
+    self_improve: bool,
 }
 
 /// Parse command-line arguments manually (no external arg parser dependency).
@@ -46,6 +52,7 @@ fn parse_args() -> Result<Args, String> {
     let mut task_file = PathBuf::from("tasks.toml");
     let mut status_only = false;
     let mut timeout_secs: u64 = 600;
+    let mut self_improve = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -68,6 +75,9 @@ fn parse_args() -> Result<Args, String> {
             }
             "--status" | "-s" => {
                 status_only = true;
+            }
+            "--self-improve" => {
+                self_improve = true;
             }
             "--timeout" => {
                 i += 1;
@@ -93,6 +103,7 @@ fn parse_args() -> Result<Args, String> {
         task_file,
         status_only,
         timeout_secs,
+        self_improve,
     })
 }
 
@@ -103,6 +114,7 @@ fn usage() -> String {
         "",
         "Options:",
         "  --agents, -a <N>      Number of agents to spawn (default: 4)",
+        "  --self-improve        Enable self-improvement background loop",
         "  --tasks, -t <FILE>    Path to tasks TOML file (default: tasks.toml)",
         "  --status, -s          Show task queue status and exit",
         "  --timeout <SECS>      Per-task timeout in seconds (default: 600)",
@@ -155,7 +167,31 @@ async fn main() {
 
     // Start monitoring
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let monitor_handle = monitor.start_monitoring(shutdown_rx);
+    let monitor_handle = monitor.start_monitoring(shutdown_rx.clone());
+
+    // Optional: self-improvement loop (requires self-improving feature flag)
+    #[cfg(all(feature = "self-tune", feature = "self-modify"))]
+    let _sil_handle = if args.self_improve {
+        use std::sync::Arc as StdArc;
+        use tokio_prompt_orchestrator::{
+            self_improve_loop::{LoopConfig, SelfImprovementLoop},
+            self_tune::telemetry_bus::{PipelineCounters, TelemetryBus, TelemetryBusConfig},
+        };
+        let counters = PipelineCounters::new();
+        let bus = StdArc::new(TelemetryBus::new(TelemetryBusConfig::default(), counters));
+        bus.start();
+        let sil = StdArc::new(SelfImprovementLoop::new(LoopConfig::default(), bus));
+        let sil_clone = StdArc::clone(&sil);
+        let sil_rx = shutdown_rx.clone();
+        eprintln!("Self-improvement loop enabled");
+        Some(tokio::spawn(async move { sil_clone.run(sil_rx).await }))
+    } else {
+        None
+    };
+    #[cfg(not(all(feature = "self-tune", feature = "self-modify")))]
+    if args.self_improve {
+        eprintln!("Warning: --self-improve requires --features self-improving at compile time");
+    }
 
     // Register agents
     for i in 0..config.agent_count {
