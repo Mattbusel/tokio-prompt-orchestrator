@@ -23,7 +23,7 @@ use tokio_prompt_orchestrator::{
 fn make_bus() -> Arc<TelemetryBus> {
     let counters = PipelineCounters::new();
     let cfg = TelemetryBusConfig {
-        snapshot_interval: Duration::from_millis(50),
+        sample_interval: Duration::from_millis(50),
         ..TelemetryBusConfig::default()
     };
     Arc::new(TelemetryBus::new(cfg, counters))

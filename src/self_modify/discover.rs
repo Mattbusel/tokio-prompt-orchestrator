@@ -374,30 +374,173 @@ impl CapabilityDiscovery {
     }
 
     fn scan_dead_code(&self) -> Vec<DiscoveryFinding> {
-        // Stub: in production, parse `cargo check --message-format=json`
-        // for unused-variable, dead-code, unused-import warnings.
-        Vec::new()
+        // Run `cargo check --message-format=json` and parse compiler warnings
+        // for dead_code, unused_imports, unused_variables, and similar lints.
+        let workspace = {
+            match self.inner.lock() {
+                Ok(g) => g.cfg.workspace_path.clone(),
+                Err(_) => return Vec::new(),
+            }
+        };
+
+        let output = match std::process::Command::new("cargo")
+            .args(["check", "--message-format=json", "--quiet"])
+            .current_dir(&workspace)
+            .output()
+        {
+            Ok(o) => o,
+            Err(_) => return Vec::new(),
+        };
+
+        let dead_code_codes: &[&str] = &[
+            "dead_code",
+            "unused_imports",
+            "unused_variables",
+            "unused_mut",
+            "unused_assignments",
+        ];
+
+        let mut findings = Vec::new();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let Ok(msg) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if msg.get("reason").and_then(|r| r.as_str()) != Some("compiler-message") {
+                continue;
+            }
+            let message = &msg["message"];
+            let level = message
+                .get("level")
+                .and_then(|l| l.as_str())
+                .unwrap_or("note");
+            if level != "warning" {
+                continue;
+            }
+            let code = message
+                .get("code")
+                .and_then(|c| c.get("code"))
+                .and_then(|c| c.as_str())
+                .unwrap_or("");
+            if !dead_code_codes.contains(&code) {
+                continue;
+            }
+            let rendered = message
+                .get("rendered")
+                .and_then(|r| r.as_str())
+                .unwrap_or("")
+                .to_string();
+            let file_path = message
+                .get("spans")
+                .and_then(|s| s.as_array())
+                .and_then(|a| a.first())
+                .and_then(|s| s.get("file_name"))
+                .and_then(|f| f.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+
+            findings.push(DiscoveryFinding {
+                id: format!("dead-{}-{}", code, findings.len()),
+                category: FindingCategory::DeadCode,
+                title: format!("dead_code lint: {code}"),
+                description: if rendered.is_empty() {
+                    format!("cargo check warning: {code}")
+                } else {
+                    rendered.chars().take(500).collect()
+                },
+                affected_files: vec![file_path],
+                suggested_action: "review and remove unused code".into(),
+                estimated_effort: "low".into(),
+                discovered_at_secs: unix_now(),
+                resolved: false,
+            });
+        }
+        findings
     }
 
     fn scan_dependencies(&self) -> Vec<DiscoveryFinding> {
-        // Stub: in production, invoke `cargo audit --json` and parse output.
-        Vec::new()
+        // Run `cargo audit --json` (if available) and report vulnerability advisories.
+        let workspace = {
+            match self.inner.lock() {
+                Ok(g) => g.cfg.workspace_path.clone(),
+                Err(_) => return Vec::new(),
+            }
+        };
+
+        let output = match std::process::Command::new("cargo")
+            .args(["audit", "--json"])
+            .current_dir(&workspace)
+            .output()
+        {
+            Ok(o) => o,
+            Err(_) => {
+                // cargo-audit not installed — return empty, don't fail scan
+                return Vec::new();
+            }
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let Ok(report) = serde_json::from_str::<serde_json::Value>(&stdout) else {
+            return Vec::new();
+        };
+
+        let mut findings = Vec::new();
+        if let Some(vulns) = report
+            .get("vulnerabilities")
+            .and_then(|v| v.get("list"))
+            .and_then(|l| l.as_array())
+        {
+            for vuln in vulns {
+                let id = vuln
+                    .get("advisory")
+                    .and_then(|a| a.get("id"))
+                    .and_then(|i| i.as_str())
+                    .unwrap_or("RUSTSEC-UNKNOWN")
+                    .to_string();
+                let title = vuln
+                    .get("advisory")
+                    .and_then(|a| a.get("title"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("unknown vulnerability")
+                    .to_string();
+                let package = vuln
+                    .get("package")
+                    .and_then(|p| p.get("name"))
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                findings.push(DiscoveryFinding {
+                    id: format!("dep-{id}"),
+                    category: FindingCategory::Dependency,
+                    title: format!("{id}: {title}"),
+                    description: format!("Vulnerable dependency: {package}. Advisory: {id}"),
+                    affected_files: vec!["Cargo.lock".into(), "Cargo.toml".into()],
+                    suggested_action: format!("upgrade or replace {package} to resolve {id}"),
+                    estimated_effort: "medium".into(),
+                    discovered_at_secs: unix_now(),
+                    resolved: false,
+                });
+            }
+        }
+        findings
     }
 
     fn scan_test_coverage(&self) -> Vec<DiscoveryFinding> {
-        // Stub: in production, parse llvm-cov output for uncovered functions.
+        // Coverage requires llvm-cov; stub returns empty until tooling is available.
+        // The dead_code scan is a partial proxy for missing tests.
         Vec::new()
     }
 
     fn scan_performance(&self) -> Vec<DiscoveryFinding> {
-        // Stub: in production, parse criterion benchmark output for
-        // functions with high mean or high variance.
+        // Performance hotspot analysis requires criterion benchmark output.
+        // Stub returns empty — performance findings come from telemetry-driven
+        // anomaly detection instead.
         Vec::new()
     }
 
     fn scan_api_surface(&self) -> Vec<DiscoveryFinding> {
-        // Stub: in production, cross-reference registered MCP tools
-        // against actual usage logs.
+        // API surface analysis requires cross-referencing MCP tool registrations
+        // against usage logs. Stub returns empty pending MCP integration.
         Vec::new()
     }
 }
