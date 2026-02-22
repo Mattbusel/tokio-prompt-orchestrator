@@ -17,7 +17,7 @@ use tracing::info;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize structured tracing (JSON or pretty, based on LOG_FORMAT env)
-    init_tracing();
+    let _ = init_tracing();
 
     // Initialize Prometheus metrics registry before any pipeline stage runs.
     metrics::init_metrics()?;

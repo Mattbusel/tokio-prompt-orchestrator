@@ -503,6 +503,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("MCP server starting with {worker_name} worker");
 
+    // Start the self-improvement loop in the background (requires self-tune + self-modify features).
+    #[cfg(all(feature = "self-tune", feature = "self-modify"))]
+    let (_sil_shutdown_tx, _sil_handle) = {
+        use std::sync::Arc;
+        use tokio::sync::watch;
+        use tokio_prompt_orchestrator::{
+            self_improve_loop::{LoopConfig, SelfImprovementLoop},
+            self_tune::telemetry_bus::{PipelineCounters, TelemetryBus, TelemetryBusConfig},
+        };
+
+        let counters = PipelineCounters::new();
+        let bus = Arc::new(TelemetryBus::new(TelemetryBusConfig::default(), counters));
+        bus.start();
+        tracing::info!("TelemetryBus started");
+
+        let cfg = LoopConfig::default();
+        let sil = Arc::new(SelfImprovementLoop::new(cfg, Arc::clone(&bus)));
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let sil_clone = Arc::clone(&sil);
+        let handle = tokio::spawn(async move { sil_clone.run(shutdown_rx).await });
+        tracing::info!("SelfImprovementLoop started");
+        (shutdown_tx, handle)
+    };
+
     // Start MCP server on stdio
     let service = new_mcp_server(handles)
         .serve(rmcp::transport::stdio())
