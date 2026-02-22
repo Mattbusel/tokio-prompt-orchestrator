@@ -26,6 +26,7 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::self_tune::{
+    actuator::LiveTuning,
     anomaly::AnomalyDetector,
     controller::TuningController,
     telemetry_bus::{PipelineCounters, TelemetryBus, TelemetryBusConfig},
@@ -43,6 +44,12 @@ pub struct SelfTuneHandles {
     pub bus: Arc<TelemetryBus>,
     /// Shared pipeline counters (callers can increment these from pipeline code).
     pub counters: Arc<PipelineCounters>,
+    /// Live parameter store — pipeline components read from here.
+    ///
+    /// The controller writes updated values every telemetry tick; components
+    /// (circuit breaker, rate limiter, dedup) consult this store before each
+    /// operation for adaptive behaviour.
+    pub live_tuning: LiveTuning,
 }
 
 impl SelfTuneHandles {
@@ -77,22 +84,32 @@ pub async fn start_self_tune_loop(target_p95_ms: f64, target_rps: f64) -> SelfTu
     ));
     bus.start();
 
+    // Shared atomic parameter store — the controller writes here; pipeline
+    // components read from here lock-free.
+    let live_tuning = LiveTuning::new();
+
     let controller_task = {
         let mut rx = bus.subscribe();
         let mut controller = TuningController::new(target_p95_ms, target_rps);
+        let lt = live_tuning.clone();
         tokio::spawn(async move {
             info!(target: "self_tune::controller", "Controller loop started");
             loop {
                 match rx.recv().await {
                     Ok(snap) => {
                         let adjustments = controller.process(&snap);
-                        for (param, value) in &adjustments {
-                            info!(
-                                target: "self_tune::controller",
-                                parameter = ?param,
-                                new_value = value,
-                                "Parameter adjusted"
-                            );
+                        if !adjustments.is_empty() {
+                            // Apply PID recommendations to the live parameter
+                            // store so pipeline components pick them up.
+                            lt.apply_adjustments(&adjustments);
+                            for (param, value) in &adjustments {
+                                info!(
+                                    target: "self_tune::controller",
+                                    parameter = ?param,
+                                    new_value = value,
+                                    "Parameter adjusted and applied"
+                                );
+                            }
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -163,6 +180,7 @@ pub async fn start_self_tune_loop(target_p95_ms: f64, target_rps: f64) -> SelfTu
         anomaly_task,
         bus,
         counters,
+        live_tuning,
     }
 }
 

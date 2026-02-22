@@ -71,7 +71,7 @@ self-improving = ["self-tune", "self-modify", "intelligence", "evolution"]
 tui = ["ratatui", "crossterm"]
 mcp = ["rmcp", "async-stream", "web-api"]
 dashboard = ["web-api"]
-distributed = []
+distributed = ["redis"]
 
 [dev-dependencies]
 tokio-test = "0.4"
