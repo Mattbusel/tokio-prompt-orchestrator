@@ -32,9 +32,8 @@
 //! - Stream output: 256
 
 use crate::{
-    enhanced::CircuitBreaker,
-    metrics, send_with_shed, AssembleOutput, InferenceOutput, ModelWorker, PostOutput,
-    PromptRequest, RagOutput,
+    enhanced::CircuitBreaker, metrics, send_with_shed, AssembleOutput, InferenceOutput,
+    ModelWorker, PostOutput, PromptRequest, RagOutput,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -98,11 +97,7 @@ pub fn spawn_pipeline(worker: Arc<dyn ModelWorker>) -> PipelineHandles {
     // Threshold: 5 consecutive failures open the circuit.
     // Success rate: 80% of recent requests must succeed to close.
     // Timeout: 60 seconds before half-open probe.
-    let circuit_breaker = CircuitBreaker::new(
-        5,
-        0.8,
-        std::time::Duration::from_secs(60),
-    );
+    let circuit_breaker = CircuitBreaker::new(5, 0.8, std::time::Duration::from_secs(60));
 
     // Spawn each stage
     let rag = tokio::spawn(rag_stage(input_rx, rag_tx));
@@ -445,10 +440,7 @@ async fn post_stage(mut rx: mpsc::Receiver<InferenceOutput>, tx: mpsc::Sender<Po
 ///     async fn emit(&self, session: &SessionId, text: &str) -> Result<()>;
 /// }
 /// ```
-async fn stream_stage(
-    mut rx: mpsc::Receiver<PostOutput>,
-    output_tx: mpsc::Sender<PostOutput>,
-) {
+async fn stream_stage(mut rx: mpsc::Receiver<PostOutput>, output_tx: mpsc::Sender<PostOutput>) {
     info!(target: "orchestrator::pipeline", "Stream stage started");
 
     while let Some(post_output) = rx.recv().await {
@@ -610,15 +602,15 @@ mod tests {
         handles.input_tx.send(request).await.unwrap_or_else(|_| ());
 
         // Wait for result with timeout
-        let result = tokio::time::timeout(
-            tokio::time::Duration::from_secs(5),
-            output_rx.recv(),
-        )
-        .await;
+        let result =
+            tokio::time::timeout(tokio::time::Duration::from_secs(5), output_rx.recv()).await;
 
         assert!(result.is_ok(), "should receive result within timeout");
         let post_output = result.unwrap_or(None);
-        assert!(post_output.is_some(), "output channel should yield a PostOutput");
+        assert!(
+            post_output.is_some(),
+            "output channel should yield a PostOutput"
+        );
         let post = post_output.unwrap_or_else(|| crate::PostOutput {
             session: SessionId::new(""),
             request_id: String::new(),

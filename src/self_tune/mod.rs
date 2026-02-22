@@ -1,0 +1,9 @@
+//! Self-tuning subsystem - telemetry, PID control, experiments, anomaly detection, cost, snapshots.
+//! All items in this module are gated behind the self-tune feature flag.
+
+pub mod anomaly;
+pub mod controller;
+pub mod cost;
+pub mod experiment;
+pub mod snapshot;
+pub mod telemetry_bus;

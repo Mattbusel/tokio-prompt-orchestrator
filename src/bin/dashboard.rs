@@ -26,10 +26,11 @@ use axum::{
     Router,
 };
 use serde::Serialize;
+use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use tokio_prompt_orchestrator::{
     enhanced::{CircuitBreaker, CircuitStatus, Deduplicator},
     metrics, spawn_pipeline, EchoWorker, LlamaCppWorker, ModelWorker, OrchestratorError,
@@ -48,21 +49,25 @@ const DASHBOARD_HTML: &str = include_str!("../../static/index.html");
 /// Shared state accessible from all route handlers.
 ///
 /// Holds references to the pipeline sender and enhanced-feature components so
-/// that the SSE stream can read live statistics.
+/// that the SSE stream can read live statistics. In mock mode, the pipeline
+/// is not started and all data comes from the mock story state instead.
 #[derive(Clone)]
 pub struct DashboardState {
     /// Sender side of the pipeline input channel — kept alive to prevent
     /// pipeline shutdown; also used by future request-submission routes.
+    /// `None` in mock mode where no real pipeline is running.
     #[allow(dead_code)]
-    pipeline_tx: mpsc::Sender<PromptRequest>,
-    /// Circuit breaker for the inference stage.
+    pipeline_tx: Option<mpsc::Sender<PromptRequest>>,
+    /// Circuit breaker for the inference stage (live mode only).
     circuit_breaker: CircuitBreaker,
-    /// Request deduplicator.
+    /// Request deduplicator (live mode only).
     deduplicator: Deduplicator,
     /// Timestamp when the dashboard server started.
     start_time: Instant,
     /// Name of the active worker backend.
     worker_name: String,
+    /// Mock story state, present only when `--mock` was passed.
+    mock_state: Option<Arc<Mutex<MockDashboardState>>>,
 }
 
 // ── SSE event payload ────────────────────────────────────────────────────────
@@ -70,7 +75,7 @@ pub struct DashboardState {
 /// Event payload pushed to SSE clients every 500ms.
 #[derive(Debug, Clone, Serialize)]
 pub struct DashboardEvent {
-    /// Number of active pipeline stages (always 5 when healthy).
+    /// Number of active pipeline stages (varies during failures).
     pub active_agents: u32,
     /// Total requests that entered the pipeline.
     pub requests_total: u64,
@@ -94,6 +99,12 @@ pub struct DashboardEvent {
     pub shed_counts: StageCountMap,
     /// Server uptime in seconds.
     pub uptime_secs: u64,
+    /// Recent processed requests for the live log.
+    pub recent_requests: Vec<RecentRequest>,
+    /// Which pipeline stages are currently active (5 booleans).
+    pub active_stages: Vec<bool>,
+    /// Channel depth info between pipeline stages.
+    pub channel_depths: Vec<ChannelDepthInfo>,
 }
 
 /// Circuit breaker status for a single service.
@@ -126,15 +137,54 @@ pub struct StageTiming {
     pub stream_ms: f64,
 }
 
-/// Model routing statistics.
+/// Model routing statistics with N-way model support.
 #[derive(Debug, Clone, Serialize)]
 pub struct ModelRoutingStats {
-    /// Name of the primary worker.
+    /// Name of the primary worker (kept for backwards compatibility).
     pub primary_model: String,
     /// Percentage of requests routed to the primary model (0.0–100.0).
     pub primary_pct: f32,
     /// Percentage of requests using the fallback (echo) model.
     pub fallback_pct: f32,
+    /// Detailed per-model routing entries for N-way display.
+    pub models: Vec<ModelRoutingEntry>,
+}
+
+/// A single model's routing entry for N-way donut chart.
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelRoutingEntry {
+    /// Model name (e.g., `"Mistral"`, `"Claude"`, `"OpenAI"`).
+    pub name: String,
+    /// Percentage of requests routed to this model (0.0–100.0).
+    pub pct: f32,
+    /// CSS color variable name for the donut arc (e.g., `"var(--accent)"`).
+    pub color: String,
+}
+
+/// A recent request log entry sent from the backend.
+#[derive(Debug, Clone, Serialize)]
+pub struct RecentRequest {
+    /// Formatted timestamp string, e.g. `"14:32:01"`.
+    pub timestamp: String,
+    /// Session identifier.
+    pub session_id: String,
+    /// Pipeline stage that processed this request.
+    pub stage: String,
+    /// Processing latency in milliseconds.
+    pub latency_ms: f64,
+    /// Request status: `"ok"`, `"error"`, `"shed"`, `"deduped"`.
+    pub status: String,
+}
+
+/// Channel depth information between two pipeline stages.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChannelDepthInfo {
+    /// Human-readable channel name (e.g., `"RAG → ASM"`).
+    pub name: String,
+    /// Current queue depth.
+    pub current: usize,
+    /// Maximum channel capacity.
+    pub capacity: usize,
 }
 
 /// Stage-level counter map (stage name → count).
@@ -152,14 +202,646 @@ pub struct StageCountMap {
     pub stream: u64,
 }
 
+// ── Mock dashboard state ────────────────────────────────────────────────────
+
+/// Story cycle length in ticks. The mock story loops every 120 ticks (seconds).
+const STORY_CYCLE_TICKS: u64 = 120;
+
+/// Maximum number of recent request log entries retained.
+const MAX_RECENT_REQUESTS: usize = 20;
+
+/// Cost per inference call in USD (for savings estimate in mock mode).
+const MOCK_COST_PER_INFERENCE: f64 = 0.012;
+
+/// Mutable mock state that advances through a scripted 2-minute story.
+///
+/// ## Story Phases
+/// | Phase     | Ticks   | Behavior                                          |
+/// |-----------|---------|---------------------------------------------------|
+/// | Warmup    |  0 – 29 | Low traffic, all CBs closed                       |
+/// | Load      | 30 – 44 | Rising throughput, channels filling                |
+/// | Failure   | 45 – 59 | llama.cpp CB opens, latency spikes                |
+/// | HalfOpen  | 60 – 74 | Probe requests, improving                         |
+/// | Recovery  | 75 – 89 | CB closes, recovery logs                          |
+/// | Steady    | 90 –119 | Nominal, high dedup                               |
+#[derive(Debug)]
+pub struct MockDashboardState {
+    /// Monotonic tick counter.
+    pub tick_count: u64,
+    /// Simulated uptime in seconds.
+    pub uptime_secs: u64,
+    /// Per-stage latencies in milliseconds [rag, assemble, inference, post, stream].
+    pub stage_latencies: [f64; 5],
+    /// Per-stage request counts.
+    pub stage_counts: [u64; 5],
+    /// Per-stage shed counts.
+    pub shed_counts: [u64; 5],
+    /// Total requests received.
+    pub requests_total: u64,
+    /// Total inferences executed (post-dedup).
+    pub inferences_total: u64,
+    /// Estimated cost saved in USD.
+    pub cost_saved_usd: f64,
+    /// Throughput history (last 60 values, one per tick).
+    pub throughput_history: VecDeque<u64>,
+    /// Circuit breaker states: [openai, anthropic, llama.cpp].
+    pub circuit_breakers: Vec<MockCircuitBreaker>,
+    /// Model routing percentages: [Mistral, Claude, OpenAI].
+    pub model_routing: Vec<ModelRoutingEntry>,
+    /// Recent request log entries.
+    pub recent_requests: VecDeque<RecentRequest>,
+    /// Which stage is currently active (rotating index).
+    pub active_stage_index: usize,
+    /// Number of active agents (varies during failure).
+    pub active_agents: u32,
+    /// Channel depths between stages.
+    pub channel_depths: [MockChannelDepth; 4],
+}
+
+/// Mock circuit breaker for a single service.
+#[derive(Debug, Clone)]
+pub struct MockCircuitBreaker {
+    /// Service name.
+    pub name: String,
+    /// Current status string: `"closed"`, `"open"`, or `"half_open"`.
+    pub status: String,
+    /// Total failures.
+    pub failures: usize,
+    /// Total successes.
+    pub successes: usize,
+}
+
+/// Mock channel depth between two pipeline stages.
+#[derive(Debug, Clone)]
+pub struct MockChannelDepth {
+    /// Channel label.
+    pub name: String,
+    /// Current depth.
+    pub current: usize,
+    /// Max capacity.
+    pub capacity: usize,
+}
+
+impl Default for MockDashboardState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MockDashboardState {
+    /// Creates a new mock state with initial values.
+    ///
+    /// # Panics
+    ///
+    /// This function never panics.
+    pub fn new() -> Self {
+        Self {
+            tick_count: 0,
+            uptime_secs: 0,
+            stage_latencies: [3.0, 1.5, 260.0, 1.8, 0.7],
+            stage_counts: [0; 5],
+            shed_counts: [0; 5],
+            requests_total: 0,
+            inferences_total: 0,
+            cost_saved_usd: 0.0,
+            throughput_history: VecDeque::with_capacity(60),
+            circuit_breakers: vec![
+                MockCircuitBreaker {
+                    name: "openai".to_string(),
+                    status: "closed".to_string(),
+                    failures: 0,
+                    successes: 0,
+                },
+                MockCircuitBreaker {
+                    name: "anthropic".to_string(),
+                    status: "closed".to_string(),
+                    failures: 0,
+                    successes: 0,
+                },
+                MockCircuitBreaker {
+                    name: "llama.cpp".to_string(),
+                    status: "closed".to_string(),
+                    failures: 0,
+                    successes: 0,
+                },
+            ],
+            model_routing: vec![
+                ModelRoutingEntry {
+                    name: "Mistral".to_string(),
+                    pct: 60.0,
+                    color: "var(--accent)".to_string(),
+                },
+                ModelRoutingEntry {
+                    name: "Claude".to_string(),
+                    pct: 30.0,
+                    color: "var(--purple)".to_string(),
+                },
+                ModelRoutingEntry {
+                    name: "OpenAI".to_string(),
+                    pct: 10.0,
+                    color: "var(--orange)".to_string(),
+                },
+            ],
+            recent_requests: VecDeque::with_capacity(MAX_RECENT_REQUESTS),
+            active_stage_index: 0,
+            active_agents: 5,
+            channel_depths: [
+                MockChannelDepth {
+                    name: "RAG \u{2192} ASM".to_string(),
+                    current: 0,
+                    capacity: 512,
+                },
+                MockChannelDepth {
+                    name: "ASM \u{2192} INF".to_string(),
+                    current: 0,
+                    capacity: 512,
+                },
+                MockChannelDepth {
+                    name: "INF \u{2192} PST".to_string(),
+                    current: 0,
+                    capacity: 1024,
+                },
+                MockChannelDepth {
+                    name: "PST \u{2192} STR".to_string(),
+                    current: 0,
+                    capacity: 512,
+                },
+            ],
+        }
+    }
+
+    /// Advances the mock story by one tick (1 second).
+    ///
+    /// Updates all state fields based on the current story phase.
+    ///
+    /// # Panics
+    ///
+    /// This function never panics.
+    pub fn tick(&mut self) {
+        self.tick_count += 1;
+        self.uptime_secs += 1;
+
+        let t = self.tick_count as f64;
+        let phase_tick = (self.tick_count - 1) % STORY_CYCLE_TICKS;
+
+        self.update_latencies(t, phase_tick);
+        self.update_circuit_breakers(phase_tick);
+        self.update_dedup(phase_tick);
+        self.update_throughput(t, phase_tick);
+        self.update_model_routing(phase_tick);
+        self.update_active_stage(t, phase_tick);
+        self.update_channels(t, phase_tick);
+        self.update_stage_counts(phase_tick);
+        self.update_recent_requests(phase_tick);
+    }
+
+    /// Returns the current phase tick (position within the 120-tick cycle).
+    ///
+    /// # Panics
+    ///
+    /// This function never panics.
+    pub fn phase_tick(&self) -> u64 {
+        if self.tick_count == 0 {
+            return 0;
+        }
+        (self.tick_count - 1) % STORY_CYCLE_TICKS
+    }
+
+    /// Updates pipeline stage latencies based on story phase.
+    fn update_latencies(&mut self, t: f64, phase_tick: u64) {
+        let wobble = |freq: f64| (t * freq).sin();
+
+        match phase_tick {
+            0..=29 => {
+                self.stage_latencies[0] = 3.0 + 0.5 * wobble(0.07);
+                self.stage_latencies[1] = 1.5 + 0.3 * wobble(0.11);
+                self.stage_latencies[2] = 260.0 + 15.0 * wobble(0.05);
+                self.stage_latencies[3] = 1.8 + 0.2 * wobble(0.09);
+                self.stage_latencies[4] = 0.7 + 0.1 * wobble(0.13);
+            }
+            30..=44 => {
+                let pressure = (phase_tick - 30) as f64 / 15.0;
+                self.stage_latencies[0] = 4.0 + 2.0 * pressure + 0.5 * wobble(0.07);
+                self.stage_latencies[1] = 2.0 + 1.0 * pressure + 0.3 * wobble(0.11);
+                self.stage_latencies[2] = 280.0 + 80.0 * pressure + 20.0 * wobble(0.05);
+                self.stage_latencies[3] = 2.5 + 1.5 * pressure + 0.3 * wobble(0.09);
+                self.stage_latencies[4] = 1.0 + 0.5 * pressure + 0.1 * wobble(0.13);
+            }
+            45..=59 => {
+                let severity = ((phase_tick - 45) as f64 / 7.0).sin().abs();
+                self.stage_latencies[0] = 5.5 + 1.0 * wobble(0.07);
+                self.stage_latencies[1] = 3.0 + 0.5 * wobble(0.11);
+                self.stage_latencies[2] = 380.0 + 100.0 * severity + 30.0 * wobble(0.05);
+                self.stage_latencies[3] = 4.0 + 1.0 * wobble(0.09);
+                self.stage_latencies[4] = 1.5 + 0.3 * wobble(0.13);
+            }
+            60..=74 => {
+                let recovery = (phase_tick - 60) as f64 / 15.0;
+                self.stage_latencies[0] = 5.0 - 1.5 * recovery + 0.5 * wobble(0.07);
+                self.stage_latencies[1] = 2.5 - 0.5 * recovery + 0.3 * wobble(0.11);
+                self.stage_latencies[2] = 350.0 - 60.0 * recovery + 20.0 * wobble(0.05);
+                self.stage_latencies[3] = 3.5 - 1.0 * recovery + 0.3 * wobble(0.09);
+                self.stage_latencies[4] = 1.3 - 0.3 * recovery + 0.1 * wobble(0.13);
+            }
+            75..=89 => {
+                let settle = (phase_tick - 75) as f64 / 15.0;
+                self.stage_latencies[0] = 3.5 - 0.5 * settle + 0.5 * wobble(0.07);
+                self.stage_latencies[1] = 2.0 - 0.3 * settle + 0.3 * wobble(0.11);
+                self.stage_latencies[2] = 290.0 - 20.0 * settle + 15.0 * wobble(0.05);
+                self.stage_latencies[3] = 2.5 - 0.5 * settle + 0.2 * wobble(0.09);
+                self.stage_latencies[4] = 1.0 - 0.2 * settle + 0.1 * wobble(0.13);
+            }
+            _ => {
+                self.stage_latencies[0] = 3.0 + 0.8 * wobble(0.07) + 0.3 * wobble(0.31);
+                self.stage_latencies[1] = 1.7 + 0.4 * wobble(0.11) + 0.2 * wobble(0.47);
+                self.stage_latencies[2] = 270.0 + 25.0 * wobble(0.05) + 10.0 * wobble(0.23);
+                self.stage_latencies[3] = 2.0 + 0.5 * wobble(0.09) + 0.2 * wobble(0.19);
+                self.stage_latencies[4] = 0.8 + 0.2 * wobble(0.13) + 0.1 * wobble(0.37);
+            }
+        }
+
+        // Clamp all to non-negative
+        for lat in &mut self.stage_latencies {
+            if *lat < 0.1 {
+                *lat = 0.1;
+            }
+        }
+    }
+
+    /// Updates circuit breakers based on story phase.
+    fn update_circuit_breakers(&mut self, phase_tick: u64) {
+        let tick = self.tick_count;
+
+        // openai: always closed
+        if let Some(cb) = self.circuit_breakers.get_mut(0) {
+            cb.status = "closed".to_string();
+            cb.successes = (tick * 2 + 47) as usize;
+            cb.failures = 0;
+        }
+
+        // anthropic: always closed
+        if let Some(cb) = self.circuit_breakers.get_mut(1) {
+            cb.status = "closed".to_string();
+            cb.successes = (tick * 3 + 120) as usize;
+            cb.failures = 0;
+        }
+
+        // llama.cpp: the star of the story
+        if let Some(cb) = self.circuit_breakers.get_mut(2) {
+            match phase_tick {
+                0..=44 => {
+                    cb.status = "closed".to_string();
+                    cb.successes = (tick + 50) as usize;
+                    cb.failures = 0;
+                }
+                45..=59 => {
+                    cb.status = "open".to_string();
+                    cb.failures = 5 + (phase_tick - 45) as usize;
+                    cb.successes = 0;
+                }
+                60..=74 => {
+                    cb.status = "half_open".to_string();
+                    cb.failures = 3;
+                    cb.successes = (phase_tick - 60) as usize;
+                }
+                _ => {
+                    cb.status = "closed".to_string();
+                    cb.successes = (tick + 50) as usize;
+                    cb.failures = 0;
+                }
+            }
+        }
+    }
+
+    /// Updates dedup statistics based on story phase.
+    fn update_dedup(&mut self, phase_tick: u64) {
+        let (req_inc, inf_inc) = match phase_tick {
+            0..=29 => (3u64, 1u64),
+            30..=44 => (8, 2),
+            45..=59 => (6, 3),
+            60..=74 => (5, 2),
+            75..=89 => (5, 1),
+            _ => (4, 1),
+        };
+
+        self.requests_total += req_inc;
+        self.inferences_total += inf_inc;
+        self.cost_saved_usd += MOCK_COST_PER_INFERENCE * (req_inc.saturating_sub(inf_inc)) as f64;
+    }
+
+    /// Updates throughput history based on story phase.
+    fn update_throughput(&mut self, t: f64, phase_tick: u64) {
+        let base = match phase_tick {
+            0..=29 => 8.0,
+            30..=44 => 8.0 + 20.0 * ((phase_tick - 30) as f64 / 15.0),
+            45..=59 => 22.0,
+            60..=74 => 18.0,
+            75..=89 => 15.0,
+            _ => 15.0,
+        };
+
+        let wobble = 3.0 * (t * 0.11).sin() + 2.0 * (t * 0.19).cos();
+        let value = (base + wobble).max(1.0) as u64;
+        self.throughput_history.push_back(value);
+        if self.throughput_history.len() > 60 {
+            self.throughput_history.pop_front();
+        }
+    }
+
+    /// Updates model routing percentages based on story phase.
+    fn update_model_routing(&mut self, phase_tick: u64) {
+        let (m, c, o) = match phase_tick {
+            0..=29 => (60.0, 30.0, 10.0),
+            30..=44 => (50.0, 35.0, 15.0),
+            45..=59 => (30.0, 55.0, 15.0), // shift away from failing provider
+            60..=74 => (40.0, 45.0, 15.0),
+            75..=89 => (50.0, 35.0, 15.0),
+            _ => (55.0, 30.0, 15.0),
+        };
+
+        if let Some(entry) = self.model_routing.get_mut(0) {
+            entry.pct = m;
+        }
+        if let Some(entry) = self.model_routing.get_mut(1) {
+            entry.pct = c;
+        }
+        if let Some(entry) = self.model_routing.get_mut(2) {
+            entry.pct = o;
+        }
+    }
+
+    /// Updates which pipeline stage is currently active.
+    fn update_active_stage(&mut self, t: f64, phase_tick: u64) {
+        self.active_stage_index = ((t * 0.5) as usize) % 5;
+        self.active_agents = match phase_tick {
+            45..=59 => 4, // one stage degraded during failure
+            _ => 5,
+        };
+    }
+
+    /// Updates channel depths between pipeline stages.
+    fn update_channels(&mut self, t: f64, phase_tick: u64) {
+        let wobble = |freq: f64| (t * freq).sin();
+
+        let (fill0, fill1, fill2, fill3) = match phase_tick {
+            0..=29 => (0.15, 0.08, 0.20, 0.05),
+            30..=44 => {
+                let p = (phase_tick - 30) as f64 / 15.0;
+                (
+                    0.15 + 0.45 * p,
+                    0.08 + 0.20 * p,
+                    0.20 + 0.50 * p,
+                    0.05 + 0.15 * p,
+                )
+            }
+            45..=59 => (0.65, 0.35, 0.80, 0.25),
+            60..=74 => {
+                let r = (phase_tick - 60) as f64 / 15.0;
+                (
+                    0.65 - 0.30 * r,
+                    0.35 - 0.15 * r,
+                    0.80 - 0.35 * r,
+                    0.25 - 0.10 * r,
+                )
+            }
+            75..=89 => (0.30, 0.15, 0.40, 0.10),
+            _ => (0.20, 0.10, 0.25, 0.06),
+        };
+
+        let fills = [fill0, fill1, fill2, fill3];
+        let freqs = [0.08, 0.12, 0.06, 0.15];
+        for i in 0..4 {
+            let cap = self.channel_depths[i].capacity as f64;
+            let depth = ((cap * fills[i] + cap * 0.05 * wobble(freqs[i])).max(0.0) as usize)
+                .min(self.channel_depths[i].capacity);
+            self.channel_depths[i].current = depth;
+        }
+    }
+
+    /// Updates per-stage request counts.
+    fn update_stage_counts(&mut self, phase_tick: u64) {
+        let inc = match phase_tick {
+            0..=29 => 3,
+            30..=44 => 8,
+            45..=59 => 4,
+            60..=74 => 5,
+            75..=89 => 5,
+            _ => 4,
+        };
+        for count in &mut self.stage_counts {
+            *count += inc;
+        }
+        // Add shed during failure
+        if (45..=59).contains(&phase_tick) {
+            self.shed_counts[2] += 2; // inference sheds
+        }
+    }
+
+    /// Generates recent request log entries based on the current story phase.
+    fn update_recent_requests(&mut self, phase_tick: u64) {
+        let ts = format!(
+            "{:02}:{:02}:{:02}",
+            (self.uptime_secs / 3600) % 24,
+            (self.uptime_secs % 3600) / 60,
+            self.uptime_secs % 60
+        );
+
+        let tick = self.tick_count;
+        let stages = ["rag", "assemble", "inference", "post", "stream"];
+        let stage_idx = (tick as usize) % stages.len();
+
+        let entry = match phase_tick {
+            0..=29 => {
+                if tick % 3 == 0 {
+                    Some(RecentRequest {
+                        timestamp: ts,
+                        session_id: format!("user-{}", tick % 100),
+                        stage: stages[stage_idx].to_string(),
+                        latency_ms: self.stage_latencies[stage_idx],
+                        status: "ok".to_string(),
+                    })
+                } else {
+                    None
+                }
+            }
+            30..=44 => Some(RecentRequest {
+                timestamp: ts,
+                session_id: format!("user-{}", tick % 200),
+                stage: stages[stage_idx].to_string(),
+                latency_ms: self.stage_latencies[stage_idx],
+                status: if tick % 5 == 0 {
+                    "deduped".to_string()
+                } else {
+                    "ok".to_string()
+                },
+            }),
+            45..=59 => Some(RecentRequest {
+                timestamp: ts,
+                session_id: format!("user-{}", tick % 50),
+                stage: "inference".to_string(),
+                latency_ms: self.stage_latencies[2],
+                status: if tick % 3 == 0 {
+                    "error".to_string()
+                } else {
+                    "shed".to_string()
+                },
+            }),
+            60..=74 => Some(RecentRequest {
+                timestamp: ts,
+                session_id: format!("probe-{}", tick % 10),
+                stage: "inference".to_string(),
+                latency_ms: self.stage_latencies[2],
+                status: "ok".to_string(),
+            }),
+            75..=89 => Some(RecentRequest {
+                timestamp: ts,
+                session_id: format!("user-{}", tick % 150),
+                stage: stages[stage_idx].to_string(),
+                latency_ms: self.stage_latencies[stage_idx],
+                status: "ok".to_string(),
+            }),
+            _ => {
+                if tick % 2 == 0 {
+                    Some(RecentRequest {
+                        timestamp: ts,
+                        session_id: format!("user-{}", tick % 500),
+                        stage: stages[stage_idx].to_string(),
+                        latency_ms: self.stage_latencies[stage_idx],
+                        status: if tick % 4 == 0 {
+                            "deduped".to_string()
+                        } else {
+                            "ok".to_string()
+                        },
+                    })
+                } else {
+                    None
+                }
+            }
+        };
+
+        if let Some(req) = entry {
+            self.recent_requests.push_back(req);
+            while self.recent_requests.len() > MAX_RECENT_REQUESTS {
+                self.recent_requests.pop_front();
+            }
+        }
+    }
+
+    /// Builds a [`DashboardEvent`] snapshot from the current mock state.
+    ///
+    /// # Panics
+    ///
+    /// This function never panics.
+    pub fn build_event(&self) -> DashboardEvent {
+        let dedup_rate = if self.requests_total > 0 {
+            let deduped = self.requests_total.saturating_sub(self.inferences_total);
+            (deduped as f32 / self.requests_total as f32) * 100.0
+        } else {
+            0.0
+        };
+
+        let throughput_rps = self.throughput_history.back().copied().unwrap_or(0) as f32;
+
+        let circuit_breakers: Vec<CircuitBreakerState> = self
+            .circuit_breakers
+            .iter()
+            .map(|cb| {
+                let total = cb.successes + cb.failures;
+                let success_rate = if total > 0 {
+                    cb.successes as f64 / total as f64
+                } else {
+                    1.0
+                };
+                CircuitBreakerState {
+                    name: cb.name.clone(),
+                    status: cb.status.clone(),
+                    failures: cb.failures,
+                    successes: cb.successes,
+                    success_rate,
+                }
+            })
+            .collect();
+
+        let primary_pct = self.model_routing.first().map(|m| m.pct).unwrap_or(100.0);
+        let fallback_pct = 100.0 - primary_pct;
+
+        let active_stages: Vec<bool> = (0..5).map(|i| i == self.active_stage_index).collect();
+
+        let channel_depths: Vec<ChannelDepthInfo> = self
+            .channel_depths
+            .iter()
+            .map(|ch| ChannelDepthInfo {
+                name: ch.name.clone(),
+                current: ch.current,
+                capacity: ch.capacity,
+            })
+            .collect();
+
+        DashboardEvent {
+            active_agents: self.active_agents,
+            requests_total: self.requests_total,
+            requests_deduped: self.requests_total.saturating_sub(self.inferences_total),
+            dedup_rate,
+            cost_saved_usd: self.cost_saved_usd,
+            throughput_rps,
+            circuit_breakers,
+            stage_latencies: StageTiming {
+                rag_ms: self.stage_latencies[0],
+                assemble_ms: self.stage_latencies[1],
+                inference_ms: self.stage_latencies[2],
+                post_ms: self.stage_latencies[3],
+                stream_ms: self.stage_latencies[4],
+            },
+            model_routing: ModelRoutingStats {
+                primary_model: self
+                    .model_routing
+                    .first()
+                    .map(|m| m.name.clone())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                primary_pct,
+                fallback_pct,
+                models: self.model_routing.clone(),
+            },
+            stage_counts: StageCountMap {
+                rag: self.stage_counts[0],
+                assemble: self.stage_counts[1],
+                inference: self.stage_counts[2],
+                post: self.stage_counts[3],
+                stream: self.stage_counts[4],
+            },
+            shed_counts: StageCountMap {
+                rag: self.shed_counts[0],
+                assemble: self.shed_counts[1],
+                inference: self.shed_counts[2],
+                post: self.shed_counts[3],
+                stream: self.shed_counts[4],
+            },
+            uptime_secs: self.uptime_secs,
+            recent_requests: self.recent_requests.iter().cloned().collect(),
+            active_stages,
+            channel_depths,
+        }
+    }
+}
+
 // ── Snapshot builder ─────────────────────────────────────────────────────────
 
 /// Build a [`DashboardEvent`] from the current system state.
+///
+/// In mock mode, reads from `MockDashboardState`. In live mode, reads from
+/// Prometheus metrics and the circuit breaker / deduplicator.
 ///
 /// # Panics
 ///
 /// This function never panics.
 pub async fn build_snapshot(state: &DashboardState) -> DashboardEvent {
+    // Mock mode: build from mock state
+    if let Some(ref mock) = state.mock_state {
+        let guard = mock.lock().await;
+        return guard.build_event();
+    }
+
+    // Live mode: read from Prometheus metrics
     let summary = metrics::get_metrics_summary();
 
     let stage_total = |stage: &str| -> u64 {
@@ -247,6 +929,11 @@ pub async fn build_snapshot(state: &DashboardState) -> DashboardEvent {
         primary_model: state.worker_name.clone(),
         primary_pct: 100.0,
         fallback_pct: 0.0,
+        models: vec![ModelRoutingEntry {
+            name: state.worker_name.clone(),
+            pct: 100.0,
+            color: "var(--accent)".to_string(),
+        }],
     };
 
     let stage_counts = StageCountMap {
@@ -278,6 +965,9 @@ pub async fn build_snapshot(state: &DashboardState) -> DashboardEvent {
         stage_counts,
         shed_counts,
         uptime_secs,
+        recent_requests: vec![],
+        active_stages: vec![true; 5],
+        channel_depths: vec![],
     }
 }
 
@@ -448,6 +1138,15 @@ pub fn parse_port_arg() -> u16 {
     3000
 }
 
+/// Parse the `--mock` CLI flag. Returns `true` if present.
+///
+/// # Panics
+///
+/// This function never panics.
+pub fn parse_mock_arg() -> bool {
+    std::env::args().any(|arg| arg == "--mock")
+}
+
 // ── Main entry point ─────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -462,28 +1161,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Parse CLI args
     let worker_name = parse_worker_arg();
     let port = parse_port_arg();
+    let mock_mode = parse_mock_arg();
 
-    // Create worker
-    let worker = create_worker(&worker_name)
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
+    if mock_mode {
+        info!("Starting in MOCK mode — no pipeline, scripted 2-minute story");
 
-    // Spawn pipeline
-    let handles = spawn_pipeline(worker);
+        let mock = Arc::new(Mutex::new(MockDashboardState::new()));
 
-    // Create enhanced features
-    let circuit_breaker = CircuitBreaker::new(5, 0.8, Duration::from_secs(60));
-    let deduplicator = Deduplicator::new(Duration::from_secs(300));
+        // Spawn 1-second tick task to advance the story
+        let mock_tick = Arc::clone(&mock);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                interval.tick().await;
+                let mut guard = mock_tick.lock().await;
+                guard.tick();
+            }
+        });
 
-    let state = Arc::new(DashboardState {
-        pipeline_tx: handles.input_tx,
-        circuit_breaker,
-        deduplicator,
-        start_time: Instant::now(),
-        worker_name,
-    });
+        // Create a dummy pipeline channel (not used in mock mode)
+        let (tx, _rx) = mpsc::channel(1);
+        let circuit_breaker = CircuitBreaker::new(5, 0.8, Duration::from_secs(60));
+        let deduplicator = Deduplicator::new(Duration::from_secs(300));
 
-    let addr = format!("0.0.0.0:{port}");
-    start_dashboard(&addr, state).await?;
+        let state = Arc::new(DashboardState {
+            pipeline_tx: Some(tx),
+            circuit_breaker,
+            deduplicator,
+            start_time: Instant::now(),
+            worker_name: "mock".to_string(),
+            mock_state: Some(mock),
+        });
+
+        let addr = format!("0.0.0.0:{port}");
+        start_dashboard(&addr, state).await?;
+    } else {
+        // Live mode: create worker and spawn pipeline
+        let worker = create_worker(&worker_name)
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
+
+        let handles = spawn_pipeline(worker);
+
+        let circuit_breaker = CircuitBreaker::new(5, 0.8, Duration::from_secs(60));
+        let deduplicator = Deduplicator::new(Duration::from_secs(300));
+
+        let state = Arc::new(DashboardState {
+            pipeline_tx: Some(handles.input_tx),
+            circuit_breaker,
+            deduplicator,
+            start_time: Instant::now(),
+            worker_name,
+            mock_state: None,
+        });
+
+        let addr = format!("0.0.0.0:{port}");
+        start_dashboard(&addr, state).await?;
+    }
 
     Ok(())
 }
@@ -497,7 +1230,7 @@ mod tests {
     use axum::http::Request;
     use tower::util::ServiceExt;
 
-    /// Create a test [`DashboardState`] backed by an echo worker pipeline.
+    /// Create a test [`DashboardState`] backed by an echo worker pipeline (live mode).
     fn make_test_state() -> Arc<DashboardState> {
         let _ = metrics::init_metrics();
         let worker: Arc<dyn ModelWorker> = Arc::new(EchoWorker::new());
@@ -506,19 +1239,35 @@ mod tests {
         let deduplicator = Deduplicator::new(Duration::from_secs(300));
 
         Arc::new(DashboardState {
-            pipeline_tx: handles.input_tx,
+            pipeline_tx: Some(handles.input_tx),
             circuit_breaker,
             deduplicator,
             start_time: Instant::now(),
             worker_name: "echo".to_string(),
+            mock_state: None,
         })
     }
 
-    // ── DashboardEvent serialization tests ───────────────────────────────
+    /// Create a test [`DashboardState`] in mock mode.
+    fn make_mock_test_state() -> Arc<DashboardState> {
+        let mock = Arc::new(Mutex::new(MockDashboardState::new()));
+        let (tx, _rx) = mpsc::channel(1);
+        let circuit_breaker = CircuitBreaker::new(5, 0.8, Duration::from_secs(60));
+        let deduplicator = Deduplicator::new(Duration::from_secs(300));
 
-    #[test]
-    fn test_dashboard_event_serializes_to_json() {
-        let event = DashboardEvent {
+        Arc::new(DashboardState {
+            pipeline_tx: Some(tx),
+            circuit_breaker,
+            deduplicator,
+            start_time: Instant::now(),
+            worker_name: "mock".to_string(),
+            mock_state: Some(mock),
+        })
+    }
+
+    /// Helper to build a test DashboardEvent with all fields populated.
+    fn make_test_event() -> DashboardEvent {
+        DashboardEvent {
             active_agents: 5,
             requests_total: 100,
             requests_deduped: 20,
@@ -537,6 +1286,11 @@ mod tests {
                 primary_model: "echo".to_string(),
                 primary_pct: 100.0,
                 fallback_pct: 0.0,
+                models: vec![ModelRoutingEntry {
+                    name: "echo".to_string(),
+                    pct: 100.0,
+                    color: "var(--accent)".to_string(),
+                }],
             },
             stage_counts: StageCountMap {
                 rag: 100,
@@ -553,56 +1307,24 @@ mod tests {
                 stream: 0,
             },
             uptime_secs: 60,
-        };
+            recent_requests: vec![],
+            active_stages: vec![true; 5],
+            channel_depths: vec![],
+        }
+    }
 
+    // ── DashboardEvent serialization tests ───────────────────────────────
+
+    #[test]
+    fn test_dashboard_event_serializes_to_json() {
+        let event = make_test_event();
         let json = serde_json::to_string(&event);
         assert!(json.is_ok(), "DashboardEvent must serialize: {json:?}");
     }
 
     #[test]
     fn test_dashboard_event_contains_all_fields() {
-        let event = DashboardEvent {
-            active_agents: 5,
-            requests_total: 42,
-            requests_deduped: 7,
-            dedup_rate: 16.67,
-            cost_saved_usd: 0.014,
-            throughput_rps: 2.1,
-            circuit_breakers: vec![CircuitBreakerState {
-                name: "inference".to_string(),
-                status: "closed".to_string(),
-                failures: 0,
-                successes: 10,
-                success_rate: 1.0,
-            }],
-            stage_latencies: StageTiming {
-                rag_ms: 0.0,
-                assemble_ms: 0.0,
-                inference_ms: 0.0,
-                post_ms: 0.0,
-                stream_ms: 0.0,
-            },
-            model_routing: ModelRoutingStats {
-                primary_model: "llama_cpp".to_string(),
-                primary_pct: 85.0,
-                fallback_pct: 15.0,
-            },
-            stage_counts: StageCountMap {
-                rag: 42,
-                assemble: 42,
-                inference: 42,
-                post: 42,
-                stream: 42,
-            },
-            shed_counts: StageCountMap {
-                rag: 0,
-                assemble: 0,
-                inference: 0,
-                post: 0,
-                stream: 0,
-            },
-            uptime_secs: 120,
-        };
+        let event = make_test_event();
 
         let json =
             serde_json::to_string(&event).unwrap_or_else(|_| "serialization failed".to_string());
@@ -618,6 +1340,9 @@ mod tests {
         assert!(json.contains("stage_counts"));
         assert!(json.contains("shed_counts"));
         assert!(json.contains("uptime_secs"));
+        assert!(json.contains("recent_requests"));
+        assert!(json.contains("active_stages"));
+        assert!(json.contains("channel_depths"));
     }
 
     #[test]
@@ -655,10 +1380,16 @@ mod tests {
             primary_model: "llama_cpp".to_string(),
             primary_pct: 90.0,
             fallback_pct: 10.0,
+            models: vec![ModelRoutingEntry {
+                name: "llama_cpp".to_string(),
+                pct: 90.0,
+                color: "var(--accent)".to_string(),
+            }],
         };
         let json = serde_json::to_string(&stats).unwrap_or_else(|_| String::new());
         assert!(json.contains("llama_cpp"));
         assert!(json.contains("primary_pct"));
+        assert!(json.contains("models"));
     }
 
     #[test]
@@ -1159,5 +1890,643 @@ mod tests {
             CircuitStatus::HalfOpen => "half_open",
         };
         assert_eq!(s, "half_open");
+    }
+
+    // ── New struct serialization tests ───────────────────────────────────
+
+    #[test]
+    fn test_model_routing_entry_serializes() {
+        let entry = ModelRoutingEntry {
+            name: "Mistral".to_string(),
+            pct: 60.0,
+            color: "var(--accent)".to_string(),
+        };
+        let json = serde_json::to_string(&entry).unwrap_or_else(|_| String::new());
+        assert!(json.contains("Mistral"));
+        assert!(json.contains("60"));
+        assert!(json.contains("var(--accent)"));
+    }
+
+    #[test]
+    fn test_recent_request_serializes() {
+        let req = RecentRequest {
+            timestamp: "14:32:01".to_string(),
+            session_id: "user-42".to_string(),
+            stage: "inference".to_string(),
+            latency_ms: 12.5,
+            status: "ok".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap_or_else(|_| String::new());
+        assert!(json.contains("14:32:01"));
+        assert!(json.contains("user-42"));
+        assert!(json.contains("inference"));
+        assert!(json.contains("12.5"));
+        assert!(json.contains("\"status\":\"ok\""));
+    }
+
+    #[test]
+    fn test_channel_depth_info_serializes() {
+        let info = ChannelDepthInfo {
+            name: "RAG \u{2192} ASM".to_string(),
+            current: 42,
+            capacity: 512,
+        };
+        let json = serde_json::to_string(&info).unwrap_or_else(|_| String::new());
+        assert!(json.contains("42"));
+        assert!(json.contains("512"));
+    }
+
+    #[test]
+    fn test_dashboard_event_with_recent_requests_serializes() {
+        let mut event = make_test_event();
+        event.recent_requests = vec![
+            RecentRequest {
+                timestamp: "00:00:01".to_string(),
+                session_id: "user-1".to_string(),
+                stage: "rag".to_string(),
+                latency_ms: 3.0,
+                status: "ok".to_string(),
+            },
+            RecentRequest {
+                timestamp: "00:00:02".to_string(),
+                session_id: "user-2".to_string(),
+                stage: "inference".to_string(),
+                latency_ms: 260.0,
+                status: "error".to_string(),
+            },
+        ];
+        let json = serde_json::to_string(&event);
+        assert!(json.is_ok());
+        let s = json.unwrap_or_default();
+        assert!(s.contains("user-1"));
+        assert!(s.contains("user-2"));
+    }
+
+    #[test]
+    fn test_dashboard_event_with_channel_depths_serializes() {
+        let mut event = make_test_event();
+        event.channel_depths = vec![
+            ChannelDepthInfo {
+                name: "RAG \u{2192} ASM".to_string(),
+                current: 100,
+                capacity: 512,
+            },
+            ChannelDepthInfo {
+                name: "ASM \u{2192} INF".to_string(),
+                current: 50,
+                capacity: 512,
+            },
+        ];
+        let json = serde_json::to_string(&event);
+        assert!(json.is_ok());
+    }
+
+    #[test]
+    fn test_dashboard_event_with_active_stages_serializes() {
+        let mut event = make_test_event();
+        event.active_stages = vec![true, false, true, false, true];
+        let json = serde_json::to_string(&event);
+        assert!(json.is_ok());
+        let s = json.unwrap_or_default();
+        assert!(s.contains("active_stages"));
+    }
+
+    // ── CLI mock arg test ───────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_mock_arg_returns_bool() {
+        let _mock = parse_mock_arg();
+        // Must not panic
+    }
+
+    // ── MockDashboardState tests ────────────────────────────────────────
+
+    #[test]
+    fn test_mock_state_new_initial_values() {
+        let mock = MockDashboardState::new();
+        assert_eq!(mock.tick_count, 0);
+        assert_eq!(mock.uptime_secs, 0);
+        assert_eq!(mock.requests_total, 0);
+        assert_eq!(mock.inferences_total, 0);
+        assert_eq!(mock.circuit_breakers.len(), 3);
+        assert_eq!(mock.model_routing.len(), 3);
+        assert_eq!(mock.channel_depths.len(), 4);
+        assert!(mock.recent_requests.is_empty());
+    }
+
+    #[test]
+    fn test_mock_state_tick_increments_counters() {
+        let mut mock = MockDashboardState::new();
+        mock.tick();
+        assert_eq!(mock.tick_count, 1);
+        assert_eq!(mock.uptime_secs, 1);
+        assert!(mock.requests_total > 0);
+        assert!(mock.inferences_total > 0);
+    }
+
+    #[test]
+    fn test_mock_state_latencies_positive_after_ticks() {
+        let mut mock = MockDashboardState::new();
+        for _ in 0..100 {
+            mock.tick();
+        }
+        for lat in &mock.stage_latencies {
+            assert!(*lat > 0.0, "Latency must be positive, got {}", lat);
+        }
+    }
+
+    #[test]
+    fn test_mock_state_warmup_phase_low_latency() {
+        let mut mock = MockDashboardState::new();
+        for _ in 0..20 {
+            mock.tick();
+        }
+        assert!(
+            mock.stage_latencies[2] < 300.0,
+            "INFER should be low in warmup, got {}",
+            mock.stage_latencies[2]
+        );
+        for cb in &mock.circuit_breakers {
+            assert_eq!(cb.status, "closed", "All CBs should be closed in warmup");
+        }
+    }
+
+    #[test]
+    fn test_mock_state_failure_phase_cb_opens() {
+        let mut mock = MockDashboardState::new();
+        for _ in 0..50 {
+            mock.tick();
+        }
+        assert_eq!(
+            mock.circuit_breakers[2].status, "open",
+            "llama.cpp should be OPEN in failure phase"
+        );
+        assert!(
+            mock.stage_latencies[2] > 350.0,
+            "INFER should be high in failure, got {}",
+            mock.stage_latencies[2]
+        );
+    }
+
+    #[test]
+    fn test_mock_state_halfopen_phase() {
+        let mut mock = MockDashboardState::new();
+        for _ in 0..65 {
+            mock.tick();
+        }
+        assert_eq!(
+            mock.circuit_breakers[2].status, "half_open",
+            "llama.cpp should be HALF-OPEN"
+        );
+    }
+
+    #[test]
+    fn test_mock_state_story_loops() {
+        let mut mock = MockDashboardState::new();
+        for _ in 0..125 {
+            mock.tick();
+        }
+        for cb in &mock.circuit_breakers {
+            assert_eq!(
+                cb.status, "closed",
+                "All CBs should be closed in second warmup"
+            );
+        }
+    }
+
+    #[test]
+    fn test_mock_state_openai_always_closed() {
+        let mut mock = MockDashboardState::new();
+        for _ in 0..200 {
+            mock.tick();
+            assert_eq!(mock.circuit_breakers[0].status, "closed");
+        }
+    }
+
+    #[test]
+    fn test_mock_state_anthropic_always_closed() {
+        let mut mock = MockDashboardState::new();
+        for _ in 0..200 {
+            mock.tick();
+            assert_eq!(mock.circuit_breakers[1].status, "closed");
+        }
+    }
+
+    #[test]
+    fn test_mock_state_llama_cycles_through_states() {
+        let mut mock = MockDashboardState::new();
+        let mut saw_open = false;
+        let mut saw_half = false;
+        for _ in 0..120 {
+            mock.tick();
+            match mock.circuit_breakers[2].status.as_str() {
+                "open" => saw_open = true,
+                "half_open" => saw_half = true,
+                _ => {}
+            }
+        }
+        assert!(saw_open, "llama.cpp CB never opened");
+        assert!(saw_half, "llama.cpp CB never went half-open");
+    }
+
+    #[test]
+    fn test_mock_state_infer_latency_range() {
+        let mut mock = MockDashboardState::new();
+        let mut max_infer = 0.0_f64;
+        for _ in 0..200 {
+            mock.tick();
+            if mock.stage_latencies[2] > max_infer {
+                max_infer = mock.stage_latencies[2];
+            }
+        }
+        assert!(
+            max_infer > 350.0,
+            "Expected INFER spikes, max was {}",
+            max_infer
+        );
+        assert!(max_infer < 600.0, "INFER too high: {}", max_infer);
+    }
+
+    #[test]
+    fn test_mock_state_channel_depths_bounded() {
+        let mut mock = MockDashboardState::new();
+        for _ in 0..200 {
+            mock.tick();
+            for ch in &mock.channel_depths {
+                assert!(
+                    ch.current <= ch.capacity,
+                    "Channel {} overflow: {}/{}",
+                    ch.name,
+                    ch.current,
+                    ch.capacity
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_mock_state_throughput_populated() {
+        let mut mock = MockDashboardState::new();
+        for _ in 0..10 {
+            mock.tick();
+        }
+        assert_eq!(mock.throughput_history.len(), 10);
+        for &val in &mock.throughput_history {
+            assert!(val > 0, "Throughput should be positive");
+        }
+    }
+
+    #[test]
+    fn test_mock_state_throughput_bounded_at_60() {
+        let mut mock = MockDashboardState::new();
+        for _ in 0..200 {
+            mock.tick();
+        }
+        assert!(mock.throughput_history.len() <= 60);
+    }
+
+    #[test]
+    fn test_mock_state_model_routing_sums_to_100() {
+        let mut mock = MockDashboardState::new();
+        for _ in 0..120 {
+            mock.tick();
+            let total: f32 = mock.model_routing.iter().map(|m| m.pct).sum();
+            assert!(
+                (total - 100.0).abs() < 1.0,
+                "Model routing should sum to ~100%, got {}",
+                total
+            );
+        }
+    }
+
+    #[test]
+    fn test_mock_state_model_routing_shifts_during_failure() {
+        let mut mock = MockDashboardState::new();
+        for _ in 0..20 {
+            mock.tick();
+        }
+        let warmup_mistral = mock.model_routing[0].pct;
+
+        for _ in 20..50 {
+            mock.tick();
+        }
+        let failure_mistral = mock.model_routing[0].pct;
+
+        assert!(
+            failure_mistral < warmup_mistral,
+            "Mistral should decrease during failure: warmup={}, failure={}",
+            warmup_mistral,
+            failure_mistral
+        );
+    }
+
+    #[test]
+    fn test_mock_state_recent_requests_bounded() {
+        let mut mock = MockDashboardState::new();
+        for _ in 0..200 {
+            mock.tick();
+        }
+        assert!(mock.recent_requests.len() <= MAX_RECENT_REQUESTS);
+    }
+
+    #[test]
+    fn test_mock_state_recent_requests_populated() {
+        let mut mock = MockDashboardState::new();
+        for _ in 0..20 {
+            mock.tick();
+        }
+        assert!(!mock.recent_requests.is_empty());
+    }
+
+    #[test]
+    fn test_mock_state_failure_phase_generates_error_entries() {
+        let mut mock = MockDashboardState::new();
+        for _ in 0..55 {
+            mock.tick();
+        }
+        let has_error = mock
+            .recent_requests
+            .iter()
+            .any(|r| r.status == "error" || r.status == "shed");
+        assert!(has_error, "Failure phase should produce error/shed entries");
+    }
+
+    #[test]
+    fn test_mock_state_active_agents_varies_by_phase() {
+        let mut mock = MockDashboardState::new();
+        for _ in 0..20 {
+            mock.tick();
+        }
+        assert_eq!(mock.active_agents, 5);
+
+        for _ in 20..50 {
+            mock.tick();
+        }
+        assert_eq!(mock.active_agents, 4);
+    }
+
+    #[test]
+    fn test_mock_state_active_stage_rotates() {
+        let mut mock = MockDashboardState::new();
+        let mut indices = std::collections::HashSet::new();
+        for _ in 0..20 {
+            mock.tick();
+            indices.insert(mock.active_stage_index);
+        }
+        assert!(indices.len() > 1);
+        for &idx in &indices {
+            assert!(idx < 5);
+        }
+    }
+
+    #[test]
+    fn test_mock_state_stage_counts_increase() {
+        let mut mock = MockDashboardState::new();
+        mock.tick();
+        let after_1 = mock.stage_counts;
+        mock.tick();
+        let after_2 = mock.stage_counts;
+        for i in 0..5 {
+            assert!(after_2[i] > after_1[i]);
+        }
+    }
+
+    #[test]
+    fn test_mock_state_shed_counts_increase_during_failure() {
+        let mut mock = MockDashboardState::new();
+        for _ in 0..44 {
+            mock.tick();
+        }
+        let pre_failure_shed = mock.shed_counts[2];
+        for _ in 44..60 {
+            mock.tick();
+        }
+        assert!(mock.shed_counts[2] > pre_failure_shed);
+    }
+
+    #[test]
+    fn test_mock_state_phase_tick_returns_correct_value() {
+        let mut mock = MockDashboardState::new();
+        assert_eq!(mock.phase_tick(), 0);
+        mock.tick();
+        assert_eq!(mock.phase_tick(), 0);
+        mock.tick();
+        assert_eq!(mock.phase_tick(), 1);
+    }
+
+    #[test]
+    fn test_mock_state_no_panic_over_long_run() {
+        let mut mock = MockDashboardState::new();
+        for _ in 0..600 {
+            mock.tick();
+        }
+        assert_eq!(mock.tick_count, 600);
+    }
+
+    #[test]
+    fn test_mock_state_cost_saved_increases() {
+        let mut mock = MockDashboardState::new();
+        for _ in 0..10 {
+            mock.tick();
+        }
+        assert!(mock.cost_saved_usd > 0.0);
+    }
+
+    #[test]
+    fn test_mock_state_dedup_ratio_positive() {
+        let mut mock = MockDashboardState::new();
+        for _ in 0..50 {
+            mock.tick();
+        }
+        assert!(mock.requests_total > mock.inferences_total);
+    }
+
+    // ── MockDashboardState build_event tests ────────────────────────────
+
+    #[test]
+    fn test_mock_build_event_serializes() {
+        let mut mock = MockDashboardState::new();
+        for _ in 0..10 {
+            mock.tick();
+        }
+        let event = mock.build_event();
+        let json = serde_json::to_string(&event);
+        assert!(json.is_ok());
+    }
+
+    #[test]
+    fn test_mock_build_event_has_3_circuit_breakers() {
+        let mut mock = MockDashboardState::new();
+        mock.tick();
+        let event = mock.build_event();
+        assert_eq!(event.circuit_breakers.len(), 3);
+        assert_eq!(event.circuit_breakers[0].name, "openai");
+        assert_eq!(event.circuit_breakers[1].name, "anthropic");
+        assert_eq!(event.circuit_breakers[2].name, "llama.cpp");
+    }
+
+    #[test]
+    fn test_mock_build_event_has_3_model_routing_entries() {
+        let mut mock = MockDashboardState::new();
+        mock.tick();
+        let event = mock.build_event();
+        assert_eq!(event.model_routing.models.len(), 3);
+        assert_eq!(event.model_routing.models[0].name, "Mistral");
+        assert_eq!(event.model_routing.models[1].name, "Claude");
+        assert_eq!(event.model_routing.models[2].name, "OpenAI");
+    }
+
+    #[test]
+    fn test_mock_build_event_has_5_active_stages() {
+        let mut mock = MockDashboardState::new();
+        mock.tick();
+        let event = mock.build_event();
+        assert_eq!(event.active_stages.len(), 5);
+        let active_count = event.active_stages.iter().filter(|s| **s).count();
+        assert_eq!(active_count, 1);
+    }
+
+    #[test]
+    fn test_mock_build_event_has_4_channel_depths() {
+        let mut mock = MockDashboardState::new();
+        mock.tick();
+        let event = mock.build_event();
+        assert_eq!(event.channel_depths.len(), 4);
+        for ch in &event.channel_depths {
+            assert!(ch.capacity > 0);
+        }
+    }
+
+    #[test]
+    fn test_mock_build_event_dedup_rate_correct() {
+        let mut mock = MockDashboardState::new();
+        for _ in 0..50 {
+            mock.tick();
+        }
+        let event = mock.build_event();
+        assert!(event.dedup_rate > 0.0);
+        assert!(event.dedup_rate < 100.0);
+    }
+
+    #[test]
+    fn test_mock_build_event_success_rate_computed() {
+        let mut mock = MockDashboardState::new();
+        for _ in 0..10 {
+            mock.tick();
+        }
+        let event = mock.build_event();
+        for cb in &event.circuit_breakers {
+            assert!(cb.success_rate >= 0.0 && cb.success_rate <= 1.0);
+        }
+    }
+
+    // ── Mock mode snapshot tests ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_build_snapshot_mock_mode_returns_mock_data() {
+        let state = make_mock_test_state();
+        {
+            if let Some(ref m) = state.mock_state {
+                let mut guard = m.lock().await;
+                for _ in 0..10 {
+                    guard.tick();
+                }
+            }
+        }
+
+        let snapshot = build_snapshot(&state).await;
+        assert_eq!(snapshot.circuit_breakers.len(), 3);
+        assert_eq!(snapshot.model_routing.models.len(), 3);
+        assert_eq!(snapshot.active_stages.len(), 5);
+        assert_eq!(snapshot.channel_depths.len(), 4);
+        assert!(snapshot.requests_total > 0);
+    }
+
+    #[tokio::test]
+    async fn test_build_snapshot_mock_mode_serializes() {
+        let state = make_mock_test_state();
+        {
+            if let Some(ref m) = state.mock_state {
+                let mut guard = m.lock().await;
+                guard.tick();
+            }
+        }
+
+        let snapshot = build_snapshot(&state).await;
+        let json = serde_json::to_string(&snapshot);
+        assert!(json.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_mock_mode_stats_route_returns_200() {
+        let state = make_mock_test_state();
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .uri("/api/stats")
+            .body(Body::empty())
+            .unwrap_or_else(|_| Request::new(Body::empty()));
+
+        let response = app.oneshot(request).await.unwrap_or_else(|_| {
+            axum::http::Response::builder()
+                .status(500)
+                .body(Body::empty())
+                .unwrap_or_else(|_| axum::http::Response::new(Body::empty()))
+        });
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_mock_mode_stats_contains_new_fields() {
+        let state = make_mock_test_state();
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .uri("/api/stats")
+            .body(Body::empty())
+            .unwrap_or_else(|_| Request::new(Body::empty()));
+
+        let response = app.oneshot(request).await.unwrap_or_else(|_| {
+            axum::http::Response::builder()
+                .status(500)
+                .body(Body::empty())
+                .unwrap_or_else(|_| axum::http::Response::new(Body::empty()))
+        });
+
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 64)
+            .await
+            .unwrap_or_default();
+        let text = String::from_utf8_lossy(&body);
+
+        assert!(text.contains("recent_requests"));
+        assert!(text.contains("active_stages"));
+        assert!(text.contains("channel_depths"));
+        assert!(text.contains("models"));
+    }
+
+    // ── Live mode new field tests ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_build_snapshot_live_mode_has_empty_recent_requests() {
+        let state = make_test_state();
+        let snapshot = build_snapshot(&state).await;
+        assert!(snapshot.recent_requests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_build_snapshot_live_mode_has_active_stages() {
+        let state = make_test_state();
+        let snapshot = build_snapshot(&state).await;
+        assert_eq!(snapshot.active_stages.len(), 5);
+        assert!(snapshot.active_stages.iter().all(|s| *s));
+    }
+
+    #[tokio::test]
+    async fn test_build_snapshot_live_mode_has_models_list() {
+        let state = make_test_state();
+        let snapshot = build_snapshot(&state).await;
+        assert_eq!(snapshot.model_routing.models.len(), 1);
+        assert_eq!(snapshot.model_routing.models[0].name, "echo");
     }
 }

@@ -87,9 +87,9 @@ async fn test_dedup_20_identical_prompts_concurrent_first_batch() {
     for _ in 0..20 {
         let dedup = Arc::clone(&dedup);
         let key = key.clone();
-        handles.push(tokio::spawn(async move {
-            dedup.check_and_register(&key).await
-        }));
+        handles.push(tokio::spawn(
+            async move { dedup.check_and_register(&key).await },
+        ));
     }
 
     let mut results = Vec::with_capacity(20);

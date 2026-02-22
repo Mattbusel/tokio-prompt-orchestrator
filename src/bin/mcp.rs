@@ -21,9 +21,8 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{oneshot, RwLock};
 use tokio_prompt_orchestrator::{
-    enhanced::CircuitStatus,
-    metrics, spawn_pipeline, EchoWorker, LlamaCppWorker, ModelWorker, OrchestratorError,
-    PipelineHandles, PostOutput, PromptRequest, SessionId,
+    enhanced::CircuitStatus, metrics, spawn_pipeline, EchoWorker, LlamaCppWorker, ModelWorker,
+    OrchestratorError, PipelineHandles, PostOutput, PromptRequest, SessionId,
 };
 
 // ── Parameter types ──────────────────────────────────────────────────────────

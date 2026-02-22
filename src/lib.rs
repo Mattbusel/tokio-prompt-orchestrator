@@ -23,10 +23,17 @@ use tracing_subscriber::EnvFilter;
 pub mod config;
 pub mod coordination;
 pub mod enhanced;
+pub mod helix;
 pub mod metrics;
 pub mod routing;
 pub mod stages;
 pub mod worker;
+
+#[cfg(feature = "self-tune")]
+pub mod self_tune;
+
+#[cfg(feature = "self-modify")]
+pub mod self_modify;
 
 #[cfg(feature = "metrics-server")]
 pub mod metrics_server;
@@ -39,6 +46,12 @@ pub mod tui;
 
 #[cfg(feature = "distributed")]
 pub mod distributed;
+
+#[cfg(feature = "intelligence")]
+pub mod intelligence;
+
+#[cfg(feature = "evolution")]
+pub mod evolution;
 
 // Re-exports for convenience
 pub use stages::{spawn_pipeline, PipelineHandles};

@@ -22,6 +22,7 @@ a{color:var(--accent);text-decoration:none}
 .header-right{display:flex;gap:20px;align-items:center;font-size:13px;color:var(--text2)}
 .status-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px;animation:pulse 2s infinite}
 .status-dot.live{background:var(--green)}
+.status-dot.disconnected{background:var(--red);animation:none}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
 
 /* Metrics Cards */
@@ -46,6 +47,12 @@ a{color:var(--accent);text-decoration:none}
 .stage-count{font-size:10px;color:var(--text2)}
 .arrow{color:var(--text2);font-size:20px;margin:0 4px;align-self:center}
 
+/* Channel depth bars between stages */
+.channel-bar-wrap{display:flex;flex-direction:column;align-items:center;gap:2px;margin:0 2px;align-self:center}
+.channel-bar{width:6px;height:30px;background:var(--bg3);border-radius:3px;position:relative;overflow:hidden}
+.channel-fill{position:absolute;bottom:0;left:0;right:0;background:var(--accent);border-radius:3px;transition:height 0.3s}
+.channel-label{font-size:9px;color:var(--text2)}
+
 /* Circuit Breakers */
 .cb-list{display:flex;flex-direction:column;gap:10px}
 .cb-item{display:flex;align-items:center;gap:12px;padding:10px;background:var(--bg3);border-radius:8px}
@@ -64,8 +71,6 @@ a{color:var(--accent);text-decoration:none}
 .donut-legend{display:flex;flex-direction:column;gap:8px}
 .legend-item{display:flex;align-items:center;gap:8px;font-size:12px}
 .legend-dot{width:10px;height:10px;border-radius:50%}
-.legend-dot.primary{background:var(--accent)}
-.legend-dot.fallback{background:var(--purple)}
 
 /* Sparkline */
 .sparkline-container{padding:10px 0}
@@ -87,6 +92,11 @@ a{color:var(--accent);text-decoration:none}
 .log-stage.inference{color:var(--orange)}
 .log-stage.post{color:var(--green)}
 .log-stage.stream{color:var(--yellow)}
+.log-status{font-size:11px}
+.log-status.ok{color:var(--green)}
+.log-status.error{color:var(--red)}
+.log-status.shed{color:var(--yellow)}
+.log-status.deduped{color:var(--purple)}
 .log-msg{color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .log-latency{color:var(--text2);text-align:right}
 
@@ -107,7 +117,7 @@ a{color:var(--accent);text-decoration:none}
 <div class="header">
   <h1><span>&gt;</span> tokio-prompt-orchestrator</h1>
   <div class="header-right">
-    <div><span class="status-dot live"></span>LIVE</div>
+    <div><span class="status-dot live" id="status-dot"></span><span id="status-label">LIVE</span></div>
     <div id="clock">--:--:--</div>
     <div>Nodes: <span id="node-count">1</span></div>
     <div>Uptime: <span id="uptime">0s</span></div>
@@ -145,31 +155,35 @@ a{color:var(--accent);text-decoration:none}
     <div class="panel-title">Pipeline Flow</div>
     <div class="pipeline" id="pipeline-flow">
       <div class="stage">
-        <div class="stage-box active" id="stage-rag">RAG</div>
+        <div class="stage-box" id="stage-rag">RAG</div>
         <div class="stage-latency" id="lat-rag">0.0ms</div>
         <div class="stage-count" id="cnt-rag">0 req</div>
       </div>
+      <div class="channel-bar-wrap" id="ch-0"><div class="channel-bar"><div class="channel-fill" id="ch-fill-0" style="height:0%"></div></div><div class="channel-label" id="ch-lbl-0">0</div></div>
       <div class="arrow">&rarr;</div>
       <div class="stage">
-        <div class="stage-box active" id="stage-assemble">Assemble</div>
+        <div class="stage-box" id="stage-assemble">Assemble</div>
         <div class="stage-latency" id="lat-assemble">0.0ms</div>
         <div class="stage-count" id="cnt-assemble">0 req</div>
       </div>
+      <div class="channel-bar-wrap" id="ch-1"><div class="channel-bar"><div class="channel-fill" id="ch-fill-1" style="height:0%"></div></div><div class="channel-label" id="ch-lbl-1">0</div></div>
       <div class="arrow">&rarr;</div>
       <div class="stage">
-        <div class="stage-box active" id="stage-inference">Inference</div>
+        <div class="stage-box" id="stage-inference">Inference</div>
         <div class="stage-latency" id="lat-inference">0.0ms</div>
         <div class="stage-count" id="cnt-inference">0 req</div>
       </div>
+      <div class="channel-bar-wrap" id="ch-2"><div class="channel-bar"><div class="channel-fill" id="ch-fill-2" style="height:0%"></div></div><div class="channel-label" id="ch-lbl-2">0</div></div>
       <div class="arrow">&rarr;</div>
       <div class="stage">
-        <div class="stage-box active" id="stage-post">Post</div>
+        <div class="stage-box" id="stage-post">Post</div>
         <div class="stage-latency" id="lat-post">0.0ms</div>
         <div class="stage-count" id="cnt-post">0 req</div>
       </div>
+      <div class="channel-bar-wrap" id="ch-3"><div class="channel-bar"><div class="channel-fill" id="ch-fill-3" style="height:0%"></div></div><div class="channel-label" id="ch-lbl-3">0</div></div>
       <div class="arrow">&rarr;</div>
       <div class="stage">
-        <div class="stage-box active" id="stage-stream">Stream</div>
+        <div class="stage-box" id="stage-stream">Stream</div>
         <div class="stage-latency" id="lat-stream">0.0ms</div>
         <div class="stage-count" id="cnt-stream">0 req</div>
       </div>
@@ -196,15 +210,13 @@ a{color:var(--accent);text-decoration:none}
     <div class="panel-title">Model Routing</div>
     <div class="donut-container">
       <div class="donut">
-        <svg viewBox="0 0 42 42">
-          <circle cx="21" cy="21" r="15.91549" fill="none" stroke="var(--purple)" stroke-width="4" stroke-dasharray="0 100"/>
-          <circle cx="21" cy="21" r="15.91549" fill="none" stroke="var(--accent)" stroke-width="4" stroke-dasharray="100 0" id="donut-primary"/>
+        <svg viewBox="0 0 42 42" id="donut-svg">
+          <circle cx="21" cy="21" r="15.91549" fill="none" stroke="var(--accent)" stroke-width="4" stroke-dasharray="100 0"/>
         </svg>
         <div class="donut-center" id="donut-label">100%</div>
       </div>
-      <div class="donut-legend">
-        <div class="legend-item"><div class="legend-dot primary"></div><span id="legend-primary">echo (100%)</span></div>
-        <div class="legend-item"><div class="legend-dot fallback"></div><span id="legend-fallback">fallback (0%)</span></div>
+      <div class="donut-legend" id="donut-legend">
+        <div class="legend-item"><div class="legend-dot" style="background:var(--accent)"></div><span>echo (100%)</span></div>
       </div>
     </div>
   </div>
@@ -256,6 +268,11 @@ a{color:var(--accent);text-decoration:none}
     if(s<3600) return Math.floor(s/60)+'m '+s%60+'s';
     return Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m';
   }
+  function escapeHtml(s){
+    var div = document.createElement('div');
+    div.appendChild(document.createTextNode(s));
+    return div.innerHTML;
+  }
 
   // ── Clock ──
   setInterval(function(){ $('clock').textContent = fmtTime(); }, 1000);
@@ -275,6 +292,7 @@ a{color:var(--accent);text-decoration:none}
     $('cost-saved').textContent = fmtUsd(data.cost_saved_usd);
     $('throughput').textContent = fmt(data.throughput_rps,1) + ' rps';
     $('uptime').textContent = fmtUptime(data.uptime_secs);
+    $('node-count').textContent = data.active_agents;
 
     // Pipeline stages
     var stages = ['rag','assemble','inference','post','stream'];
@@ -287,12 +305,40 @@ a{color:var(--accent);text-decoration:none}
       stream: latencies.stream_ms
     };
     var cntMap = data.stage_counts;
+    var activeStages = data.active_stages || [];
     for(var i=0;i<stages.length;i++){
       var s = stages[i];
       var el = $('lat-'+s);
       if(el) el.textContent = fmt(latMap[s],2) + 'ms';
       var cel = $('cnt-'+s);
       if(cel) cel.textContent = (cntMap[s]||0) + ' req';
+      // Active stage highlighting
+      var stageBox = $('stage-'+s);
+      if(stageBox){
+        if(activeStages.length > i && activeStages[i]){
+          stageBox.classList.add('active');
+        } else {
+          stageBox.classList.remove('active');
+        }
+      }
+    }
+
+    // Channel depths
+    if(data.channel_depths && data.channel_depths.length){
+      for(var ci=0;ci<data.channel_depths.length && ci<4;ci++){
+        var ch = data.channel_depths[ci];
+        var pct = ch.capacity > 0 ? (ch.current / ch.capacity * 100) : 0;
+        var fillEl = $('ch-fill-'+ci);
+        if(fillEl) fillEl.style.height = Math.min(pct, 100) + '%';
+        var lblEl = $('ch-lbl-'+ci);
+        if(lblEl) lblEl.textContent = ch.current;
+        // Color based on fill level
+        if(fillEl){
+          if(pct > 70) fillEl.style.background = 'var(--red)';
+          else if(pct > 40) fillEl.style.background = 'var(--yellow)';
+          else fillEl.style.background = 'var(--accent)';
+        }
+      }
     }
 
     // Circuit breakers
@@ -302,21 +348,26 @@ a{color:var(--accent);text-decoration:none}
       for(var j=0;j<data.circuit_breakers.length;j++){
         var cb = data.circuit_breakers[j];
         html += '<div class="cb-item">' +
-          '<div class="cb-dot '+cb.status+'"></div>' +
-          '<div class="cb-name">'+cb.name+'</div>' +
+          '<div class="cb-dot '+escapeHtml(cb.status)+'"></div>' +
+          '<div class="cb-name">'+escapeHtml(cb.name)+'</div>' +
           '<div class="cb-stats">'+cb.failures+'F / '+cb.successes+'S ('+fmt(cb.success_rate*100,0)+'%)</div>' +
           '</div>';
       }
       cbList.innerHTML = html;
     }
 
-    // Model routing donut
-    var pp = data.model_routing.primary_pct;
-    var fp = data.model_routing.fallback_pct;
-    $('donut-primary').setAttribute('stroke-dasharray', pp + ' ' + (100-pp));
-    $('donut-label').textContent = fmt(pp,0) + '%';
-    $('legend-primary').textContent = data.model_routing.primary_model + ' (' + fmt(pp,0) + '%)';
-    $('legend-fallback').textContent = 'fallback (' + fmt(fp,0) + '%)';
+    // Model routing donut — N-way support
+    var models = (data.model_routing && data.model_routing.models) || [];
+    if(models.length > 0){
+      renderDonut(models);
+    } else {
+      // Fallback to legacy 2-way
+      var pp = data.model_routing.primary_pct;
+      renderDonut([
+        {name: data.model_routing.primary_model, pct: pp, color: 'var(--accent)'},
+        {name: 'fallback', pct: data.model_routing.fallback_pct, color: 'var(--purple)'}
+      ]);
+    }
 
     // Sparkline
     var newReqs = data.requests_total - prevTotal;
@@ -325,17 +376,58 @@ a{color:var(--accent);text-decoration:none}
     if(sparkData.length > MAX_SPARK) sparkData.shift();
     renderSparkline();
 
-    // Log entry (simulated from stage counts changing)
-    if(newReqs > 0){
+    // Request log — use backend data if available, else synthetic
+    if(data.recent_requests && data.recent_requests.length > 0){
+      renderBackendLog(data.recent_requests);
+    } else if(newReqs > 0){
       var logStage = stages[Math.floor(Math.random()*stages.length)];
       logEntries.unshift({
         time: fmtTime(),
         stage: logStage,
         msg: 'request processed (batch: '+newReqs+')',
-        latency: fmt(latMap[logStage],2)+'ms'
+        latency: fmt(latMap[logStage],2)+'ms',
+        status: 'ok'
       });
       if(logEntries.length > MAX_LOG) logEntries.pop();
-      renderLog();
+      renderSyntheticLog();
+    }
+  }
+
+  function renderDonut(models){
+    var svg = $('donut-svg');
+    var legend = $('donut-legend');
+    var r = 15.91549;
+    var circumference = 2 * Math.PI * r;
+
+    // Build SVG arcs
+    var arcsHtml = '';
+    var offset = 0;
+    for(var i=0;i<models.length;i++){
+      var m = models[i];
+      var dashLen = m.pct;
+      var dashGap = 100 - dashLen;
+      arcsHtml += '<circle cx="21" cy="21" r="'+r+'" fill="none" ' +
+        'stroke="'+escapeHtml(m.color)+'" stroke-width="4" ' +
+        'stroke-dasharray="'+dashLen+' '+dashGap+'" ' +
+        'stroke-dashoffset="-'+offset+'"/>';
+      offset += dashLen;
+    }
+    svg.innerHTML = arcsHtml;
+
+    // Build legend
+    var legendHtml = '';
+    for(var j=0;j<models.length;j++){
+      var ml = models[j];
+      legendHtml += '<div class="legend-item">' +
+        '<div class="legend-dot" style="background:'+escapeHtml(ml.color)+'"></div>' +
+        '<span>'+escapeHtml(ml.name)+' ('+fmt(ml.pct,0)+'%)</span>' +
+        '</div>';
+    }
+    legend.innerHTML = legendHtml;
+
+    // Center label: show top model
+    if(models.length > 0){
+      $('donut-label').textContent = fmt(models[0].pct,0) + '%';
     }
   }
 
@@ -350,16 +442,32 @@ a{color:var(--accent);text-decoration:none}
     el.innerHTML = html;
   }
 
-  function renderLog(){
+  function renderBackendLog(requests){
+    var el = $('log-container');
+    var html = '';
+    // Show newest first (backend sends oldest-first in the array)
+    for(var i=requests.length-1;i>=0;i--){
+      var r = requests[i];
+      html += '<div class="log-entry">' +
+        '<div class="log-time">'+escapeHtml(r.timestamp)+'</div>' +
+        '<div class="log-stage '+escapeHtml(r.stage)+'">'+escapeHtml(r.stage)+'</div>' +
+        '<div class="log-msg">'+escapeHtml(r.session_id)+' <span class="log-status '+escapeHtml(r.status)+'">'+escapeHtml(r.status)+'</span></div>' +
+        '<div class="log-latency">'+fmt(r.latency_ms,1)+'ms</div>' +
+        '</div>';
+    }
+    el.innerHTML = html;
+  }
+
+  function renderSyntheticLog(){
     var el = $('log-container');
     var html = '';
     for(var i=0;i<logEntries.length;i++){
       var e = logEntries[i];
       html += '<div class="log-entry">' +
-        '<div class="log-time">'+e.time+'</div>' +
-        '<div class="log-stage '+e.stage+'">'+e.stage+'</div>' +
-        '<div class="log-msg">'+e.msg+'</div>' +
-        '<div class="log-latency">'+e.latency+'</div>' +
+        '<div class="log-time">'+escapeHtml(e.time)+'</div>' +
+        '<div class="log-stage '+escapeHtml(e.stage)+'">'+escapeHtml(e.stage)+'</div>' +
+        '<div class="log-msg">'+escapeHtml(e.msg)+'</div>' +
+        '<div class="log-latency">'+escapeHtml(e.latency)+'</div>' +
         '</div>';
     }
     el.innerHTML = html;
@@ -367,7 +475,15 @@ a{color:var(--accent);text-decoration:none}
 
   // ── SSE Connection ──
   function connect(){
+    var dot = $('status-dot');
+    var label = $('status-label');
     var es = new EventSource('/api/status');
+
+    es.onopen = function(){
+      dot.className = 'status-dot live';
+      label.textContent = 'LIVE';
+    };
+
     es.onmessage = function(ev){
       try{
         var data = JSON.parse(ev.data);
@@ -376,7 +492,10 @@ a{color:var(--accent);text-decoration:none}
         // Ignore parse errors silently
       }
     };
+
     es.onerror = function(){
+      dot.className = 'status-dot disconnected';
+      label.textContent = 'DISCONNECTED';
       es.close();
       // Reconnect after 2 seconds
       setTimeout(connect, 2000);
