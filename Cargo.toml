@@ -6,14 +6,14 @@ rust-version = "1.79"
 
 [dependencies]
 # Core
-tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "process"] }
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-std", "signal"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 thiserror = "1.0"
 async-trait = "0.1"
 
 # Utils
-chrono = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.6", features = ["v4", "fast-rng", "serde"] }
 rand = "0.8"
 
@@ -22,74 +22,61 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-feature
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-# Config (Phase 2 — declarative pipeline configuration)
-# toml: TOML parsing for pipeline config files
-toml = "0.8"
-# schemars: JSON Schema generation for IDE autocomplete on config files
-schemars = "0.8"
-# notify: filesystem watching for config hot-reload
-notify = "6.0"
-
 # Metrics
 prometheus = "0.13"
+lazy_static = "1.4"
 
 # Web (feature-gated)
 axum = { version = "0.7", optional = true, features = ["ws", "macros"] }
-tower = { version = "0.5", optional = true }
-tower-http = { version = "0.5", optional = true, features = ["trace", "cors", "fs"] }
-tokio-stream = { version = "0.1", optional = true, features = ["sync"] }
+tower = { version = "0.4", optional = true }
+tower-http = { version = "0.5", optional = true, features = ["trace", "cors"] }
+tokio-stream = { version = "0.1", optional = true }
 futures = { version = "0.3", optional = true }
 
-# TUI dashboard — ratatui terminal rendering + crossterm backend
-ratatui = { version = "0.29", optional = true }
-crossterm = { version = "0.28", optional = true }
-
-# MCP server — expose pipeline as Claude Desktop tools via Model Context Protocol
-rmcp = { version = "0.16", features = ["server", "transport-io"], optional = true }
-
-# Enhanced features (Phase 4)
-redis = { version = "0.25", optional = true, features = ["tokio-comp", "connection-manager"] }
+# Enhanced features
+async-nats = "0.35"
+notify = "6"
+schemars = "0.8"
+redis = { version = "0.24", optional = true, features = ["tokio-comp", "connection-manager"] }
 dashmap = "5.5"
 governor = { version = "0.6", optional = true }
 nonzero_ext = { version = "0.3", optional = true }
 
-# Dashboard — async SSE stream generation
-async-stream = { version = "0.3", optional = true }
+# Self-tuning dependencies
+parking_lot = "0.12"
 
-# Distributed clustering (Phase 5) — NATS for pub/sub messaging, Redis for cross-node dedup + leader election
-async-nats = { version = "0.38", optional = true }
+# Config / task file parsing
+toml = "0.8"
+
+# TUI dashboard
+ratatui = { version = "0.30", optional = true }
+crossterm = { version = "0.28", optional = true }
+
+# MCP server
+rmcp = { version = "0.16", optional = true, features = ["server", "macros", "transport-io"] }
+async-stream = { version = "0.3", optional = true }
 
 [features]
 default = []
 metrics-server = ["axum", "tower", "tower-http"]
 web-api = ["axum", "tower", "tower-http", "tokio-stream", "futures"]
-caching = ["dep:redis"]
+caching = ["redis"]
 rate-limiting = ["governor", "nonzero_ext"]
-tui = ["ratatui", "crossterm"]
-mcp = ["dep:rmcp"]
-dashboard = ["axum", "tower", "tower-http", "tokio-stream", "dep:async-stream"]
-distributed = ["dep:async-nats", "dep:redis"]
-full = ["web-api", "metrics-server", "caching", "rate-limiting", "tui", "dashboard"]
-
-# Self-improving system feature flags
+full = ["web-api", "metrics-server", "caching", "rate-limiting"]
 self-tune = []
 self-modify = ["self-tune"]
 intelligence = ["self-tune"]
-evolution = ["self-tune", "intelligence", "distributed"]
+evolution = ["self-tune", "intelligence"]
 self-improving = ["self-tune", "self-modify", "intelligence", "evolution"]
+tui = ["ratatui", "crossterm"]
+mcp = ["rmcp", "async-stream", "web-api"]
+dashboard = ["web-api"]
 
 [dev-dependencies]
 tokio-test = "0.4"
-# wiremock: HTTP mock server for worker integration tests
+tempfile = "3"
 wiremock = "0.6"
-# proptest: property-based testing for algorithmic correctness guarantees
-proptest = "1.4"
-# tracing-test: capture and assert on tracing spans/events in tests
-tracing-test = "0.2"
-# tempfile: temporary files/dirs for config loading tests
-tempfile = "3.10"
-# criterion: statistical benchmarking for performance contract enforcement
-criterion = { version = "0.5", features = ["async_tokio"] }
+tower = { version = "0.4", features = ["util"] }
 
 [[bin]]
 name = "orchestrator-demo"
@@ -106,27 +93,10 @@ path = "src/bin/mcp.rs"
 required-features = ["mcp"]
 
 [[bin]]
-name = "dashboard"
-path = "src/bin/dashboard.rs"
-required-features = ["dashboard"]
-
-[[bin]]
 name = "coordinator"
 path = "src/bin/coordinator.rs"
 
-[[bench]]
-name = "pipeline"
-harness = false
-
-[[bench]]
-name = "enhanced"
-harness = false
-
-[[bench]]
-name = "helix"
-harness = false
-
-[[bench]]
-name = "workers"
-harness = false
-
+[[bin]]
+name = "dashboard"
+path = "src/bin/dashboard.rs"
+required-features = ["dashboard"]

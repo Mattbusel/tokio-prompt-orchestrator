@@ -1062,23 +1062,35 @@ mod tests {
 
     #[test]
     fn test_check_significance_different_distributions() {
+        // min_samples=5, max=1000. Interleave samples so both arms grow together.
+        // Once both have >=5 the significance check runs; since distributions are
+        // clearly different (control ~200, treatment ~10) it will auto-conclude.
+        // We verify by calling check_significance explicitly on the raw samples.
         let engine = make_engine(5, 1000);
         create_basic(&engine, "diff");
 
-        // Control: values around 200
+        // Interleave so that auto-conclude can fire. Stop adding after it does.
+        let mut concluded_sig: Option<SignificanceResult> = None;
         for i in 0..50 {
-            engine
-                .add_control_sample("diff", 195.0 + (i % 10) as f64)
-                .unwrap();
-        }
-        // Treatment: values around 10
-        for i in 0..50 {
-            engine
-                .add_treatment_sample("diff", 8.0 + (i % 4) as f64)
-                .unwrap();
+            let _ = engine.add_control_sample("diff", 195.0 + (i % 10) as f64);
+            match engine.add_treatment_sample("diff", 8.0 + (i % 4) as f64) {
+                Ok(Some(result)) => {
+                    if let Some(sig) = result.significance {
+                        concluded_sig = Some(sig);
+                    }
+                    break;
+                }
+                Err(_) => break,
+                Ok(None) => {}
+            }
         }
 
-        let sig = engine.check_significance("diff").unwrap();
+        // Whether auto-concluded or fully sampled, verify significance
+        let sig = if let Some(s) = concluded_sig {
+            s
+        } else {
+            engine.check_significance("diff").unwrap()
+        };
         assert!(sig.significant, "p={}", sig.p_value_approx);
         assert!(sig.t_statistic > 0.0); // control mean > treatment mean
     }
@@ -1232,11 +1244,23 @@ mod tests {
 
         let mut concluded = false;
         for _ in 0..10 {
-            engine.add_control_sample("timeout", 50.0).unwrap();
-            if let Ok(Some(result)) = engine.add_treatment_sample("timeout", 50.0) {
-                assert_eq!(result.conclusion, ExperimentConclusion::TimedOut);
-                concluded = true;
-                break;
+            match engine.add_control_sample("timeout", 50.0) {
+                Ok(Some(result)) => {
+                    assert_eq!(result.conclusion, ExperimentConclusion::TimedOut);
+                    concluded = true;
+                    break;
+                }
+                Err(_) => break,
+                Ok(None) => {}
+            }
+            match engine.add_treatment_sample("timeout", 50.0) {
+                Ok(Some(result)) => {
+                    assert_eq!(result.conclusion, ExperimentConclusion::TimedOut);
+                    concluded = true;
+                    break;
+                }
+                Err(_) => break,
+                Ok(None) => {}
             }
         }
         assert!(concluded, "experiment should have timed out at max samples");

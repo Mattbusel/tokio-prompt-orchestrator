@@ -114,7 +114,7 @@ fn usage() -> String {
 #[tokio::main]
 async fn main() {
     // Initialize tracing
-    let _ = tokio_prompt_orchestrator::init_tracing();
+    tokio_prompt_orchestrator::init_tracing();
 
     let args = match parse_args() {
         Ok(args) => args,

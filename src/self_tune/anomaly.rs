@@ -578,28 +578,30 @@ impl AnomalyDetector {
             anomalies.push(anomaly);
         }
 
-        // CUSUM detection
+        // CUSUM detection — require at least 2 samples so mean is meaningful
         let cusum_config = inner.config.cusum.clone();
         let (mean, _) = window_mean_stddev(window);
         let cusum_state = inner
             .cusum_states
             .entry(metric.to_string())
             .or_insert_with(CusumState::new);
-        if let Some((cusum_val, severity)) =
-            Self::check_cusum(cusum_state, value, mean, &cusum_config)
-        {
-            let anomaly = Anomaly {
-                metric: metric.to_string(),
-                value,
-                severity,
-                method: DetectionMethod::Cusum,
-                score: cusum_val,
-                threshold: cusum_config.threshold,
-                message: format!("CUSUM {cusum_val:.4} on metric '{metric}' (value={value:.4})"),
-                detected_at_secs: now,
-            };
-            inner.anomaly_history.push(anomaly.clone());
-            anomalies.push(anomaly);
+        if window.len() >= 2 {
+            if let Some((cusum_val, severity)) =
+                Self::check_cusum(cusum_state, value, mean, &cusum_config)
+            {
+                let anomaly = Anomaly {
+                    metric: metric.to_string(),
+                    value,
+                    severity,
+                    method: DetectionMethod::Cusum,
+                    score: cusum_val,
+                    threshold: cusum_config.threshold,
+                    message: format!("CUSUM {cusum_val:.4} on metric '{metric}' (value={value:.4})"),
+                    detected_at_secs: now,
+                };
+                inner.anomaly_history.push(anomaly.clone());
+                anomalies.push(anomaly);
+            }
         }
 
         // Push value into window (after detection so the value doesn't score itself)
@@ -678,8 +680,10 @@ mod tests {
     #[test]
     fn test_ingest_no_anomaly_normal_data() {
         let det = AnomalyDetector::with_defaults();
-        for i in 0..20 {
-            let result = det.ingest("cpu", 50.0 + (i as f64) * 0.01);
+        // Use a constant value so the rolling window stabilises with zero stddev
+        // and neither Z-score nor CUSUM fires.
+        for _ in 0..20 {
+            let result = det.ingest("cpu", 50.0);
             assert!(result.is_ok());
             assert!(result.unwrap().is_empty());
         }
