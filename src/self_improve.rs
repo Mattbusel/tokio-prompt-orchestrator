@@ -63,6 +63,7 @@ use crate::intelligence::{
 };
 
 use crate::self_tune::helix_probe::HelixProbeConfig;
+use crate::self_tune::helix_feedback::{HelixFeedbackConfig, HelixFeedbackPusher};
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -99,6 +100,19 @@ pub struct LoopConfig {
     ///
     /// Set to `None` (the default) to disable HelixRouter integration.
     pub helix_probe: Option<HelixProbeConfig>,
+
+    /// Optional HelixRouter feedback pusher configuration.
+    ///
+    /// When set, each loop tick examines the current pipeline pressure and pushes
+    /// a `RouterConfigPatch` to HelixRouter's `PATCH /api/config` endpoint —
+    /// tightening thresholds under high pressure, relaxing them when load is low.
+    ///
+    /// This closes the **two-way** cross-repo feedback loop:
+    /// - tokio-prompt pulls pressure from HelixRouter (via `helix_probe`)
+    /// - tokio-prompt pushes config adjustments back to HelixRouter (via this)
+    ///
+    /// Set to `None` (the default) to disable config push-back.
+    pub helix_feedback: Option<HelixFeedbackConfig>,
 }
 
 impl Default for LoopConfig {
@@ -116,6 +130,7 @@ impl Default for LoopConfig {
             target_p95_ms: 200.0,
             target_throughput_rps: 50.0,
             helix_probe: None,
+            helix_feedback: None,
         }
     }
 }
@@ -145,6 +160,8 @@ pub struct SubsystemHandles {
     pub autoscaler: Arc<Autoscaler>,
     /// Multi-armed bandit model router.
     pub learned_router: Arc<LearnedRouter>,
+    /// Optional cross-repo feedback pusher to HelixRouter.
+    pub helix_feedback: Option<Arc<HelixFeedbackPusher>>,
 }
 
 // ─── Main loop ───────────────────────────────────────────────────────────────
@@ -183,6 +200,11 @@ impl SelfImprovingLoop {
             let _ = learned_router.register_model(model);
         }
 
+        let helix_feedback = cfg
+            .helix_feedback
+            .as_ref()
+            .map(|fb_cfg| Arc::new(HelixFeedbackPusher::new(fb_cfg.clone())));
+
         let handles = SubsystemHandles {
             controller,
             snapshots,
@@ -193,6 +215,7 @@ impl SelfImprovingLoop {
             memory,
             autoscaler,
             learned_router,
+            helix_feedback,
         };
 
         Self { bus, handles, cfg }
@@ -264,6 +287,11 @@ impl SelfImprovingLoop {
                 // 6. Periodically snapshot current configuration
                 if tick % cfg.snapshot_every_n_ticks == 0 {
                     Self::step_snapshot(&handles, &snap);
+                }
+
+                // 7. Push pressure-derived config patch back to HelixRouter (two-way loop)
+                if handles.helix_feedback.is_some() {
+                    Self::step_helix_feedback(&handles, &snap).await;
                 }
             }
 
@@ -415,6 +443,23 @@ impl SelfImprovingLoop {
                 }
             }
             Err(e) => warn!(err = ?e, "task gen error"),
+        }
+    }
+
+    /// Push a pressure-derived config patch to HelixRouter (two-way cross-repo loop).
+    ///
+    /// Under high pressure (≥0.7): tighten HelixRouter's spawn threshold by 10%
+    /// and raise its cpu_p95_budget_ms so it tolerates latency spikes instead of
+    /// aggressively shedding load that tokio-prompt is already throttling.
+    ///
+    /// Under low pressure (≤0.3): send a relaxation patch to allow HelixRouter to
+    /// resume normal adaptive behaviour.
+    ///
+    /// This is a best-effort, non-blocking operation.  Failures are soft-logged.
+    pub async fn step_helix_feedback(h: &SubsystemHandles, snap: &TelemetrySnapshot) {
+        let Some(pusher) = &h.helix_feedback else { return };
+        if let Err(e) = pusher.maybe_push(snap.pressure).await {
+            debug!(err = %e, "helix_feedback push skipped or failed");
         }
     }
 

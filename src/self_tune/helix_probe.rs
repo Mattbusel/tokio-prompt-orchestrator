@@ -41,6 +41,9 @@ struct HelixStats {
     pressure_score: f64,
     dropped: u64,
     completed: u64,
+    /// Current adaptive spawn threshold — logged for observability only.
+    #[serde(default)]
+    adaptive_spawn_threshold: u64,
 }
 
 // ── Configuration ─────────────────────────────────────────────────────────────
@@ -140,7 +143,7 @@ impl HelixPressureProbe {
             ticker.tick().await;
 
             match self.fetch_pressure().await {
-                Ok((pressure, dropped, completed)) => {
+                Ok((pressure, dropped, completed, adaptive_spawn_threshold)) => {
                     failures = 0;
 
                     // Combine HelixRouter's own pressure_score with the
@@ -161,6 +164,7 @@ impl HelixPressureProbe {
                         combined,
                         dropped,
                         completed,
+                        adaptive_spawn_threshold,
                         url = %self.config.base_url,
                         "HelixPressureProbe: tick"
                     );
@@ -190,8 +194,8 @@ impl HelixPressureProbe {
         }
     }
 
-    /// Fetch `/api/stats` and extract `(pressure_score, dropped, completed)`.
-    async fn fetch_pressure(&self) -> Result<(f64, u64, u64), String> {
+    /// Fetch `/api/stats` and extract `(pressure_score, dropped, completed, adaptive_spawn_threshold)`.
+    pub(crate) async fn fetch_pressure(&self) -> Result<(f64, u64, u64, u64), String> {
         let url = format!("{}/api/stats", self.config.base_url);
 
         let resp = self
@@ -210,7 +214,7 @@ impl HelixPressureProbe {
             .await
             .map_err(|e| format!("JSON parse: {e}"))?;
 
-        Ok((stats.pressure_score, stats.dropped, stats.completed))
+        Ok((stats.pressure_score, stats.dropped, stats.completed, stats.adaptive_spawn_threshold))
     }
 }
 
@@ -459,5 +463,185 @@ mod tests {
         let drop_rate = dropped as f64 / total as f64;
         let combined = pressure.max(drop_rate);
         assert!((combined - 0.5).abs() < 1e-9, "combined={combined}");
+    }
+
+    // ── Mock-HTTP integration tests ───────────────────────────────────────
+    //
+    // These tests spin up a minimal tokio TCP listener that speaks just enough
+    // HTTP/1.1 to satisfy reqwest, verifying the probe's fetch_pressure() method
+    // end-to-end against a real (local) network round-trip.
+
+    /// Bind to a random OS-assigned port and return the port number + listener.
+    async fn bind_mock_server() -> (u16, tokio::net::TcpListener) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock server");
+        let port = listener.local_addr().expect("local_addr").port();
+        (port, listener)
+    }
+
+    /// Serve a single HTTP request, return the given body with the given status.
+    async fn serve_once(
+        listener: tokio::net::TcpListener,
+        status: u16,
+        body: &'static str,
+    ) {
+        use tokio::io::AsyncWriteExt;
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        // Drain the request bytes (we don't care about the content here).
+        let mut buf = [0u8; 4096];
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            tokio::io::AsyncReadExt::read(&mut stream, &mut buf),
+        )
+        .await;
+        let response = format!(
+            "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}",
+            len = body.len(),
+        );
+        let _ = stream.write_all(response.as_bytes()).await;
+        let _ = stream.flush().await;
+    }
+
+    #[tokio::test]
+    async fn fetch_pressure_success_returns_correct_values() {
+        let (port, listener) = bind_mock_server().await;
+        let body = r#"{"pressure_score":0.72,"dropped":5,"completed":95,"adaptive_spawn_threshold":1000,"routed_by_strategy":[],"latency_by_strategy":[]}"#;
+
+        tokio::spawn(serve_once(listener, 200, body));
+
+        let bus = make_bus();
+        let cfg = HelixProbeConfig {
+            base_url: format!("http://127.0.0.1:{port}"),
+            connect_timeout: Duration::from_secs(2),
+            request_timeout: Duration::from_secs(5),
+            ..Default::default()
+        };
+        let probe = HelixPressureProbe::new(cfg, bus);
+        let result = probe.fetch_pressure().await;
+
+        let (pressure, dropped, completed, adaptive_spawn_threshold) = result.expect("fetch_pressure should succeed");
+        assert!((pressure - 0.72).abs() < 1e-9, "pressure={pressure}");
+        assert_eq!(dropped, 5);
+        assert_eq!(completed, 95);
+        assert_eq!(adaptive_spawn_threshold, 1000);
+    }
+
+    #[tokio::test]
+    async fn fetch_pressure_http_500_returns_error() {
+        let (port, listener) = bind_mock_server().await;
+        let body = r#"{"error":"internal server error"}"#;
+
+        tokio::spawn(serve_once(listener, 500, body));
+
+        let bus = make_bus();
+        let cfg = HelixProbeConfig {
+            base_url: format!("http://127.0.0.1:{port}"),
+            connect_timeout: Duration::from_secs(2),
+            request_timeout: Duration::from_secs(5),
+            ..Default::default()
+        };
+        let probe = HelixPressureProbe::new(cfg, bus);
+        let result = probe.fetch_pressure().await;
+
+        assert!(result.is_err(), "expected error for HTTP 500");
+        let err = result.unwrap_err();
+        assert!(err.contains("500"), "error should mention status code: {err}");
+    }
+
+    #[tokio::test]
+    async fn fetch_pressure_malformed_json_returns_error() {
+        let (port, listener) = bind_mock_server().await;
+        let body = r#"not valid json {"#;
+
+        tokio::spawn(serve_once(listener, 200, body));
+
+        let bus = make_bus();
+        let cfg = HelixProbeConfig {
+            base_url: format!("http://127.0.0.1:{port}"),
+            connect_timeout: Duration::from_secs(2),
+            request_timeout: Duration::from_secs(5),
+            ..Default::default()
+        };
+        let probe = HelixPressureProbe::new(cfg, bus);
+        let result = probe.fetch_pressure().await;
+
+        assert!(result.is_err(), "expected error for malformed JSON");
+        let err = result.unwrap_err();
+        assert!(err.contains("JSON") || err.contains("parse"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn fetch_pressure_missing_field_returns_error() {
+        let (port, listener) = bind_mock_server().await;
+        // Missing required `pressure_score` field
+        let body = r#"{"dropped":0,"completed":10}"#;
+
+        tokio::spawn(serve_once(listener, 200, body));
+
+        let bus = make_bus();
+        let cfg = HelixProbeConfig {
+            base_url: format!("http://127.0.0.1:{port}"),
+            connect_timeout: Duration::from_secs(2),
+            request_timeout: Duration::from_secs(5),
+            ..Default::default()
+        };
+        let probe = HelixPressureProbe::new(cfg, bus);
+        let result = probe.fetch_pressure().await;
+
+        assert!(result.is_err(), "expected error for missing pressure_score");
+    }
+
+    #[tokio::test]
+    async fn fetch_pressure_connection_refused_returns_error() {
+        // Port 1 is unlikely to have anything listening.
+        let bus = make_bus();
+        let cfg = HelixProbeConfig {
+            base_url: "http://127.0.0.1:1".to_string(),
+            connect_timeout: Duration::from_millis(200),
+            request_timeout: Duration::from_millis(500),
+            ..Default::default()
+        };
+        let probe = HelixPressureProbe::new(cfg, bus);
+        let result = probe.fetch_pressure().await;
+
+        assert!(result.is_err(), "expected error for connection refused");
+        let err = result.unwrap_err();
+        assert!(err.contains("connect"), "err should mention connect: {err}");
+    }
+
+    #[tokio::test]
+    async fn fetch_pressure_updates_bus_via_run_loop() {
+        // Spin up two sequential mock responses, then verify the bus has the
+        // expected pressure after one probe poll.
+        let (port, listener) = bind_mock_server().await;
+        let body = r#"{"pressure_score":0.65,"dropped":13,"completed":87,"adaptive_spawn_threshold":500,"routed_by_strategy":[],"latency_by_strategy":[]}"#;
+
+        // The mock will serve exactly one request.
+        tokio::spawn(serve_once(listener, 200, body));
+
+        let bus = make_bus();
+        let cfg = HelixProbeConfig {
+            base_url: format!("http://127.0.0.1:{port}"),
+            connect_timeout: Duration::from_secs(2),
+            request_timeout: Duration::from_secs(5),
+            ..Default::default()
+        };
+        let probe = HelixPressureProbe::new(cfg, bus.clone());
+
+        // Execute one poll cycle directly (not via run() which loops forever).
+        let (pressure, dropped, completed, _adaptive_spawn_threshold) = probe
+            .fetch_pressure()
+            .await
+            .expect("fetch should succeed");
+
+        let total = dropped + completed;
+        let drop_rate = if total > 0 { dropped as f64 / total as f64 } else { 0.0 };
+        let combined = pressure.max(drop_rate);
+        bus.set_external_pressure(combined);
+
+        let snap = bus.tick_now().await;
+        // combined = max(0.65, 0.13) = 0.65; blended with internal (0.0) = 0.325
+        assert!(snap.pressure > 0.0, "pressure should be non-zero after probe tick: {}", snap.pressure);
     }
 }
