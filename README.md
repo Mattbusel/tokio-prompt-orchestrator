@@ -2,9 +2,9 @@
 
 [![Rust](https://img.shields.io/badge/rust-1.79%2B-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-900%2B_passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-1491_passing-brightgreen.svg)]()
 
-We ran 24 Claude Code agents simultaneously on a single RTX 4070. They wrote this codebase in one night — 48,000+ lines of Rust, 900+ tests, zero panics — while the orchestrator they were building managed their own inference traffic. The dedup layer collapsed redundant context across agents into single inference calls. Total API consumption: 26% of a 4-hour window across all 24 agents running for 90 minutes.
+We ran 24 Claude Code agents simultaneously on a single RTX 4070. They wrote this codebase in one night — 58,000+ lines of Rust, 1,491 tests, zero panics — while the orchestrator they were building managed their own inference traffic. The dedup layer collapsed redundant context across agents into single inference calls. Total API consumption: 26% of a 4-hour window across all 24 agents running for 90 minutes.
 
 Anthropic's documented ceiling is 16 concurrent agents. We hit 24 and the bottleneck was the API rate limit, not the orchestrator.
 
@@ -49,9 +49,11 @@ AgentMemory  (outcome recorded, dead ends flagged)
 
 Start it: `cargo run --bin coordinator --features self-improving -- --self-improve`
 
-**Intelligence Layer** *(new)* — `IntelligenceBridge` wires four learned systems into the pipeline: `LearnedRouter` (epsilon-greedy multi-armed bandit, routes by observed quality), `Autoscaler` (predictive — scales worker capacity before demand arrives), `FeedbackCollector` (aggregates quality signals from post-processing), `QualityEstimator` (scores response quality at inference time). All four run as a closed loop: feedback scores → router updates → autoscaler reacts.
+**Intelligence Layer** — `IntelligenceBridge` wires four learned systems into the pipeline: `LearnedRouter` (epsilon-greedy multi-armed bandit, routes by observed quality), `Autoscaler` (predictive — scales worker capacity before demand arrives), `FeedbackCollector` (aggregates quality signals from post-processing), `QualityEstimator` (scores response quality at inference time), `PromptOptimizer` (rewrites prompts to minimize token spend), `SemanticDedup` (embedding-based dedup that collapses semantically equivalent prompts before they hit the provider). All run as a closed loop: feedback scores → router updates → autoscaler reacts.
 
-**Capability Discovery** *(now real)* — `CapabilityDiscovery` runs `cargo check --message-format=json` to detect dead code and unused imports, and `cargo audit --json` to surface CVEs. Findings become tasks for the agent fleet.
+**HelixRouter Integration** — Three `self_tune` modules bridge the orchestrator to HelixRouter in real time: `helix_probe` polls `/api/stats` and converts queue depth, drop rate, and latency into a combined pressure signal; `helix_config_pusher` writes PID-derived parameter adjustments back via `PATCH /api/config`; `helix_feedback` aggregates quality scores from the intelligence layer and forwards them as routing hints. The loop closes: token-stream pressure from Every-Other-Token flows through HelixRouter, which reports back to the orchestrator's self-tune stack.
+
+**Capability Discovery** *(live)* — `CapabilityDiscovery` runs `cargo check --message-format=json` to detect dead code and unused imports, and `cargo audit --json` to surface CVEs. Findings become tasks for the agent fleet.
 
 **Distributed** — NATS pub/sub for inter-node messaging. Redis-based cross-node dedup with atomic `SET NX EX`. Leader election with TTL renewal. Cluster manager with heartbeat tracking.
 
@@ -118,8 +120,8 @@ LOG_FORMAT="json"                     # Structured logs for Datadog/Loki
 ## Numbers
 
 ```
-Lines of code       48,000+
-Tests               900+ passing, 0 failing
+Lines of code       58,457
+Tests               1,491 passing, 0 failing
 Benchmarks          30+ criterion, all within budget
 Dedup savings       66.7% collapse rate in live demo
 Dedup check         ~1.5μs p50
