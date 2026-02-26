@@ -33,13 +33,101 @@
 
 use crate::{
     enhanced::CircuitBreaker, metrics, send_with_shed, AssembleOutput, InferenceOutput,
-    ModelWorker, PostOutput, PromptRequest, RagOutput,
+    ModelWorker, PostOutput, PromptRequest, RagOutput, SessionId,
 };
+use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{info, warn, Span};
+
+// ── OutputSink trait ─────────────────────────────────────────────────────────
+
+/// Pluggable output sink for the stream stage.
+///
+/// Implement this trait to route completed pipeline outputs anywhere — SSE,
+/// WebSocket, gRPC, an in-memory buffer for testing, etc.  The default
+/// implementation, [`LogSink`], replicates the original behaviour: log the
+/// text length without logging content.
+///
+/// ## Contract
+///
+/// - `emit` is called once per completed inference, in order.
+/// - Errors from `emit` are **soft-logged** and do not abort the pipeline.
+/// - Implementations must be `Send + Sync` (they are held behind `Arc`).
+///
+/// ## Panics
+///
+/// Implementations must never panic — return `Err` instead.
+///
+/// ## Example
+///
+/// ```rust
+/// use tokio_prompt_orchestrator::stages::{OutputSink, SinkError};
+/// use tokio_prompt_orchestrator::SessionId;
+/// use async_trait::async_trait;
+/// use std::sync::Mutex;
+///
+/// pub struct VecSink(pub Mutex<Vec<String>>);
+///
+/// #[async_trait]
+/// impl OutputSink for VecSink {
+///     async fn emit(&self, _session: &SessionId, text: &str) -> Result<(), SinkError> {
+///         self.0.lock().unwrap_or_else(|p| p.into_inner()).push(text.to_owned());
+///         Ok(())
+///     }
+/// }
+/// ```
+#[async_trait]
+pub trait OutputSink: Send + Sync {
+    /// Called once per completed inference with the session and response text.
+    ///
+    /// # Arguments
+    /// * `session` — Session that produced this output.
+    /// * `text`    — Full response text.  **Never log this** — it may contain PII.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.  `Err(SinkError)` on failure; the pipeline will
+    /// soft-log the error and continue.
+    async fn emit(&self, session: &SessionId, text: &str) -> Result<(), SinkError>;
+}
+
+/// Error type returned by [`OutputSink::emit`].
+///
+/// Carries a human-readable message for logging; the pipeline never
+/// propagates these errors to callers.
+#[derive(Debug)]
+pub struct SinkError(pub String);
+
+impl std::fmt::Display for SinkError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for SinkError {}
+
+// ── Default sink: replicate original log-only behaviour ─────────────────────
+
+/// Default [`OutputSink`] that logs the output length without logging content.
+///
+/// This is the sink used by [`spawn_pipeline`] when no explicit sink is
+/// provided.  It replicates the original `stream_stage` behaviour exactly.
+pub struct LogSink;
+
+#[async_trait]
+impl OutputSink for LogSink {
+    async fn emit(&self, session: &SessionId, text: &str) -> Result<(), SinkError> {
+        info!(
+            target: "orchestrator::pipeline",
+            session_id = %session.as_str(),
+            text_len = text.len(),
+            "Stream output emitted"
+        );
+        Ok(())
+    }
+}
 
 /// Handles for all spawned pipeline tasks
 pub struct PipelineHandles {
@@ -109,7 +197,7 @@ pub fn spawn_pipeline(worker: Arc<dyn ModelWorker>) -> PipelineHandles {
         circuit_breaker.clone(),
     ));
     let post = tokio::spawn(post_stage(inference_rx, post_tx));
-    let stream = tokio::spawn(stream_stage(post_rx, output_tx));
+    let stream = tokio::spawn(stream_stage(post_rx, output_tx, Arc::new(LogSink)));
 
     PipelineHandles {
         rag,
@@ -426,21 +514,19 @@ async fn post_stage(mut rx: mpsc::Receiver<InferenceOutput>, tx: mpsc::Sender<Po
 
 /// Stage 5: Stream
 ///
-/// Final output stage — could write to SSE, WebSocket, gRPC stream, etc.
-/// For MVP, logs a redacted summary (text length only, no content).
+/// Final output stage — routes completed inference output through a pluggable
+/// [`OutputSink`].  By default a [`LogSink`] is used which logs the text
+/// length without logging content.  Callers may provide any `Arc<dyn
+/// OutputSink>` to write to SSE, WebSocket, gRPC, or an in-memory buffer.
 ///
 /// # Panics
 ///
 /// This function never panics.
-///
-/// TODO: Make this pluggable via trait:
-/// ```ignore
-/// #[async_trait]
-/// pub trait OutputSink: Send + Sync {
-///     async fn emit(&self, session: &SessionId, text: &str) -> Result<()>;
-/// }
-/// ```
-async fn stream_stage(mut rx: mpsc::Receiver<PostOutput>, output_tx: mpsc::Sender<PostOutput>) {
+async fn stream_stage(
+    mut rx: mpsc::Receiver<PostOutput>,
+    output_tx: mpsc::Sender<PostOutput>,
+    sink: Arc<dyn OutputSink>,
+) {
     info!(target: "orchestrator::pipeline", "Stream stage started");
 
     while let Some(post_output) = rx.recv().await {
@@ -461,14 +547,17 @@ async fn stream_stage(mut rx: mpsc::Receiver<PostOutput>, output_tx: mpsc::Sende
 
         metrics::inc_request("stream");
 
-        // Emit final output — log text LENGTH only, never content
-        info!(
-            target: "orchestrator::pipeline",
-            session_id = %session_id,
-            request_id = %request_id,
-            text_len = post_output.text.len(),
-            "Stream output emitted"
-        );
+        // Delegate to the pluggable sink — errors are soft-logged, never fatal.
+        if let Err(e) = sink.emit(&post_output.session, &post_output.text).await {
+            warn!(
+                target: "orchestrator::pipeline",
+                session_id = %session_id,
+                request_id = %request_id,
+                error = %e,
+                "OutputSink::emit returned error, continuing"
+            );
+            Span::current().record("error_kind", "sink_error");
+        }
 
         let elapsed = start.elapsed();
         metrics::record_stage_latency("stream", elapsed);
@@ -545,7 +634,7 @@ pub fn spawn_pipeline_with_intelligence(
         ))
     };
     let post = tokio::spawn(post_stage(inference_rx, post_tx));
-    let stream = tokio::spawn(stream_stage(post_rx, output_tx));
+    let stream = tokio::spawn(stream_stage(post_rx, output_tx, Arc::new(LogSink)));
 
     PipelineHandles {
         rag,
@@ -771,6 +860,90 @@ mod tests {
     use super::*;
     use crate::{EchoWorker, SessionId};
     use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    // ── OutputSink helpers ────────────────────────────────────────────────
+
+    /// Sink that records every emitted text for inspection in tests.
+    struct CaptureSink(Mutex<Vec<String>>);
+
+    impl CaptureSink {
+        fn new() -> Arc<Self> {
+            Arc::new(Self(Mutex::new(vec![])))
+        }
+
+        fn captured(&self) -> Vec<String> {
+            self.0.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        }
+    }
+
+    #[async_trait]
+    impl OutputSink for CaptureSink {
+        async fn emit(&self, _session: &SessionId, text: &str) -> Result<(), SinkError> {
+            self.0
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(text.to_owned());
+            Ok(())
+        }
+    }
+
+    /// Sink that always returns an error (for error-path coverage).
+    struct FailSink;
+
+    #[async_trait]
+    impl OutputSink for FailSink {
+        async fn emit(&self, _session: &SessionId, _text: &str) -> Result<(), SinkError> {
+            Err(SinkError("injected test failure".to_owned()))
+        }
+    }
+
+    // ── OutputSink unit tests ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_log_sink_emit_returns_ok() {
+        let sink = LogSink;
+        let session = SessionId::new("s1");
+        let result = sink.emit(&session, "hello world").await;
+        assert!(result.is_ok(), "LogSink::emit should always return Ok");
+    }
+
+    #[tokio::test]
+    async fn test_log_sink_emit_empty_text_returns_ok() {
+        let sink = LogSink;
+        let session = SessionId::new("s2");
+        assert!(sink.emit(&session, "").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_capture_sink_records_emitted_text() {
+        let sink = CaptureSink::new();
+        let session = SessionId::new("s3");
+        sink.emit(&session, "first").await.expect("emit");
+        sink.emit(&session, "second").await.expect("emit");
+        let captured = sink.captured();
+        assert_eq!(captured, vec!["first", "second"]);
+    }
+
+    #[tokio::test]
+    async fn test_fail_sink_returns_error() {
+        let sink = FailSink;
+        let session = SessionId::new("s4");
+        assert!(sink.emit(&session, "anything").await.is_err());
+    }
+
+    #[test]
+    fn test_sink_error_display() {
+        let e = SinkError("oops".to_owned());
+        assert_eq!(format!("{e}"), "oops");
+    }
+
+    #[test]
+    fn test_sink_error_debug() {
+        let e = SinkError("debug".to_owned());
+        let d = format!("{e:?}");
+        assert!(d.contains("debug"), "debug repr: {d}");
+    }
 
     /// Helper to create a test request with all required fields.
     fn make_test_request(session: &str, request_id: &str, input: &str) -> PromptRequest {

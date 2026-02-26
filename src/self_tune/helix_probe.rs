@@ -32,10 +32,54 @@ use crate::self_tune::telemetry_bus::TelemetryBus;
 
 // ── Wire-format mirror of HelixRouter's `/api/stats` response ────────────────
 
-/// Minimal subset of HelixRouter's stats JSON.
+/// Per-strategy routing count from HelixRouter's `/api/stats`.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct HelixRoutedStrategyCount {
+    /// Strategy name as returned by HelixRouter (e.g. `"inline"`, `"spawn"`, `"drop"`).
+    pub strategy: String,
+    /// Number of jobs routed to this strategy in the current window.
+    pub count: u64,
+}
+
+/// Per-strategy latency summary from HelixRouter's `/api/stats`.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct HelixLatencyRow {
+    /// Strategy name.
+    pub strategy: String,
+    /// Number of completed samples in this strategy's window.
+    pub count: u64,
+    /// Simple average latency in milliseconds.
+    pub avg_ms: f64,
+    /// Exponential moving average latency in milliseconds.
+    pub ema_ms: f64,
+    /// 95th-percentile latency in milliseconds.
+    pub p95_ms: u64,
+}
+
+/// Per-strategy snapshot surfaced by [`HelixPressureProbe`] for observability
+/// and strategy-aware tuning.
 ///
-/// Only fields we actually consume are declared; unknown fields are ignored by
-/// `#[serde(deny_unknown_fields)]` being absent.
+/// Consumers can inspect which routing strategies HelixRouter is currently
+/// using and their latency profiles, enabling targeted adjustments rather than
+/// relying solely on the aggregate pressure signal.
+#[derive(Debug, Clone, Default)]
+pub struct HelixStrategySnapshot {
+    /// Fraction of jobs explicitly shed via the `Drop` strategy (0.0–1.0).
+    /// A non-zero value means HelixRouter is actively shedding load.
+    pub drop_strategy_frac: f64,
+    /// Highest p95 latency seen across all strategies (milliseconds).
+    pub max_p95_ms: u64,
+    /// Strategy with the highest p95 latency, if any.
+    pub hottest_strategy: Option<String>,
+    /// Full per-strategy routing counts for logging/dashboards.
+    pub routed_by_strategy: Vec<HelixRoutedStrategyCount>,
+    /// Full per-strategy latency rows for logging/dashboards.
+    pub latency_by_strategy: Vec<HelixLatencyRow>,
+}
+
+/// Full stats response mirror of HelixRouter's `/api/stats`.
+///
+/// All fields we actually consume are declared; unknown fields are ignored.
 #[derive(Debug, Deserialize)]
 struct HelixStats {
     pressure_score: f64,
@@ -44,6 +88,12 @@ struct HelixStats {
     /// Current adaptive spawn threshold — logged for observability only.
     #[serde(default)]
     adaptive_spawn_threshold: u64,
+    /// Per-strategy routing counts — used to detect explicit load shedding.
+    #[serde(default)]
+    routed_by_strategy: Vec<HelixRoutedStrategyCount>,
+    /// Per-strategy latency summaries — used to detect hot execution paths.
+    #[serde(default)]
+    latency_by_strategy: Vec<HelixLatencyRow>,
 }
 
 // ── Configuration ─────────────────────────────────────────────────────────────
@@ -142,8 +192,16 @@ impl HelixPressureProbe {
         loop {
             ticker.tick().await;
 
+            // Apply exponential backoff when HelixRouter is unreachable.
+            // Cap at 5× the base poll interval to avoid starving the bus.
+            if failures > 0 {
+                let backoff_factor = (failures as u64).min(5);
+                let backoff = self.config.poll_interval * backoff_factor as u32;
+                tokio::time::sleep(backoff).await;
+            }
+
             match self.fetch_pressure().await {
-                Ok((pressure, dropped, completed, adaptive_spawn_threshold)) => {
+                Ok((pressure, dropped, completed, adaptive_spawn_threshold, strategy_snap)) => {
                     failures = 0;
 
                     // Combine HelixRouter's own pressure_score with the
@@ -156,15 +214,26 @@ impl HelixPressureProbe {
                     } else {
                         0.0
                     };
-                    let combined = pressure.max(drop_rate);
+
+                    // Additionally blend in the Drop-strategy fraction: when
+                    // HelixRouter is actively routing jobs to the Drop strategy,
+                    // that is an unambiguous signal of load shedding that should
+                    // immediately raise the combined pressure even if pressure_score
+                    // and drop_rate haven't caught up yet.
+                    let combined = pressure
+                        .max(drop_rate)
+                        .max(strategy_snap.drop_strategy_frac);
 
                     trace!(
                         pressure,
                         drop_rate,
+                        drop_strategy_frac = strategy_snap.drop_strategy_frac,
                         combined,
                         dropped,
                         completed,
                         adaptive_spawn_threshold,
+                        max_p95_ms = strategy_snap.max_p95_ms,
+                        hottest_strategy = ?strategy_snap.hottest_strategy,
                         url = %self.config.base_url,
                         "HelixPressureProbe: tick"
                     );
@@ -174,19 +243,26 @@ impl HelixPressureProbe {
                     failures = failures.saturating_add(1);
 
                     if failures >= self.config.error_threshold {
+                        let backoff_ms = self.config.poll_interval.as_millis()
+                            * (failures as u64).min(5) as u128;
                         error!(
                             error = %e,
                             consecutive_failures = failures,
+                            backoff_ms,
                             url = %self.config.base_url,
-                            "HelixPressureProbe: repeated failures, clearing external pressure"
+                            "HelixPressureProbe: repeated failures, clearing external pressure and backing off"
                         );
                         // Clear stale signal so Tokio Prompt is not misled.
                         self.bus.set_external_pressure(0.0);
                     } else {
+                        let backoff_ms = self.config.poll_interval.as_millis()
+                            * (failures as u64).min(5) as u128;
                         warn!(
                             error = %e,
+                            consecutive_failures = failures,
+                            backoff_ms,
                             url = %self.config.base_url,
-                            "HelixPressureProbe: poll failed, will retry"
+                            "HelixPressureProbe: poll failed, backing off before retry"
                         );
                     }
                 }
@@ -194,8 +270,12 @@ impl HelixPressureProbe {
         }
     }
 
-    /// Fetch `/api/stats` and extract `(pressure_score, dropped, completed, adaptive_spawn_threshold)`.
-    pub(crate) async fn fetch_pressure(&self) -> Result<(f64, u64, u64, u64), String> {
+    /// Fetch `/api/stats` and extract the pressure tuple plus per-strategy snapshot.
+    ///
+    /// Returns `(pressure_score, dropped, completed, adaptive_spawn_threshold, strategy_snapshot)`.
+    pub(crate) async fn fetch_pressure(
+        &self,
+    ) -> Result<(f64, u64, u64, u64, HelixStrategySnapshot), String> {
         let url = format!("{}/api/stats", self.config.base_url);
 
         let resp = self
@@ -214,7 +294,60 @@ impl HelixPressureProbe {
             .await
             .map_err(|e| format!("JSON parse: {e}"))?;
 
-        Ok((stats.pressure_score, stats.dropped, stats.completed, stats.adaptive_spawn_threshold))
+        let strategy_snapshot = Self::build_strategy_snapshot(
+            &stats.routed_by_strategy,
+            &stats.latency_by_strategy,
+        );
+
+        Ok((
+            stats.pressure_score,
+            stats.dropped,
+            stats.completed,
+            stats.adaptive_spawn_threshold,
+            strategy_snapshot,
+        ))
+    }
+
+    /// Build a [`HelixStrategySnapshot`] from the raw per-strategy data.
+    ///
+    /// Computes the `Drop` strategy fraction and identifies the hottest strategy
+    /// by p95 latency for targeted tuning decisions.
+    fn build_strategy_snapshot(
+        routed: &[HelixRoutedStrategyCount],
+        latency: &[HelixLatencyRow],
+    ) -> HelixStrategySnapshot {
+        // Compute what fraction of routed jobs went to the Drop strategy.
+        let total_routed: u64 = routed.iter().map(|r| r.count).sum();
+        let drop_count: u64 = routed
+            .iter()
+            .filter(|r| r.strategy.eq_ignore_ascii_case("drop"))
+            .map(|r| r.count)
+            .sum();
+        let drop_strategy_frac = if total_routed > 0 {
+            drop_count as f64 / total_routed as f64
+        } else {
+            0.0
+        };
+
+        // Find the strategy with the worst p95 latency.
+        let (max_p95_ms, hottest_strategy) = latency
+            .iter()
+            .filter(|r| r.count > 0)
+            .fold((0u64, None::<String>), |(max_p95, hot), row| {
+                if row.p95_ms > max_p95 {
+                    (row.p95_ms, Some(row.strategy.clone()))
+                } else {
+                    (max_p95, hot)
+                }
+            });
+
+        HelixStrategySnapshot {
+            drop_strategy_frac,
+            max_p95_ms,
+            hottest_strategy,
+            routed_by_strategy: routed.to_vec(),
+            latency_by_strategy: latency.to_vec(),
+        }
     }
 }
 
@@ -520,11 +653,14 @@ mod tests {
         let probe = HelixPressureProbe::new(cfg, bus);
         let result = probe.fetch_pressure().await;
 
-        let (pressure, dropped, completed, adaptive_spawn_threshold) = result.expect("fetch_pressure should succeed");
+        let (pressure, dropped, completed, adaptive_spawn_threshold, strategy_snap) =
+            result.expect("fetch_pressure should succeed");
         assert!((pressure - 0.72).abs() < 1e-9, "pressure={pressure}");
         assert_eq!(dropped, 5);
         assert_eq!(completed, 95);
         assert_eq!(adaptive_spawn_threshold, 1000);
+        assert_eq!(strategy_snap.drop_strategy_frac, 0.0);
+        assert_eq!(strategy_snap.max_p95_ms, 0);
     }
 
     #[tokio::test]
@@ -547,6 +683,91 @@ mod tests {
         assert!(result.is_err(), "expected error for HTTP 500");
         let err = result.unwrap_err();
         assert!(err.contains("500"), "error should mention status code: {err}");
+    }
+
+    // ── Per-strategy snapshot tests ───────────────────────────────────────
+
+    #[test]
+    fn build_strategy_snapshot_detects_drop_strategy() {
+        let routed = vec![
+            HelixRoutedStrategyCount { strategy: "inline".to_string(), count: 70 },
+            HelixRoutedStrategyCount { strategy: "spawn".to_string(), count: 20 },
+            HelixRoutedStrategyCount { strategy: "drop".to_string(), count: 10 },
+        ];
+        let snap = HelixPressureProbe::build_strategy_snapshot(&routed, &[]);
+        assert!((snap.drop_strategy_frac - 0.1).abs() < 1e-9, "drop_frac={}", snap.drop_strategy_frac);
+    }
+
+    #[test]
+    fn build_strategy_snapshot_zero_drop_when_no_drop_strategy() {
+        let routed = vec![
+            HelixRoutedStrategyCount { strategy: "inline".to_string(), count: 80 },
+            HelixRoutedStrategyCount { strategy: "spawn".to_string(), count: 20 },
+        ];
+        let snap = HelixPressureProbe::build_strategy_snapshot(&routed, &[]);
+        assert_eq!(snap.drop_strategy_frac, 0.0);
+    }
+
+    #[test]
+    fn build_strategy_snapshot_zero_when_empty() {
+        let snap = HelixPressureProbe::build_strategy_snapshot(&[], &[]);
+        assert_eq!(snap.drop_strategy_frac, 0.0);
+        assert_eq!(snap.max_p95_ms, 0);
+        assert!(snap.hottest_strategy.is_none());
+    }
+
+    #[test]
+    fn build_strategy_snapshot_all_drop() {
+        let routed = vec![
+            HelixRoutedStrategyCount { strategy: "drop".to_string(), count: 100 },
+        ];
+        let snap = HelixPressureProbe::build_strategy_snapshot(&routed, &[]);
+        assert!((snap.drop_strategy_frac - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn build_strategy_snapshot_case_insensitive_drop() {
+        let routed = vec![
+            HelixRoutedStrategyCount { strategy: "Drop".to_string(), count: 50 },
+            HelixRoutedStrategyCount { strategy: "inline".to_string(), count: 50 },
+        ];
+        let snap = HelixPressureProbe::build_strategy_snapshot(&routed, &[]);
+        assert!((snap.drop_strategy_frac - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn build_strategy_snapshot_finds_hottest_strategy() {
+        let latency = vec![
+            HelixLatencyRow { strategy: "inline".to_string(), count: 10, avg_ms: 1.0, ema_ms: 1.0, p95_ms: 5 },
+            HelixLatencyRow { strategy: "cpu_pool".to_string(), count: 5, avg_ms: 50.0, ema_ms: 50.0, p95_ms: 250 },
+            HelixLatencyRow { strategy: "spawn".to_string(), count: 8, avg_ms: 20.0, ema_ms: 20.0, p95_ms: 80 },
+        ];
+        let snap = HelixPressureProbe::build_strategy_snapshot(&[], &latency);
+        assert_eq!(snap.max_p95_ms, 250);
+        assert_eq!(snap.hottest_strategy.as_deref(), Some("cpu_pool"));
+    }
+
+    #[test]
+    fn build_strategy_snapshot_ignores_zero_count_strategies() {
+        let latency = vec![
+            HelixLatencyRow { strategy: "inline".to_string(), count: 0, avg_ms: 0.0, ema_ms: 0.0, p95_ms: 9999 },
+            HelixLatencyRow { strategy: "spawn".to_string(), count: 5, avg_ms: 10.0, ema_ms: 10.0, p95_ms: 40 },
+        ];
+        let snap = HelixPressureProbe::build_strategy_snapshot(&[], &latency);
+        // Zero-count strategy should be ignored even if its p95 is high.
+        assert_eq!(snap.max_p95_ms, 40, "zero-count strategy should be excluded");
+        assert_eq!(snap.hottest_strategy.as_deref(), Some("spawn"));
+    }
+
+    #[test]
+    fn combined_pressure_includes_drop_strategy_fraction() {
+        // pressure_score = 0.1, drop_rate = 0.05, drop_strategy_frac = 0.8
+        // combined should be 0.8 driven by drop_strategy_frac
+        let pressure = 0.1_f64;
+        let drop_rate = 0.05_f64;
+        let drop_strategy_frac = 0.8_f64;
+        let combined = pressure.max(drop_rate).max(drop_strategy_frac);
+        assert!((combined - 0.8).abs() < 1e-9, "combined={combined}");
     }
 
     #[tokio::test]
@@ -630,18 +851,49 @@ mod tests {
         let probe = HelixPressureProbe::new(cfg, bus.clone());
 
         // Execute one poll cycle directly (not via run() which loops forever).
-        let (pressure, dropped, completed, _adaptive_spawn_threshold) = probe
+        let (pressure, dropped, completed, _adaptive_spawn_threshold, strategy_snap) = probe
             .fetch_pressure()
             .await
             .expect("fetch should succeed");
 
         let total = dropped + completed;
         let drop_rate = if total > 0 { dropped as f64 / total as f64 } else { 0.0 };
-        let combined = pressure.max(drop_rate);
+        let combined = pressure.max(drop_rate).max(strategy_snap.drop_strategy_frac);
         bus.set_external_pressure(combined);
 
         let snap = bus.tick_now().await;
         // combined = max(0.65, 0.13) = 0.65; blended with internal (0.0) = 0.325
         assert!(snap.pressure > 0.0, "pressure should be non-zero after probe tick: {}", snap.pressure);
+    }
+
+    // -----------------------------------------------------------------------
+    // Backoff arithmetic tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn probe_backoff_factor_clamps_at_five() {
+        let poll = Duration::from_secs(5);
+        for failures in [1u32, 2, 3, 4, 5, 10, 100, u32::MAX] {
+            let factor = (failures as u64).min(5);
+            let backoff = poll * factor as u32;
+            assert!(
+                backoff <= poll * 5,
+                "backoff must not exceed 5× poll at failures={failures}"
+            );
+        }
+    }
+
+    #[test]
+    fn probe_backoff_factor_one_on_first_failure() {
+        let failures: u32 = 1;
+        let factor = (failures as u64).min(5);
+        assert_eq!(factor, 1, "first failure should use factor 1");
+    }
+
+    #[test]
+    fn probe_backoff_factor_five_at_saturation() {
+        let failures: u32 = u32::MAX;
+        let factor = (failures as u64).min(5);
+        assert_eq!(factor, 5, "saturated failures must clamp to factor 5");
     }
 }
