@@ -1,5 +1,8 @@
 # tokio-prompt-orchestrator
 
+[![Star History Chart](https://api.star-history.com/svg?repos=Mattbusel/tokio-prompt-orchestrator&type=Date)](https://star-history.com/#Mattbusel/tokio-prompt-orchestrator)
+
+
 [![Rust](https://img.shields.io/badge/rust-1.79%2B-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-1491_passing-brightgreen.svg)]()
