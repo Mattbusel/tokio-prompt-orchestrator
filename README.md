@@ -162,3 +162,21 @@ This orchestrator is built on a set of standalone Rust primitives. Each is indep
 **Related tools:**
 - [Every-Other-Token](https://github.com/Mattbusel/Every-Other-Token) -- token-level LLM research tool whose telemetry feeds HelixRouter which feeds this orchestrator
 - [llm-cpp](https://github.com/Mattbusel/llm-cpp) -- C++ side of the stack; 26 single-header libraries for the same problem domain
+
+---
+
+## Why not LangChain / LlamaIndex / CrewAI?
+
+| | tokio-prompt-orchestrator | LangChain / LlamaIndex | CrewAI |
+|---|---|---|---|
+| Language | Rust | Python | Python |
+| Latency overhead | Nanoseconds | Milliseconds | Milliseconds |
+| Memory safety | Compile-time | Runtime | Runtime |
+| Backpressure | Bounded channels, shed | Not built-in | Not built-in |
+| Circuit breaker | Built-in | Plugin/manual | Not built-in |
+| Dedup collapse | 67% in production | Not built-in | Not built-in |
+| Self-improving loop | Live, autonomous | Not built-in | Not built-in |
+| Concurrency | Tokio async, zero-copy | Python GIL | Python GIL |
+| Binary size | 4 MB (LTO) | 100s of MB deps | 100s of MB deps |
+
+If you need to prototype fast in Python, use LangChain. If you need to run at scale with predictable latency, zero panics, and autonomous self-optimization - this is the stack.
