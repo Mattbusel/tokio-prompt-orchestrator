@@ -142,3 +142,20 @@ The infrastructure here — bounded pipelines, adaptive routing, multi-model fai
 ## License
 
 MIT
+
+---
+
+## Ecosystem
+
+This orchestrator is built on a set of standalone Rust primitives. Each is independently usable:
+
+| Crate | Role in the orchestrator |
+|---|---|
+| [tokio-agent-memory](https://github.com/Mattbusel/tokio-agent-memory) | Agent memory bus -- episodic recall for the self-improving loop |
+| [llm-budget](https://github.com/Mattbusel/llm-budget) | Hard cost enforcement across the agent fleet |
+| [llm-sync](https://github.com/Mattbusel/llm-sync) | CRDT state sync for distributed multi-node deployments |
+| [fin-stream](https://github.com/Mattbusel/fin-stream) | Lock-free ingestion pipeline -- same pattern as the inference queue |
+
+**Related tools:**
+- [Every-Other-Token](https://github.com/Mattbusel/Every-Other-Token) -- token-level LLM research tool whose telemetry feeds HelixRouter which feeds this orchestrator
+- [llm-cpp](https://github.com/Mattbusel/llm-cpp) -- C++ side of the stack; 26 single-header libraries for the same problem domain
