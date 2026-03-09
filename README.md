@@ -180,3 +180,9 @@ This orchestrator is built on a set of standalone Rust primitives. Each is indep
 | Binary size | 4 MB (LTO) | 100s of MB deps | 100s of MB deps |
 
 If you need to prototype fast in Python, use LangChain. If you need to run at scale with predictable latency, zero panics, and autonomous self-optimization - this is the stack.
+
+---
+## Related Projects by @Mattbusel
+- [rust-crates](https://github.com/Mattbusel/rust-crates) -- Production-grade Rust crates for LLM agent infrastructure
+- [tokio-agent-memory](https://github.com/Mattbusel/tokio-agent-memory) -- Episodic and semantic memory layer for async Tokio agents
+- [Every-Other-Token](https://github.com/Mattbusel/Every-Other-Token) -- LLM token interpretability and streaming perplexity visualization
