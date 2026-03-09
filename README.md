@@ -1,15 +1,52 @@
 # tokio-prompt-orchestrator
 
+[![CI](https://github.com/Mattbusel/tokio-prompt-orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/Mattbusel/tokio-prompt-orchestrator/actions/workflows/ci.yml)
+[![Rust 1.79+](https://img.shields.io/badge/rust-1.79%2B-orange.svg)](https://www.rust-lang.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![unsafe forbidden](https://img.shields.io/badge/unsafe-forbidden-success.svg)](https://github.com/Mattbusel/tokio-prompt-orchestrator)
+[![Tests](https://img.shields.io/badge/tests-1491_passing-brightgreen.svg)](https://github.com/Mattbusel/tokio-prompt-orchestrator/actions)
+
 [![Star History Chart](https://api.star-history.com/svg?repos=Mattbusel/tokio-prompt-orchestrator&type=Date)](https://star-history.com/#Mattbusel/tokio-prompt-orchestrator)
-
-
-[![Rust](https://img.shields.io/badge/rust-1.79%2B-orange.svg)](https://www.rust-lang.org/)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-1491_passing-brightgreen.svg)]()
 
 We ran 24 Claude Code agents simultaneously on a single RTX 4070. They wrote this codebase in one night — 58,000+ lines of Rust, 1,491 tests, zero panics — while the orchestrator they were building managed their own inference traffic. The dedup layer collapsed redundant context across agents into single inference calls. Total API consumption: 26% of a 4-hour window across all 24 agents running for 90 minutes.
 
 Anthropic's documented ceiling is 16 concurrent agents. We hit 24 and the bottleneck was the API rate limit, not the orchestrator.
+
+## Library Usage
+
+```toml
+# Cargo.toml
+[dependencies]
+tokio-prompt-orchestrator = { git = "https://github.com/Mattbusel/tokio-prompt-orchestrator" }
+tokio = { version = "1", features = ["full"] }
+```
+
+```rust
+use tokio_prompt_orchestrator::{
+    Pipeline, PipelineConfig, EchoWorker, InferenceRequest,
+};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Build a pipeline with an echo worker (swap in OpenAI/Anthropic/llama.cpp worker)
+    let config = PipelineConfig::default();
+    let worker = EchoWorker::new();
+    let pipeline = Pipeline::new(config, worker).await?;
+
+    // Submit a request — dedup, circuit breaker, retry all happen transparently
+    let req = InferenceRequest::new("Explain backpressure in one sentence.");
+    let response = pipeline.infer(req).await?;
+
+    println!("{}", response.text);
+    // Dedup collapse rate, circuit breaker state, latency percentiles visible
+    // in the TUI: `cargo run --bin tui --features tui`
+    Ok(())
+}
+```
+
+See [`examples/`](examples/) for full working examples with OpenAI, Anthropic, llama.cpp, vLLM, REST, WebSocket, SSE streaming, and multi-worker setups.
+
+---
 
 ## Live Dashboard
 
@@ -141,6 +178,16 @@ The inference cost problem is not solved at the model layer — it's solved at t
 The recent leap: the self-improving modules are no longer scaffolding. They run. `SelfImprovementLoop` is a live background service. `IntelligenceBridge` is a closed feedback loop between quality estimation and routing. `CapabilityDiscovery` actually executes `cargo check` and `cargo audit`. The system now improves itself while serving inference.
 
 The infrastructure here — bounded pipelines, adaptive routing, multi-model failover, MCP-native tooling, agent fleet coordination, autonomous optimization — is the substrate every serious LLM deployment will need. We built it in one night with 24 agents. The orchestrator managed its own construction. It is now managing its own improvement.
+
+## Safety
+
+This crate uses `#![forbid(unsafe_code)]`. No unsafe blocks exist in production code paths.
+Lints `clippy::unwrap_used`, `clippy::expect_used`, and `clippy::panic` are set to `deny` — the same policy used to build this codebase with 24 concurrent agents without a single runtime panic.
+
+## Minimum Supported Rust Version
+
+This crate requires Rust **1.79 or later**. The MSRV is tested in CI on every push.
+Changes to the MSRV are treated as semver minor bumps.
 
 ## License
 

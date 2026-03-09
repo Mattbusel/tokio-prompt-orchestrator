@@ -8,16 +8,54 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - name: Build
-        run: cargo build
-      - name: Test
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy -- -D warnings
+
+      - name: clippy (all features)
+        run: cargo clippy --features "full,mcp" -- -D warnings
+        if: runner.os == 'Linux'
+
+      - name: test (default)
         run: cargo test
 
+      - name: test (all features)
+        run: cargo test --features "full,mcp"
+        if: runner.os == 'Linux'
+
+  msrv:
+    name: MSRV (1.79)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.79
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build
+
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

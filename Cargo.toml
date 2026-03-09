@@ -3,6 +3,15 @@ name = "tokio-prompt-orchestrator"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.79"
+description = "Multi-core Tokio-native orchestration for LLM inference pipelines — dedup, circuit breakers, backpressure, MCP, and autonomous self-improvement"
+documentation = "https://docs.rs/tokio-prompt-orchestrator"
+homepage = "https://github.com/Mattbusel/tokio-prompt-orchestrator"
+repository = "https://github.com/Mattbusel/tokio-prompt-orchestrator"
+license = "MIT"
+readme = "README.md"
+keywords = ["tokio", "llm", "orchestration", "circuit-breaker", "async"]
+categories = ["asynchronous", "network-programming", "web-programming"]
+exclude = [".github", "scripts", "assets", "docs", "benches"]
 
 [dependencies]
 # Core
