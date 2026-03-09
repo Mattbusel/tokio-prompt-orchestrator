@@ -85,13 +85,10 @@ impl LiveTuning {
     ///
     /// This function never panics.
     pub fn get(&self, id: ParameterId) -> f64 {
-        self.cells
-            .get(&id)
-            .map(|c| c.load())
-            .unwrap_or_else(|| {
-                let spec = ParameterSpec::default_for(id);
-                (spec.min + spec.max) / 2.0
-            })
+        self.cells.get(&id).map(|c| c.load()).unwrap_or_else(|| {
+            let spec = ParameterSpec::default_for(id);
+            (spec.min + spec.max) / 2.0
+        })
     }
 
     /// Update the value for a single parameter, clamping to the allowed range.
@@ -125,7 +122,10 @@ impl LiveTuning {
         if adjustments.is_empty() {
             return;
         }
-        info!(count = adjustments.len(), "LiveTuning: applying controller adjustments");
+        info!(
+            count = adjustments.len(),
+            "LiveTuning: applying controller adjustments"
+        );
         for &(id, value) in adjustments {
             self.set(id, value);
         }
@@ -516,7 +516,9 @@ mod tests {
         let a = make();
         let b = a.clone();
         a.set(ParameterId::DedupTtlMs, 77777.0);
-        assert!((b.get(ParameterId::DedupTtlMs) - a.get(ParameterId::DedupTtlMs)).abs() < f64::EPSILON);
+        assert!(
+            (b.get(ParameterId::DedupTtlMs) - a.get(ParameterId::DedupTtlMs)).abs() < f64::EPSILON
+        );
     }
 
     #[test]

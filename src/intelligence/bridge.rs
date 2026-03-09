@@ -139,9 +139,7 @@ impl IntelligenceBridge {
             min_history_points: config.autoscaler_min_history,
             ..AutoscalerConfig::default()
         };
-        let model_router = config
-            .routing
-            .map(|rc| Arc::new(ModelRouter::new(rc)));
+        let model_router = config.routing.map(|rc| Arc::new(ModelRouter::new(rc)));
         Self {
             learned_router: Arc::new(LearnedRouter::new(config.router)),
             feedback: Arc::new(FeedbackCollector::new(config.max_feedback_entries)),

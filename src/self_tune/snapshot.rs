@@ -786,8 +786,11 @@ impl RedisSnapshotStore {
         };
 
         let key = Self::redis_key(snapshot.version);
-        let result: Result<(), redis::RedisError> =
-            redis::cmd("SET").arg(&key).arg(&json).query_async(&mut conn).await;
+        let result: Result<(), redis::RedisError> = redis::cmd("SET")
+            .arg(&key)
+            .arg(&json)
+            .query_async(&mut conn)
+            .await;
 
         if let Err(e) = result {
             tracing::warn!(
@@ -863,7 +866,9 @@ impl RedisSnapshotStore {
         source: SnapshotSource,
         description: impl Into<String>,
     ) -> Result<ConfigSnapshot, SnapshotError> {
-        let snapshot = self.inner.create_snapshot(parameters, metric_scores, source, description)?;
+        let snapshot =
+            self.inner
+                .create_snapshot(parameters, metric_scores, source, description)?;
         self.persist_to_redis(&snapshot).await;
         Ok(snapshot)
     }

@@ -42,9 +42,7 @@ fn make_probe_at(base_url: &str, bus: TelemetryBus) -> HelixPressureProbe {
 
 fn stats_json(pressure: f64, dropped: u64, completed: u64) -> String {
     // Minimal HelixRouter /api/stats body consumed by HelixStats.
-    format!(
-        r#"{{"pressure_score":{pressure},"dropped":{dropped},"completed":{completed}}}"#
-    )
+    format!(r#"{{"pressure_score":{pressure},"dropped":{dropped},"completed":{completed}}}"#)
 }
 
 // ---------------------------------------------------------------------------
@@ -57,10 +55,7 @@ async fn probe_fetch_pressure_reflects_pressure_score() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api/stats"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_string(stats_json(0.75, 0, 100)),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_string(stats_json(0.75, 0, 100)))
         .mount(&server)
         .await;
 
@@ -92,10 +87,7 @@ async fn probe_combined_pressure_uses_drop_rate_when_higher() {
     // pressure_score=0.1, drop_rate=80/(80+20)=0.8 → combined=0.8
     Mock::given(method("GET"))
         .and(path("/api/stats"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_string(stats_json(0.1, 80, 20)),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_string(stats_json(0.1, 80, 20)))
         .mount(&server)
         .await;
 
@@ -161,10 +153,7 @@ async fn probe_zero_jobs_uses_pressure_score_directly() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api/stats"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_string(stats_json(0.45, 0, 0)),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_string(stats_json(0.45, 0, 0)))
         .mount(&server)
         .await;
 
@@ -190,11 +179,9 @@ async fn probe_ignores_unknown_json_fields() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api/stats"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_string(
-                r#"{"pressure_score":0.3,"dropped":0,"completed":50,"future_field":42}"#,
-            ),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{"pressure_score":0.3,"dropped":0,"completed":50,"future_field":42}"#,
+        ))
         .mount(&server)
         .await;
 

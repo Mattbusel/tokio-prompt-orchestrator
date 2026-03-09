@@ -170,7 +170,11 @@ async fn main() {
     let monitor_handle = monitor.start_monitoring(shutdown_rx.clone());
 
     // Optional: self-improvement loop (requires self-improving feature flag)
-    #[cfg(all(feature = "self-tune", feature = "self-modify", feature = "intelligence"))]
+    #[cfg(all(
+        feature = "self-tune",
+        feature = "self-modify",
+        feature = "intelligence"
+    ))]
     let _sil_handle = if args.self_improve {
         use tokio_prompt_orchestrator::{
             self_improve::{LoopConfig, SelfImprovingLoop},
@@ -185,7 +189,11 @@ async fn main() {
     } else {
         None
     };
-    #[cfg(not(all(feature = "self-tune", feature = "self-modify", feature = "intelligence")))]
+    #[cfg(not(all(
+        feature = "self-tune",
+        feature = "self-modify",
+        feature = "intelligence"
+    )))]
     if args.self_improve {
         eprintln!("Warning: --self-improve requires --features self-improving at compile time");
     }

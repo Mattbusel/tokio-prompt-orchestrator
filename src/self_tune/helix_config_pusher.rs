@@ -137,7 +137,11 @@ impl HelixConfigPusher {
             .build()
             .unwrap_or_default();
 
-        Self { config, tuning, client }
+        Self {
+            config,
+            tuning,
+            client,
+        }
     }
 
     /// Run the push loop indefinitely.
@@ -297,13 +301,19 @@ mod tests {
 
     #[test]
     fn patch_with_threshold_is_not_empty() {
-        let patch = ConfigPatch { backpressure_busy_threshold: Some(5), ..Default::default() };
+        let patch = ConfigPatch {
+            backpressure_busy_threshold: Some(5),
+            ..Default::default()
+        };
         assert!(!patch.is_empty());
     }
 
     #[test]
     fn patch_serializes_with_skip_none() {
-        let patch = ConfigPatch { backpressure_busy_threshold: Some(7), ..Default::default() };
+        let patch = ConfigPatch {
+            backpressure_busy_threshold: Some(7),
+            ..Default::default()
+        };
         let json = serde_json::to_string(&patch).expect("serialize");
         assert!(json.contains("backpressure_busy_threshold"));
         assert!(json.contains("7"));

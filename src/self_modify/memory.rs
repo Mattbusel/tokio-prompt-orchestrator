@@ -614,10 +614,7 @@ mod redis_memory {
         /// # Panics
         /// This function never panics.
         pub fn get_modification(&self, id: &str) -> Option<ModificationRecord> {
-            self.inner
-                .modifications()
-                .into_iter()
-                .find(|r| r.id == id)
+            self.inner.modifications().into_iter().find(|r| r.id == id)
         }
 
         /// Return all modification records (newest first).

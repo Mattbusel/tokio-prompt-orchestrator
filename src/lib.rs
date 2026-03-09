@@ -40,7 +40,11 @@ pub mod intelligence;
 #[cfg(feature = "evolution")]
 pub mod evolution;
 
-#[cfg(all(feature = "self-tune", feature = "self-modify", feature = "intelligence"))]
+#[cfg(all(
+    feature = "self-tune",
+    feature = "self-modify",
+    feature = "intelligence"
+))]
 pub mod self_improve;
 
 #[cfg(all(feature = "self-tune", feature = "self-modify"))]
@@ -51,7 +55,9 @@ pub mod tui;
 
 // Re-exports
 pub use stages::{spawn_pipeline, LogSink, OutputSink, PipelineHandles, SinkError};
-pub use worker::{AnthropicWorker, EchoWorker, LlamaCppWorker, ModelWorker, OpenAiWorker, VllmWorker};
+pub use worker::{
+    AnthropicWorker, EchoWorker, LlamaCppWorker, ModelWorker, OpenAiWorker, VllmWorker,
+};
 
 /// Orchestrator-specific errors
 #[derive(Error, Debug)]
@@ -173,7 +179,14 @@ mod tests {
     #[test]
     fn test_shard_session_distribution() {
         let sessions: Vec<_> = (0..100).map(|i| SessionId::new(format!("s-{i}"))).collect();
-        let counts: Vec<_> = (0..4usize).map(|sh| sessions.iter().filter(|s| shard_session(s, 4) == sh).count()).collect();
+        let counts: Vec<_> = (0..4usize)
+            .map(|sh| {
+                sessions
+                    .iter()
+                    .filter(|s| shard_session(s, 4) == sh)
+                    .count()
+            })
+            .collect();
         assert!(counts.iter().all(|&c| c > 0));
     }
 }

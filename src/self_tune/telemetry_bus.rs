@@ -554,9 +554,7 @@ impl TelemetryBus {
                 .sum();
             (fill_sum / stages.len() as f64).min(1.0)
         };
-        let ext_milli = inner
-            .external_pressure_milli
-            .load(Ordering::Relaxed);
+        let ext_milli = inner.external_pressure_milli.load(Ordering::Relaxed);
         let pressure = if ext_milli > 0 {
             let ext = ext_milli as f64 / 1000.0;
             ((internal_pressure + ext) / 2.0).min(1.0)
@@ -970,7 +968,10 @@ mod tests {
         bus.set_external_pressure(0.3);
         bus.set_external_pressure(0.9);
         let v = bus.external_pressure();
-        assert!((v - 0.9).abs() < 0.002, "expected ~0.9 after overwrite, got {v}");
+        assert!(
+            (v - 0.9).abs() < 0.002,
+            "expected ~0.9 after overwrite, got {v}"
+        );
     }
 
     #[tokio::test]
@@ -980,8 +981,15 @@ mod tests {
         // Blended = (0.0 + 0.6) / 2 = 0.3.
         bus.set_external_pressure(0.6);
         let snap = bus.tick_now().await;
-        assert!(snap.pressure > 0.0, "blended pressure should be > 0 when external is set");
-        assert!((snap.pressure - 0.3).abs() < 0.002, "expected 0.3, got {}", snap.pressure);
+        assert!(
+            snap.pressure > 0.0,
+            "blended pressure should be > 0 when external is set"
+        );
+        assert!(
+            (snap.pressure - 0.3).abs() < 0.002,
+            "expected 0.3, got {}",
+            snap.pressure
+        );
     }
 
     #[tokio::test]
@@ -998,6 +1006,10 @@ mod tests {
         // External = 1.0, internal = 0.0 → blended = 0.5
         bus.set_external_pressure(1.0);
         let snap = bus.tick_now().await;
-        assert!((snap.pressure - 0.5).abs() < 0.002, "expected 0.5, got {}", snap.pressure);
+        assert!(
+            (snap.pressure - 0.5).abs() < 0.002,
+            "expected 0.5, got {}",
+            snap.pressure
+        );
     }
 }

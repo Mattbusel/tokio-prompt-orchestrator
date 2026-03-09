@@ -53,8 +53,8 @@ async fn main() {
     );
 
     // ── Send demo requests ───────────────────────────────────────────────────
-    use tokio_prompt_orchestrator::{PromptRequest, SessionId};
     use std::collections::HashMap;
+    use tokio_prompt_orchestrator::{PromptRequest, SessionId};
 
     for i in 0u64..50 {
         let req = PromptRequest {

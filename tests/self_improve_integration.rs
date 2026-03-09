@@ -189,9 +189,7 @@ async fn test_loop_with_components_processes_snapshots() {
     use tokio_prompt_orchestrator::{
         self_modify::{AgentMemory, GateConfig, MetaTaskGenerator, ValidationGate},
         self_tune::{
-            anomaly::AnomalyDetector,
-            controller::TuningController,
-            snapshot::SnapshotStore,
+            anomaly::AnomalyDetector, controller::TuningController, snapshot::SnapshotStore,
         },
     };
 

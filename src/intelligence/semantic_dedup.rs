@@ -462,7 +462,9 @@ mod tests {
     #[test]
     fn test_insert_then_lookup_same_text_finds_match() {
         let dedup = SemanticDedup::new(SemanticDedupConfig::default());
-        let key = dedup.insert("hello world", Some("response-1".into())).unwrap();
+        let key = dedup
+            .insert("hello world", Some("response-1".into()))
+            .unwrap();
         let result = dedup.lookup("hello world").unwrap();
         assert!(result.is_some(), "lookup should find exact match");
         let m = result.unwrap();
