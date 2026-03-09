@@ -269,7 +269,10 @@ log_format = "pretty"
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            assert!(remaining > Duration::ZERO, "timed out waiting for updated config");
+            assert!(
+                remaining > Duration::ZERO,
+                "timed out waiting for updated config"
+            );
             let result = tokio::time::timeout(remaining, rx.recv()).await;
             assert!(result.is_ok(), "should receive config update within 5s");
             let config = result.expect("test: timeout").expect("test: recv");
