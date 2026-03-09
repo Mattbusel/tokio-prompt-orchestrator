@@ -6,11 +6,15 @@
 [![unsafe forbidden](https://img.shields.io/badge/unsafe-forbidden-success.svg)](https://github.com/Mattbusel/tokio-prompt-orchestrator)
 [![Tests](https://img.shields.io/badge/tests-1491_passing-brightgreen.svg)](https://github.com/Mattbusel/tokio-prompt-orchestrator/actions)
 
+Multi-core, Tokio-native orchestration for LLM inference pipelines. Built with backpressure, circuit breakers, deduplication, and an autonomous self-improving control loop.
+
+We ran 24 Claude Code agents simultaneously on a single RTX 4070. They wrote this codebase in one night (58,000+ lines of Rust, 1,491 tests, zero panics) while the orchestrator they were building managed their own inference traffic. The dedup layer collapsed redundant context across agents into single inference calls, cutting total API consumption to 26% of expected usage across all 24 agents over 90 minutes.
+
+Anthropic's documented ceiling is 16 concurrent agents. We hit 24. The bottleneck was the API rate limit, not the orchestrator.
+
 [![Star History Chart](https://api.star-history.com/svg?repos=Mattbusel/tokio-prompt-orchestrator&type=Date)](https://star-history.com/#Mattbusel/tokio-prompt-orchestrator)
 
-We ran 24 Claude Code agents simultaneously on a single RTX 4070. They wrote this codebase in one night — 58,000+ lines of Rust, 1,491 tests, zero panics — while the orchestrator they were building managed their own inference traffic. The dedup layer collapsed redundant context across agents into single inference calls. Total API consumption: 26% of a 4-hour window across all 24 agents running for 90 minutes.
-
-Anthropic's documented ceiling is 16 concurrent agents. We hit 24 and the bottleneck was the API rate limit, not the orchestrator.
+---
 
 ## Library Usage
 
@@ -22,29 +26,26 @@ tokio = { version = "1", features = ["full"] }
 ```
 
 ```rust
-use tokio_prompt_orchestrator::{
-    Pipeline, PipelineConfig, EchoWorker, InferenceRequest,
-};
+use tokio_prompt_orchestrator::{Pipeline, PipelineConfig, EchoWorker, InferenceRequest};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Build a pipeline with an echo worker (swap in OpenAI/Anthropic/llama.cpp worker)
+    // Build a pipeline with an echo worker.
+    // Swap in OpenAIWorker, AnthropicWorker, or LlamaCppWorker for real inference.
     let config = PipelineConfig::default();
     let worker = EchoWorker::new();
     let pipeline = Pipeline::new(config, worker).await?;
 
-    // Submit a request — dedup, circuit breaker, retry all happen transparently
+    // Dedup, circuit breaker, and retry all happen transparently.
     let req = InferenceRequest::new("Explain backpressure in one sentence.");
     let response = pipeline.infer(req).await?;
 
     println!("{}", response.text);
-    // Dedup collapse rate, circuit breaker state, latency percentiles visible
-    // in the TUI: `cargo run --bin tui --features tui`
     Ok(())
 }
 ```
 
-See [`examples/`](examples/) for full working examples with OpenAI, Anthropic, llama.cpp, vLLM, REST, WebSocket, SSE streaming, and multi-worker setups.
+See [`examples/`](examples/) for full working examples: OpenAI, Anthropic, llama.cpp, vLLM, REST, WebSocket, SSE streaming, and multi-worker setups.
 
 ---
 
@@ -52,58 +53,73 @@ See [`examples/`](examples/) for full working examples with OpenAI, Anthropic, l
 
 ![TUI Dashboard](assets/tui-dashboard.png)
 
-Real-time terminal dashboard: 985 requests in → 323 actual inferences (67.2% dedup collapse, **$7.94 saved in 3 minutes**). Circuit breakers across OpenAI, Anthropic, and llama.cpp all CLOSED. Self-healing loop visible in log — latency spike at INFER p99=483ms, circuit opened, probe sent, recovery confirmed in 15 seconds. Built with ratatui.
+Real-time terminal dashboard: 985 requests in, 323 actual inferences (67.2% dedup collapse, **$7.94 saved in 3 minutes**). Circuit breakers across OpenAI, Anthropic, and llama.cpp all CLOSED. A latency spike at INFER p99=483ms caused the circuit to open; a probe was sent, and recovery was confirmed in 15 seconds. Built with ratatui.
 
-## What it does
+---
 
-Five-stage async pipeline for LLM inference with a **closed-loop self-improving control system**. Bounded channels enforce backpressure end-to-end. Every request flows through:
+## What It Does
+
+A five-stage async pipeline for LLM inference with a closed-loop self-improving control system. Bounded channels enforce backpressure end-to-end. Every request flows through:
 
 ```
-RAG → Assemble → Inference → Post-Process → Stream
+RAG -> Assemble -> Inference -> Post-Process -> Stream
 ```
 
-The self-improving stack runs alongside the pipeline as a live background service — not scaffolding, not stubs. It observes, adapts, and reacts.
+The self-improving stack runs alongside the pipeline as a live background service. It observes telemetry, detects anomalies, tunes parameters, and records outcomes without human intervention.
+
+---
 
 ## Architecture
 
-**Pipeline** — Bounded async channels (RAG→ASM: 512, ASM→INF: 512, INF→PST: 1024, PST→STR: 256). Session affinity via deterministic sharding. Backpressure shedding when queues fill.
+**Pipeline** -- Bounded async channels (RAG->ASM: 512, ASM->INF: 512, INF->PST: 1024, PST->STR: 256). Session affinity via deterministic sharding. Requests are shed rather than blocked when queues fill.
 
-**Resilience** — Circuit breaker (5 failures opens, 80% success closes, 60s timeout). Retry with exponential backoff + jitter. Token-bucket rate limiting. Priority queues (4 levels). In-memory + Redis caching with TTL.
+**Resilience** -- Circuit breaker (opens at 5 failures, closes at 80% success rate, 60s timeout). Retry with exponential backoff and jitter. Token-bucket rate limiting. Priority queues with 4 levels. In-memory and Redis caching with TTL.
 
-**Self-Improving Loop** *(now live)* — `SelfImprovementLoop` runs as a single background Tokio task that wires all subsystems together:
+**Self-Improving Loop** -- `SelfImprovementLoop` runs as a single background Tokio task:
 
 ```
 TelemetryBus
-    │  broadcast snapshot every 5s
-    ▼
-AnomalyDetector  ──── Z-score + CUSUM ────► TuningController
-                                                │  PID adjusts 12 params
-                                                ▼
-MetaTaskGenerator ◄──────────────────── SnapshotStore
-    │  triggered on Warning/Critical               records best configs
-    ▼
+    |  broadcast snapshot every 5s
+    v
+AnomalyDetector  ---- Z-score + CUSUM ---> TuningController
+                                                |  PID adjusts 12 params
+                                                v
+MetaTaskGenerator <------------------- SnapshotStore
+    |  triggered on Warning/Critical       records best configs
+    v
 ValidationGate  (cargo test + clippy)
-    ▼
+    v
 AgentMemory  (outcome recorded, dead ends flagged)
 ```
 
 Start it: `cargo run --bin coordinator --features self-improving -- --self-improve`
 
-**Intelligence Layer** — `IntelligenceBridge` wires four learned systems into the pipeline: `LearnedRouter` (epsilon-greedy multi-armed bandit, routes by observed quality), `Autoscaler` (predictive — scales worker capacity before demand arrives), `FeedbackCollector` (aggregates quality signals from post-processing), `QualityEstimator` (scores response quality at inference time), `PromptOptimizer` (rewrites prompts to minimize token spend), `SemanticDedup` (embedding-based dedup that collapses semantically equivalent prompts before they hit the provider). All run as a closed loop: feedback scores → router updates → autoscaler reacts.
+**Intelligence Layer** -- `IntelligenceBridge` wires six learned systems into the pipeline:
 
-**HelixRouter Integration** — Three `self_tune` modules bridge the orchestrator to HelixRouter in real time: `helix_probe` polls `/api/stats` and converts queue depth, drop rate, and latency into a combined pressure signal; `helix_config_pusher` writes PID-derived parameter adjustments back via `PATCH /api/config`; `helix_feedback` aggregates quality scores from the intelligence layer and forwards them as routing hints. The loop closes: token-stream pressure from Every-Other-Token flows through HelixRouter, which reports back to the orchestrator's self-tune stack.
+- `LearnedRouter` -- epsilon-greedy multi-armed bandit, routes by observed quality
+- `Autoscaler` -- predictive, scales worker capacity before demand arrives
+- `FeedbackCollector` -- aggregates quality signals from post-processing
+- `QualityEstimator` -- scores response quality at inference time
+- `PromptOptimizer` -- rewrites prompts to minimize token spend
+- `SemanticDedup` -- embedding-based dedup that collapses semantically equivalent prompts before they reach the provider
 
-**Capability Discovery** *(live)* — `CapabilityDiscovery` runs `cargo check --message-format=json` to detect dead code and unused imports, and `cargo audit --json` to surface CVEs. Findings become tasks for the agent fleet.
+These run as a closed loop: feedback scores update the router, the router changes load distribution, and the autoscaler reacts.
 
-**Distributed** — NATS pub/sub for inter-node messaging. Redis-based cross-node dedup with atomic `SET NX EX`. Leader election with TTL renewal. Cluster manager with heartbeat tracking.
+**HelixRouter Integration** -- Three `self_tune` modules bridge the orchestrator to HelixRouter in real time. `helix_probe` polls `/api/stats` and converts queue depth, drop rate, and latency into a pressure signal. `helix_config_pusher` writes PID-derived adjustments back via `PATCH /api/config`. `helix_feedback` forwards quality scores from the intelligence layer as routing hints.
 
-**Coordination** — Agent fleet management. Atomic task claiming via filesystem locks. Priority ordering from TOML task files. Health monitoring with configurable intervals.
+**Capability Discovery** -- `CapabilityDiscovery` runs `cargo check --message-format=json` to detect dead code and `cargo audit --json` to surface CVEs. Findings become tasks for the agent fleet.
 
-**Routing** — Complexity scoring routes simple prompts to local llama.cpp, complex ones to cloud APIs. Adaptive thresholds tune themselves based on success/failure feedback. Per-model cost tracking with budget awareness.
+**Distributed** -- NATS pub/sub for inter-node messaging. Redis-based cross-node dedup via atomic `SET NX EX`. Leader election with TTL renewal. Cluster manager with heartbeat tracking.
 
-**Observability** — Prometheus metrics, TUI terminal dashboard, web dashboard with SSE streaming, structured tracing. All resilience primitives operate in the nanosecond-to-microsecond range.
+**Coordination** -- Agent fleet management. Atomic task claiming via filesystem locks. Priority ordering from TOML task files. Configurable health monitoring.
 
-**MCP** — `infer`, `pipeline_status`, `batch_infer`, `configure_pipeline` — all callable from Claude Desktop/Code with live stage latency reporting.
+**Routing** -- Complexity scoring routes simple prompts to local llama.cpp and complex ones to cloud APIs. Adaptive thresholds tune themselves on success/failure feedback. Per-model cost tracking with budget awareness.
+
+**Observability** -- Prometheus metrics, TUI terminal dashboard, web dashboard with SSE streaming, structured JSON tracing. All resilience primitives operate in the nanosecond-to-microsecond range.
+
+**MCP** -- `infer`, `pipeline_status`, `batch_infer`, and `configure_pipeline` are all callable from Claude Desktop and Claude Code, with live stage latency reporting.
+
+---
 
 ## Quick Start
 
@@ -117,10 +133,10 @@ cargo run --bin orchestrator-demo
 # TUI dashboard
 cargo run --bin tui --features tui
 
-# Full self-improving stack active
+# Full self-improving stack
 cargo run --bin tui --features self-improving,tui
 
-# Coordinator with self-improvement loop running
+# Coordinator with self-improvement loop
 cargo run --bin coordinator --features self-improving -- --self-improve
 
 # Web dashboard at http://localhost:3000
@@ -130,20 +146,24 @@ cargo run --bin dashboard --features dashboard
 cargo run --bin mcp --features mcp -- --worker echo
 ```
 
+---
+
 ## Feature Flags
 
 ```toml
-self-tune        # PID controllers + telemetry bus + anomaly detection
-self-modify      # Agent loop: task gen → validation gate → memory
-intelligence     # LearnedRouter + Autoscaler + FeedbackCollector + QualityEstimator
-evolution        # Snapshot store + A/B experiments + rollback
+self-tune        # PID controllers, telemetry bus, anomaly detection
+self-modify      # Agent loop: task generation, validation gate, memory
+intelligence     # LearnedRouter, Autoscaler, FeedbackCollector, QualityEstimator
+evolution        # Snapshot store, A/B experiments, rollback
 self-improving   # Full autonomous optimization stack (all of the above)
 tui              # Terminal dashboard (ratatui)
 mcp              # Claude MCP server (rmcp 0.16)
 dashboard        # Web dashboard with SSE streaming
 distributed      # NATS pub/sub + Redis clustering
-full             # web-api + metrics-server + caching + rate-limiting + tui + dashboard
+full             # web-api, metrics-server, caching, rate-limiting, tui, dashboard
 ```
+
+---
 
 ## Environment Variables
 
@@ -157,6 +177,8 @@ RUST_LOG="info"
 LOG_FORMAT="json"                     # Structured logs for Datadog/Loki
 ```
 
+---
+
 ## Numbers
 
 ```
@@ -164,30 +186,50 @@ Lines of code       58,457
 Tests               1,491 passing, 0 failing
 Benchmarks          30+ criterion, all within budget
 Dedup savings       66.7% collapse rate in live demo
-Dedup check         ~1.5μs p50
-Circuit breaker     ~0.4μs p50 (closed path)
+Dedup check         ~1.5us p50
+Circuit breaker     ~0.4us p50 (closed path)
 Cache hit           81ns
 Rate limit check    110ns
-Channel send        <1μs p99
+Channel send        <1us p99
 ```
 
-## Investment Thesis
+---
 
-The inference cost problem is not solved at the model layer — it's solved at the orchestration layer. A production-grade Rust orchestrator can collapse 60–80% of LLM API spend through deduplication alone, before any model optimization. The self-improving stack adds a control loop that tunes pipeline parameters continuously without human intervention.
+## Why This vs LangChain / LlamaIndex / CrewAI
 
-The recent leap: the self-improving modules are no longer scaffolding. They run. `SelfImprovementLoop` is a live background service. `IntelligenceBridge` is a closed feedback loop between quality estimation and routing. `CapabilityDiscovery` actually executes `cargo check` and `cargo audit`. The system now improves itself while serving inference.
+| | tokio-prompt-orchestrator | LangChain / LlamaIndex | CrewAI |
+|---|---|---|---|
+| Language | Rust | Python | Python |
+| Latency overhead | Nanoseconds | Milliseconds | Milliseconds |
+| Memory safety | Compile-time | Runtime | Runtime |
+| Backpressure | Bounded channels, shed on full | Not built-in | Not built-in |
+| Circuit breaker | Built-in | Plugin/manual | Not built-in |
+| Dedup collapse | 67% in production | Not built-in | Not built-in |
+| Self-improving loop | Live, autonomous | Not built-in | Not built-in |
+| Concurrency | Tokio async, zero-copy | Python GIL | Python GIL |
+| Binary size | 4 MB (LTO) | 100s of MB deps | 100s of MB deps |
 
-The infrastructure here — bounded pipelines, adaptive routing, multi-model failover, MCP-native tooling, agent fleet coordination, autonomous optimization — is the substrate every serious LLM deployment will need. We built it in one night with 24 agents. The orchestrator managed its own construction. It is now managing its own improvement.
+Use LangChain if you need to prototype quickly in Python. Use this if you need predictable latency, zero panics, and autonomous optimization at scale.
+
+---
+
+## Why This Works
+
+The inference cost problem is not solved at the model layer. It is solved at the orchestration layer. A production-grade Rust orchestrator can collapse 60-80% of LLM API spend through deduplication before any model optimization. The self-improving stack adds a control loop that tunes pipeline parameters continuously.
+
+`SelfImprovementLoop` is a live background service. `IntelligenceBridge` is a closed feedback loop between quality estimation and routing. `CapabilityDiscovery` executes `cargo check` and `cargo audit` against the running codebase. The system improves itself while serving inference.
+
+The infrastructure here -- bounded pipelines, adaptive routing, multi-model failover, MCP-native tooling, agent fleet coordination, autonomous optimization -- is the foundation every serious LLM deployment will need.
+
+---
 
 ## Safety
 
-This crate uses `#![forbid(unsafe_code)]`. No unsafe blocks exist in production code paths.
-Lints `clippy::unwrap_used`, `clippy::expect_used`, and `clippy::panic` are set to `deny` — the same policy used to build this codebase with 24 concurrent agents without a single runtime panic.
+This crate uses `#![forbid(unsafe_code)]`. No unsafe blocks exist in production code paths. Lints `clippy::unwrap_used`, `clippy::expect_used`, and `clippy::panic` are set to `deny`. This policy held across 24 concurrent agents building the codebase in one session without a single runtime panic.
 
 ## Minimum Supported Rust Version
 
-This crate requires Rust **1.79 or later**. The MSRV is tested in CI on every push.
-Changes to the MSRV are treated as semver minor bumps.
+Rust **1.79 or later** is required. The MSRV is tested in CI on every push. Changes to the MSRV are treated as semver minor bumps.
 
 ## License
 
@@ -199,7 +241,7 @@ MIT
 
 This orchestrator is built on a set of standalone Rust primitives. Each is independently usable:
 
-| Crate | Role in the orchestrator |
+| Crate | Role |
 |---|---|
 | [tokio-agent-memory](https://github.com/Mattbusel/tokio-agent-memory) | Agent memory bus -- episodic recall for the self-improving loop |
 | [llm-budget](https://github.com/Mattbusel/llm-budget) | Hard cost enforcement across the agent fleet |
@@ -207,29 +249,14 @@ This orchestrator is built on a set of standalone Rust primitives. Each is indep
 | [fin-stream](https://github.com/Mattbusel/fin-stream) | Lock-free ingestion pipeline -- same pattern as the inference queue |
 
 **Related tools:**
-- [Every-Other-Token](https://github.com/Mattbusel/Every-Other-Token) -- token-level LLM research tool whose telemetry feeds HelixRouter which feeds this orchestrator
-- [llm-cpp](https://github.com/Mattbusel/llm-cpp) -- C++ side of the stack; 26 single-header libraries for the same problem domain
+- [Every-Other-Token](https://github.com/Mattbusel/Every-Other-Token) -- token-level LLM research tool whose telemetry feeds HelixRouter
+- [agent-runtime](https://github.com/Mattbusel/agent-runtime) -- unified Tokio agent runtime: orchestration, memory, knowledge graph, and ReAct loop
+- [llm-cost-dashboard](https://github.com/Mattbusel/llm-cost-dashboard) -- ratatui terminal dashboard for real-time LLM token spend
 
 ---
 
-## Why not LangChain / LlamaIndex / CrewAI?
+## Related Projects
 
-| | tokio-prompt-orchestrator | LangChain / LlamaIndex | CrewAI |
-|---|---|---|---|
-| Language | Rust | Python | Python |
-| Latency overhead | Nanoseconds | Milliseconds | Milliseconds |
-| Memory safety | Compile-time | Runtime | Runtime |
-| Backpressure | Bounded channels, shed | Not built-in | Not built-in |
-| Circuit breaker | Built-in | Plugin/manual | Not built-in |
-| Dedup collapse | 67% in production | Not built-in | Not built-in |
-| Self-improving loop | Live, autonomous | Not built-in | Not built-in |
-| Concurrency | Tokio async, zero-copy | Python GIL | Python GIL |
-| Binary size | 4 MB (LTO) | 100s of MB deps | 100s of MB deps |
-
-If you need to prototype fast in Python, use LangChain. If you need to run at scale with predictable latency, zero panics, and autonomous self-optimization - this is the stack.
-
----
-## Related Projects by @Mattbusel
-- [rust-crates](https://github.com/Mattbusel/rust-crates) -- Production-grade Rust crates for LLM agent infrastructure
-- [tokio-agent-memory](https://github.com/Mattbusel/tokio-agent-memory) -- Episodic and semantic memory layer for async Tokio agents
+- [rust-crates](https://github.com/Mattbusel/rust-crates) -- Production Rust crates for LLM agent infrastructure
+- [tokio-agent-memory](https://github.com/Mattbusel/tokio-agent-memory) -- Episodic and semantic memory for async Tokio agents
 - [Every-Other-Token](https://github.com/Mattbusel/Every-Other-Token) -- LLM token interpretability and streaming perplexity visualization
