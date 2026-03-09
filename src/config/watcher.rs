@@ -263,11 +263,21 @@ log_format = "pretty"
         f.sync_all().expect("test: sync");
         drop(f);
 
-        // Wait for the watcher to detect and reload
-        let result = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await;
-        assert!(result.is_ok(), "should receive config update within 3s");
-        let config = result.expect("test: timeout").expect("test: recv");
-        assert_eq!(config.pipeline.name, "updated-name");
+        // Drain events until we see the updated config or time out.
+        // macOS FSEvents can coalesce or deliver a stale read on the first
+        // event, so we retry rather than asserting on the first notification.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            assert!(remaining > Duration::ZERO, "timed out waiting for updated config");
+            let result = tokio::time::timeout(remaining, rx.recv()).await;
+            assert!(result.is_ok(), "should receive config update within 5s");
+            let config = result.expect("test: timeout").expect("test: recv");
+            if config.pipeline.name == "updated-name" {
+                break;
+            }
+            // Received a stale event; wait for the next one.
+        }
     }
 
     #[tokio::test]
