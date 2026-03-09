@@ -23,3 +23,18 @@ target-*/
 .claude/
 target-agent/
 target-agent1/
+
+# Internal build/agent artifacts
+PHASE*.md
+ENHANCEMENT_SUMMARY.md
+WHATS_NEW.md
+UPGRADE.md
+CLAUDE.md
+CLAUDE_CODE_PROMPT.md
+AGENTS.md
+PROJECT_OVERVIEW.txt
+PROJECT_SUMMARY.md
+HIGH_IMPACT.md
+--help
+Screenshot*.png
+dist/
