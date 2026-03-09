@@ -43,11 +43,11 @@ jobs:
         if: runner.os == 'Linux'
 
   msrv:
-    name: MSRV (1.79)
+    name: MSRV (1.85)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.79
+      - uses: dtolnay/rust-toolchain@1.85
       - uses: Swatinem/rust-cache@v2
       - run: cargo build
 

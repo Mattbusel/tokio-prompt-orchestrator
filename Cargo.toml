@@ -2,7 +2,7 @@
 name = "tokio-prompt-orchestrator"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.79"
+rust-version = "1.85"
 description = "Multi-core Tokio-native orchestration for LLM inference pipelines — dedup, circuit breakers, backpressure, MCP, and autonomous self-improvement"
 documentation = "https://docs.rs/tokio-prompt-orchestrator"
 homepage = "https://github.com/Mattbusel/tokio-prompt-orchestrator"

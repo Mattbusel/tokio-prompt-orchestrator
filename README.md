@@ -1,7 +1,7 @@
 # tokio-prompt-orchestrator
 
 [![CI](https://github.com/Mattbusel/tokio-prompt-orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/Mattbusel/tokio-prompt-orchestrator/actions/workflows/ci.yml)
-[![Rust 1.79+](https://img.shields.io/badge/rust-1.79%2B-orange.svg)](https://www.rust-lang.org/)
+[![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![unsafe forbidden](https://img.shields.io/badge/unsafe-forbidden-success.svg)](https://github.com/Mattbusel/tokio-prompt-orchestrator)
 [![Tests](https://img.shields.io/badge/tests-1491_passing-brightgreen.svg)](https://github.com/Mattbusel/tokio-prompt-orchestrator/actions)
@@ -229,7 +229,7 @@ This crate uses `#![forbid(unsafe_code)]`. No unsafe blocks exist in production 
 
 ## Minimum Supported Rust Version
 
-Rust **1.79 or later** is required. The MSRV is tested in CI on every push. Changes to the MSRV are treated as semver minor bumps.
+Rust **1.85 or later** is required. The MSRV is tested in CI on every push. Changes to the MSRV are treated as semver minor bumps.
 
 ## License
 
