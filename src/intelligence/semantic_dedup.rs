@@ -10,9 +10,27 @@
 )]
 #![cfg(feature = "intelligence")]
 
-//! # Stage: Semantic Deduplicator
-//! Embedding-based deduplication using deterministic pseudo-embeddings.
-//! Falls back to exact-key matching when similarity index is full.
+//! # Stage: Lexical Deduplicator (misnamed "Semantic")
+//!
+//! **IMPORTANT**: Despite the name `SemanticDedup`, this module does NOT
+//! perform true semantic deduplication. The "embeddings" are produced by a
+//! deterministic hash-projection algorithm that captures *lexical* similarity
+//! (shared words/tokens) rather than semantic meaning. Two prompts that express
+//! the same idea in different words will generally NOT be collapsed by this
+//! module.
+//!
+//! ## Actual algorithm
+//! 1. Split prompt into whitespace-delimited words.
+//! 2. Hash each word with `DefaultHasher`.
+//! 3. Project each hash through sin/cos into a `dim`-dimensional vector.
+//! 4. Normalise to unit length (cosine similarity space).
+//! 5. Compare against stored entries using cosine similarity.
+//!
+//! This approach is deterministic and fast, but it is **lexical similarity**,
+//! not semantic similarity.
+//!
+//! // TODO: replace with actual sentence embeddings (e.g. via an embedding
+//! // model endpoint) to achieve true semantic deduplication.
 
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
@@ -550,7 +568,7 @@ mod tests {
         // Bump prompt-b hit_count by re-inserting
         dedup.insert("prompt-b", None).unwrap();
 
-        // Insert a third — should evict prompt-a (lower hit_count)
+        // Insert a third  -  should evict prompt-a (lower hit_count)
         let key_c = dedup.insert("prompt-c", None).unwrap();
 
         let guard = dedup.index.read().unwrap();
@@ -798,6 +816,38 @@ mod tests {
         assert_eq!(e.hit_count, 42);
     }
 
+    // ---------------------------------------------------------------
+    // 9. Lexical (not semantic) deduplication behaviour
+    // ---------------------------------------------------------------
+
+    /// Two prompts that are semantically equivalent but use different words
+    /// should NOT be collapsed by the hash-projection algorithm, because the
+    /// algorithm only captures lexical overlap.
+    #[test]
+    fn test_lexical_dedup_different_wording_not_deduplicated() {
+        // Use a threshold just below 1.0 but high enough to require near-identical text
+        let cfg = SemanticDedupConfig {
+            similarity_threshold: 0.99,
+            ..SemanticDedupConfig::default()
+        };
+        let dedup = SemanticDedup::new(cfg);
+
+        // Semantically equivalent, but lexically very different
+        let prompt_a = "How do I compute the median of a list of numbers?";
+        let prompt_b = "What is the procedure to find the middle value in a numeric sequence?";
+
+        dedup.insert(prompt_a, Some("response-a".into())).unwrap();
+
+        // With threshold=0.99, the lexically-different prompt_b should NOT match prompt_a
+        let result = dedup.lookup(prompt_b).unwrap();
+        assert!(
+            result.is_none(),
+            "Lexically-different but semantically-similar prompts should NOT be deduplicated \
+             (this is a lexical algorithm, not a semantic one). Got: {:?}",
+            result.map(|m| m.similarity)
+        );
+    }
+
     #[test]
     fn test_config_custom_values() {
         let cfg = SemanticDedupConfig {
@@ -850,7 +900,7 @@ mod tests {
         dedup.insert("alpha", None).unwrap(); // hit_count = 2
         dedup.insert("gamma", None).unwrap(); // hit_count = 1
 
-        // Insert a 4th entry — should evict beta (hit_count = 0)
+        // Insert a 4th entry  -  should evict beta (hit_count = 0)
         dedup.insert("delta", None).unwrap();
 
         let guard = dedup.index.read().unwrap();

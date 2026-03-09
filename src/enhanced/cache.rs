@@ -201,14 +201,20 @@ impl CacheLayer {
     pub fn stats(&self) -> CacheStats {
         match &self.backend {
             CacheBackend::Memory(cache) => CacheStats {
-                entries: cache.store.len(),
+                entries: Some(cache.store.len()),
                 backend: "memory".to_string(),
             },
             #[cfg(feature = "caching")]
-            CacheBackend::Redis(_) => CacheStats {
-                entries: 0, // Would need separate dbsize call
-                backend: "redis".to_string(),
-            },
+            CacheBackend::Redis(_) => {
+                // stats() is a synchronous method; issuing a DBSIZE Redis command
+                // here would require an async context.  Callers who need the entry
+                // count should use `stats_async().await` instead.
+                // Return None so callers can distinguish "unknown" from "zero".
+                CacheStats {
+                    entries: None,
+                    backend: "redis".to_string(),
+                }
+            }
         }
     }
 }
@@ -244,13 +250,21 @@ impl RedisCache {
         let mut conn = self.client.get_multiplexed_async_connection().await?;
         redis::cmd("FLUSHDB").query_async(&mut conn).await
     }
+
+    /// Issue DBSIZE to get the number of keys in the current Redis database.
+    async fn dbsize_redis(&self) -> Result<usize, redis::RedisError> {
+        let mut conn = self.client.get_multiplexed_async_connection().await?;
+        let count: i64 = redis::cmd("DBSIZE").query_async(&mut conn).await?;
+        Ok(count.max(0) as usize)
+    }
 }
 
 /// Cache statistics
 #[derive(Debug)]
 pub struct CacheStats {
     /// Number of entries currently held in the cache.
-    pub entries: usize,
+    /// `None` indicates the count could not be determined (e.g. Redis DBSIZE failed).
+    pub entries: Option<usize>,
     /// Name of the storage backend in use (`"memory"` or `"redis"`).
     pub backend: String,
 }
@@ -307,7 +321,7 @@ mod tests {
         assert_ne!(key1, key3); // Different input = different key
     }
 
-    // ── Hardening tests ──────────────────────────────────────────────
+    //  Hardening tests
 
     #[tokio::test]
     async fn test_eviction_at_capacity() {
@@ -322,7 +336,8 @@ mod tests {
 
         let stats = cache.stats();
         assert_eq!(
-            stats.entries, 3,
+            stats.entries.unwrap_or(0),
+            3,
             "cache must not exceed capacity after eviction"
         );
 
@@ -336,11 +351,11 @@ mod tests {
 
         cache.set("x", "1", 3600).await;
         cache.set("y", "2", 3600).await;
-        assert_eq!(cache.stats().entries, 2);
+        assert_eq!(cache.stats().entries.unwrap_or(0), 2);
 
         // Adding beyond capacity triggers eviction
         cache.set("z", "3", 3600).await;
-        assert_eq!(cache.stats().entries, 2);
+        assert_eq!(cache.stats().entries.unwrap_or(0), 2);
     }
 
     #[tokio::test]
@@ -378,8 +393,8 @@ mod tests {
         // No panic and stats are sane
         let stats = cache.stats();
         assert!(
-            stats.entries <= 1000,
-            "entries must not exceed capacity: got {}",
+            stats.entries.unwrap_or(0) <= 1000,
+            "entries must not exceed capacity: got {:?}",
             stats.entries
         );
         assert_eq!(stats.backend, "memory");
@@ -391,7 +406,7 @@ mod tests {
 
         cache.set("key", "value", 3600).await;
         // With capacity 0, the eviction check (len >= max_entries) fires
-        // before insert but the entry is still inserted — so we get 1 entry
+        // before insert but the entry is still inserted  -  so we get 1 entry
         // on the first insert. Subsequent inserts keep evicting.
         // Verify it doesn't panic.
         cache.set("key2", "value2", 3600).await;
@@ -405,9 +420,9 @@ mod tests {
             cache.set(format!("k{i}"), format!("v{i}"), 3600).await;
         }
 
-        assert_eq!(cache.stats().entries, 10);
+        assert_eq!(cache.stats().entries.unwrap_or(0), 10);
         cache.clear().await;
-        assert_eq!(cache.stats().entries, 0);
+        assert_eq!(cache.stats().entries.unwrap_or(0), 0);
     }
 
     #[tokio::test]
@@ -468,5 +483,21 @@ mod tests {
         cache.delete("k").await;
         cache.delete("k").await; // second delete is a no-op
         assert_eq!(cache.get("k").await, None);
+    }
+
+    /// MED-07: stats().entries must reflect actual cache contents and must not
+    /// always return zero for a populated in-memory backend.
+    #[tokio::test]
+    async fn test_cache_stats_entries_not_always_zero() {
+        let cache = CacheLayer::new_memory(100);
+        cache.set("k1", "v1", 3600).await;
+        cache.set("k2", "v2", 3600).await;
+        let stats = cache.stats();
+        // entries must be Some and non-zero — if it were always 0 this would fail
+        assert!(
+            stats.entries.unwrap_or(0) >= 2,
+            "expected at least 2 entries, got {:?}",
+            stats.entries
+        );
     }
 }

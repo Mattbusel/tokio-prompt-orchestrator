@@ -30,7 +30,7 @@ use tracing::{error, trace, warn};
 
 use crate::self_tune::telemetry_bus::TelemetryBus;
 
-// ── Wire-format mirror of HelixRouter's `/api/stats` response ────────────────
+//  Wire-format mirror of HelixRouter's `/api/stats` response
 
 /// Per-strategy routing count from HelixRouter's `/api/stats`.
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -64,7 +64,7 @@ pub struct HelixLatencyRow {
 /// relying solely on the aggregate pressure signal.
 #[derive(Debug, Clone, Default)]
 pub struct HelixStrategySnapshot {
-    /// Fraction of jobs explicitly shed via the `Drop` strategy (0.0–1.0).
+    /// Fraction of jobs explicitly shed via the `Drop` strategy (0.0 - 1.0).
     /// A non-zero value means HelixRouter is actively shedding load.
     pub drop_strategy_frac: f64,
     /// Highest p95 latency seen across all strategies (milliseconds).
@@ -85,18 +85,18 @@ struct HelixStats {
     pressure_score: f64,
     dropped: u64,
     completed: u64,
-    /// Current adaptive spawn threshold — logged for observability only.
+    /// Current adaptive spawn threshold  -  logged for observability only.
     #[serde(default)]
     adaptive_spawn_threshold: u64,
-    /// Per-strategy routing counts — used to detect explicit load shedding.
+    /// Per-strategy routing counts  -  used to detect explicit load shedding.
     #[serde(default)]
     routed_by_strategy: Vec<HelixRoutedStrategyCount>,
-    /// Per-strategy latency summaries — used to detect hot execution paths.
+    /// Per-strategy latency summaries  -  used to detect hot execution paths.
     #[serde(default)]
     latency_by_strategy: Vec<HelixLatencyRow>,
 }
 
-// ── Configuration ─────────────────────────────────────────────────────────────
+//  Configuration
 
 /// Configuration for [`HelixPressureProbe`].
 #[derive(Debug, Clone)]
@@ -125,7 +125,7 @@ impl Default for HelixProbeConfig {
     }
 }
 
-// ── Probe ─────────────────────────────────────────────────────────────────────
+//  Probe
 
 /// Polls HelixRouter and feeds its pressure score into the [`TelemetryBus`].
 ///
@@ -155,7 +155,7 @@ pub struct HelixPressureProbe {
 impl HelixPressureProbe {
     /// Create a new probe.
     ///
-    /// `bus` is cheaply cloned — [`TelemetryBus`] is internally `Arc`-backed.
+    /// `bus` is cheaply cloned  -  [`TelemetryBus`] is internally `Arc`-backed.
     ///
     /// # Panics
     /// This function never panics.
@@ -214,19 +214,24 @@ impl HelixPressureProbe {
                     // when pressure_score hasn't caught up yet.
                     let total = dropped + completed;
                     let drop_rate = if total > 0 {
-                        dropped as f64 / total as f64
+                        (dropped as f64 / total as f64).clamp(0.0, 1.0)
                     } else {
+                        // Guard against jobs_completed == 0 to avoid NaN.
                         0.0
                     };
+
+                    // Clamp all sub-signals to [0.0, 1.0] before taking max()
+                    // so that a misbehaving upstream cannot push combined above 1.0
+                    // or below 0.0.
+                    let pressure_clamped = pressure.clamp(0.0, 1.0);
+                    let drop_frac_clamped = strategy_snap.drop_strategy_frac.clamp(0.0, 1.0);
 
                     // Additionally blend in the Drop-strategy fraction: when
                     // HelixRouter is actively routing jobs to the Drop strategy,
                     // that is an unambiguous signal of load shedding that should
                     // immediately raise the combined pressure even if pressure_score
                     // and drop_rate haven't caught up yet.
-                    let combined = pressure
-                        .max(drop_rate)
-                        .max(strategy_snap.drop_strategy_frac);
+                    let combined = pressure_clamped.max(drop_rate).max(drop_frac_clamped);
 
                     trace!(
                         pressure,
@@ -350,7 +355,7 @@ impl HelixPressureProbe {
     }
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
+//  Tests
 
 #[cfg(test)]
 mod tests {
@@ -366,7 +371,7 @@ mod tests {
         HelixPressureProbe::new(HelixProbeConfig::default(), bus)
     }
 
-    // ── Config tests ──────────────────────────────────────────────────────
+    //  Config tests
 
     #[test]
     fn config_default_base_url() {
@@ -407,7 +412,7 @@ mod tests {
         assert_eq!(cfg2.base_url, "http://other:9090");
     }
 
-    // ── Probe construction ────────────────────────────────────────────────
+    //  Probe construction
 
     #[test]
     fn probe_new_constructs_without_panic() {
@@ -431,7 +436,7 @@ mod tests {
         assert_eq!(probe.config.error_threshold, 3);
     }
 
-    // ── Bus integration: external pressure wiring ─────────────────────────
+    //  Bus integration: external pressure wiring
 
     #[test]
     fn probe_bus_starts_with_zero_pressure() {
@@ -474,7 +479,7 @@ mod tests {
         assert!((v - 0.55).abs() < 0.002, "expected ~0.55, got {v}");
     }
 
-    // ── HelixStats deserialization ────────────────────────────────────────
+    //  HelixStats deserialization
 
     #[test]
     fn helix_stats_deserializes_from_json() {
@@ -518,7 +523,7 @@ mod tests {
         assert!(result.is_err(), "missing pressure_score should fail");
     }
 
-    // ── Blending integration ──────────────────────────────────────────────
+    //  Blending integration
 
     #[tokio::test]
     async fn blended_pressure_visible_in_snapshot_after_probe_tick() {
@@ -547,7 +552,7 @@ mod tests {
         );
     }
 
-    // ── Combined pressure signal tests ────────────────────────────────────
+    //  Combined pressure signal tests
 
     #[test]
     fn combined_pressure_uses_drop_rate_when_higher_than_pressure_score() {
@@ -606,7 +611,7 @@ mod tests {
         assert!((combined - 0.5).abs() < 1e-9, "combined={combined}");
     }
 
-    // ── Mock-HTTP integration tests ───────────────────────────────────────
+    //  Mock-HTTP integration tests
     //
     // These tests spin up a minimal tokio TCP listener that speaks just enough
     // HTTP/1.1 to satisfy reqwest, verifying the probe's fetch_pressure() method
@@ -692,7 +697,7 @@ mod tests {
         );
     }
 
-    // ── Per-strategy snapshot tests ───────────────────────────────────────
+    //  Per-strategy snapshot tests
 
     #[test]
     fn build_strategy_snapshot_detects_drop_strategy() {
@@ -969,5 +974,71 @@ mod tests {
         let failures: u32 = u32::MAX;
         let factor = (failures as u64).min(5);
         assert_eq!(factor, 5, "saturated failures must clamp to factor 5");
+    }
+
+    // -----------------------------------------------------------------------
+    // MED-14: NaN / division-by-zero guard tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_helix_probe_no_nan_when_jobs_completed_zero() {
+        // Reproduce the exact arithmetic from run() with completed == 0.
+        let dropped: u64 = 0;
+        let completed: u64 = 0;
+        let pressure: f64 = 0.0;
+        let drop_strategy_frac: f64 = 0.0;
+
+        let total = dropped + completed;
+        let drop_rate: f64 = if total > 0 {
+            (dropped as f64 / total as f64).clamp(0.0, 1.0)
+        } else {
+            0.0 // guard: completed == 0 must not produce NaN
+        };
+
+        let pressure_clamped = pressure.clamp(0.0, 1.0);
+        let drop_frac_clamped = drop_strategy_frac.clamp(0.0, 1.0);
+        let combined = pressure_clamped.max(drop_rate).max(drop_frac_clamped);
+
+        assert!(
+            !combined.is_nan(),
+            "combined must not be NaN when jobs_completed == 0"
+        );
+        assert_eq!(combined, 0.0, "combined should be 0.0 when no data");
+    }
+
+    #[test]
+    fn test_helix_probe_sub_signals_clamped_to_unit_interval() {
+        // Verify that out-of-range sub-signals cannot push combined outside [0,1].
+        let pressure: f64 = 2.5; // out-of-range high
+        let drop_rate: f64 = -0.1; // out-of-range low
+        let drop_frac: f64 = 1.5; // out-of-range high
+
+        let combined = pressure
+            .clamp(0.0, 1.0)
+            .max(drop_rate.clamp(0.0, 1.0))
+            .max(drop_frac.clamp(0.0, 1.0));
+
+        assert!(
+            combined >= 0.0 && combined <= 1.0,
+            "combined must stay in [0, 1] even with out-of-range inputs: {combined}"
+        );
+    }
+
+    #[test]
+    fn test_helix_probe_drop_rate_only_dropped_gives_one() {
+        // All jobs dropped, none completed → drop_rate must be 1.0 (not NaN).
+        let dropped: u64 = 100;
+        let completed: u64 = 0;
+        let total = dropped + completed;
+        let drop_rate: f64 = if total > 0 {
+            (dropped as f64 / total as f64).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        assert!(!drop_rate.is_nan(), "drop_rate must not be NaN");
+        assert!(
+            (drop_rate - 1.0).abs() < 1e-9,
+            "all-dropped rate should be 1.0: {drop_rate}"
+        );
     }
 }

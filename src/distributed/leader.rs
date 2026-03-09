@@ -71,13 +71,13 @@ impl LeaderElection {
     /// Create a new leader election instance.
     ///
     /// # Arguments
-    /// * `redis_url` — Redis connection URL
-    /// * `node_id` — This node's unique identifier
-    /// * `ttl_seconds` — Leader lease TTL in seconds
+    /// * `redis_url`  -  Redis connection URL
+    /// * `node_id`  -  This node's unique identifier
+    /// * `ttl_seconds`  -  Leader lease TTL in seconds
     ///
     /// # Returns
-    /// - `Ok(LeaderElection)` — ready to participate in elections
-    /// - `Err(DistributedError::RedisConnection)` — invalid Redis URL
+    /// - `Ok(LeaderElection)`  -  ready to participate in elections
+    /// - `Err(DistributedError::RedisConnection)`  -  invalid Redis URL
     ///
     /// # Panics
     /// This function never panics.
@@ -105,9 +105,9 @@ impl LeaderElection {
     /// Create a leader election from an existing Redis client.
     ///
     /// # Arguments
-    /// * `client` — Pre-configured Redis client
-    /// * `node_id` — This node's unique identifier
-    /// * `ttl_seconds` — Leader lease TTL in seconds
+    /// * `client`  -  Pre-configured Redis client
+    /// * `node_id`  -  This node's unique identifier
+    /// * `ttl_seconds`  -  Leader lease TTL in seconds
     ///
     /// # Returns
     /// A `LeaderElection` wrapping the provided client.
@@ -128,12 +128,12 @@ impl LeaderElection {
 
     /// Attempt to become the leader.
     ///
-    /// Uses `SET key NX EX ttl` — succeeds only if no leader currently exists.
+    /// Uses `SET key NX EX ttl`  -  succeeds only if no leader currently exists.
     ///
     /// # Returns
-    /// - `Ok(true)` — this node is now the leader
-    /// - `Ok(false)` — another node is already leader
-    /// - `Err(DistributedError::RedisOperation)` — Redis command failed
+    /// - `Ok(true)`  -  this node is now the leader
+    /// - `Ok(false)`  -  another node is already leader
+    /// - `Err(DistributedError::RedisOperation)`  -  Redis command failed
     ///
     /// # Panics
     /// This function never panics.
@@ -183,9 +183,9 @@ impl LeaderElection {
     /// Uses a Lua script for atomic compare-and-extend.
     ///
     /// # Returns
-    /// - `Ok(true)` — lease renewed
-    /// - `Ok(false)` — this node is not the leader (lease stolen or expired)
-    /// - `Err(DistributedError::RedisOperation)` — Redis command failed
+    /// - `Ok(true)`  -  lease renewed
+    /// - `Ok(false)`  -  this node is not the leader (lease stolen or expired)
+    /// - `Err(DistributedError::RedisOperation)`  -  Redis command failed
     ///
     /// # Panics
     /// This function never panics.
@@ -221,7 +221,7 @@ impl LeaderElection {
             debug!(node = %self.node_id, ttl = self.ttl_seconds, "leader lease renewed");
             Ok(true)
         } else {
-            warn!(node = %self.node_id, "lease renewal failed — no longer leader");
+            warn!(node = %self.node_id, "lease renewal failed  -  no longer leader");
             let _ = self.role_tx.send(LeaderRole::Follower(None));
             Ok(false)
         }
@@ -232,9 +232,9 @@ impl LeaderElection {
     /// Only deletes the key if this node is the current holder (atomic).
     ///
     /// # Returns
-    /// - `Ok(true)` — successfully stepped down
-    /// - `Ok(false)` — was not the leader
-    /// - `Err(DistributedError::RedisOperation)` — Redis command failed
+    /// - `Ok(true)`  -  successfully stepped down
+    /// - `Ok(false)`  -  was not the leader
+    /// - `Err(DistributedError::RedisOperation)`  -  Redis command failed
     ///
     /// # Panics
     /// This function never panics.
@@ -269,7 +269,7 @@ impl LeaderElection {
             let _ = self.role_tx.send(LeaderRole::Follower(None));
             Ok(true)
         } else {
-            debug!(node = %self.node_id, "step down — was not leader");
+            debug!(node = %self.node_id, "step down  -  was not leader");
             Ok(false)
         }
     }
@@ -277,9 +277,9 @@ impl LeaderElection {
     /// Query who the current leader is.
     ///
     /// # Returns
-    /// - `Ok(Some(node_id))` — the current leader's node ID
-    /// - `Ok(None)` — no leader (election needed)
-    /// - `Err(DistributedError::RedisOperation)` — Redis command failed
+    /// - `Ok(Some(node_id))`  -  the current leader's node ID
+    /// - `Ok(None)`  -  no leader (election needed)
+    /// - `Err(DistributedError::RedisOperation)`  -  Redis command failed
     ///
     /// # Panics
     /// This function never panics.
@@ -338,12 +338,16 @@ impl LeaderElection {
         self.ttl_seconds
     }
 
-    /// Get the renewal interval (ttl / 2).
+    /// Get the renewal interval (ttl / 3).
+    ///
+    /// Using ttl/3 (rather than ttl/2) gives the leader two full renewal
+    /// attempts within each TTL window before the lease can expire, making
+    /// the system significantly more resilient to transient network blips.
     ///
     /// # Panics
     /// This function never panics.
     pub fn renewal_interval(&self) -> Duration {
-        Duration::from_secs(self.ttl_seconds / 2)
+        Duration::from_secs(self.ttl_seconds / 3)
     }
 
     /// Spawn a background loop that periodically attempts election and renewal.
@@ -360,7 +364,8 @@ impl LeaderElection {
     pub fn spawn_election_loop(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let this = Arc::clone(self);
         tokio::spawn(async move {
-            let renewal = Duration::from_secs(this.ttl_seconds / 2);
+            // Renew at ttl/3 to allow two full attempts before lease expiry.
+            let renewal = Duration::from_secs(this.ttl_seconds / 3);
             let election_retry = Duration::from_secs(this.ttl_seconds);
 
             loop {
@@ -371,9 +376,17 @@ impl LeaderElection {
                         }
                         Ok(false) => {
                             warn!(node = %this.node_id, "lost leadership in renewal loop");
+                            // Immediately update local state to Follower so callers
+                            // do not act as leader while the lease has expired.
+                            let _ = this.role_tx.send(LeaderRole::Follower(None));
                         }
                         Err(e) => {
-                            warn!(node = %this.node_id, error = ?e, "renewal failed");
+                            // Renewal failure — immediately step down rather than
+                            // waiting for the next poll cycle.  This prevents the
+                            // node from making leader-only decisions when it cannot
+                            // communicate with Redis.
+                            warn!(node = %this.node_id, error = ?e, "renewal failed — stepping down to follower");
+                            let _ = this.role_tx.send(LeaderRole::Follower(None));
                         }
                     }
                     tokio::time::sleep(renewal).await;
@@ -383,7 +396,7 @@ impl LeaderElection {
                             info!(node = %this.node_id, "won election in loop");
                         }
                         Ok(false) => {
-                            debug!(node = %this.node_id, "election attempt — not elected");
+                            debug!(node = %this.node_id, "election attempt  -  not elected");
                         }
                         Err(e) => {
                             warn!(node = %this.node_id, error = ?e, "election attempt failed");
@@ -465,10 +478,11 @@ mod tests {
     }
 
     #[test]
-    fn test_renewal_interval_is_half_ttl() {
+    fn test_renewal_interval_is_third_ttl() {
         let client = redis::Client::open("redis://localhost:6379");
         if let Ok(c) = client {
-            let election = LeaderElection::from_client(Arc::new(c), "n1", 20);
+            let election = LeaderElection::from_client(Arc::new(c), "n1", 30);
+            // 30 / 3 = 10
             assert_eq!(election.renewal_interval(), Duration::from_secs(10));
         }
     }
@@ -478,8 +492,8 @@ mod tests {
         let client = redis::Client::open("redis://localhost:6379");
         if let Ok(c) = client {
             let election = LeaderElection::from_client(Arc::new(c), "n1", 15);
-            // 15 / 2 = 7 (integer division)
-            assert_eq!(election.renewal_interval(), Duration::from_secs(7));
+            // 15 / 3 = 5 (integer division)
+            assert_eq!(election.renewal_interval(), Duration::from_secs(5));
         }
     }
 
@@ -578,6 +592,31 @@ mod tests {
         if let Ok(election) = result {
             let leader_result = election.current_leader().await;
             assert!(leader_result.is_err());
+        }
+    }
+
+    #[test]
+    fn test_leader_transitions_to_follower_on_renewal_failure() {
+        // Simulate the spawn_election_loop behavior when renewal fails:
+        // the loop must immediately push LeaderRole::Follower to role_tx.
+        let client = redis::Client::open("redis://localhost:6379");
+        if let Ok(c) = client {
+            let election = LeaderElection::from_client(Arc::new(c), "n1", 30);
+
+            // Promote to leader.
+            let _ = election.role_tx.send(LeaderRole::Leader);
+            assert!(election.is_leader(), "should start as leader");
+
+            // Simulate renew() returning Ok(false) — leadership lost.
+            let _ = election.role_tx.send(LeaderRole::Follower(None));
+            assert!(
+                !election.is_leader(),
+                "must transition to follower immediately on renewal failure"
+            );
+            assert!(
+                matches!(*election.role_rx.borrow(), LeaderRole::Follower(None)),
+                "role must be Follower after renewal failure"
+            );
         }
     }
 

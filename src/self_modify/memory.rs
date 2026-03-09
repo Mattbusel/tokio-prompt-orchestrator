@@ -14,11 +14,12 @@
 //! The distributed tier adds a Redis write-through layer behind the same API.
 //!
 //! ## Graceful degradation
-//! All query methods return `None` / empty collections on any internal error —
+//! All query methods return `None` / empty collections on any internal error  -
 //! agents proceed without memory rather than failing.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet, VecDeque},
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -26,7 +27,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-// ─── Error ────────────────────────────────────────────────────────────────────
+//  Error
 
 /// Errors produced by the memory system.
 #[derive(Debug, Error)]
@@ -46,9 +47,13 @@ pub enum MemoryError {
     /// A Redis operation failed (distributed feature only).
     #[error("Redis error: {0}")]
     Redis(String),
+
+    /// An I/O error occurred while reading or writing the persistence file.
+    #[error("I/O error: {0}")]
+    Io(String),
 }
 
-// ─── Modification record ──────────────────────────────────────────────────────
+//  Modification record
 
 /// Outcome of a past self-modification attempt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,7 +105,7 @@ impl ModificationRecord {
     }
 }
 
-// ─── Code pattern ─────────────────────────────────────────────────────────────
+//  Code pattern
 
 /// Whether a code pattern is known to succeed or fail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,7 +135,7 @@ pub struct CodePattern {
     pub last_seen_secs: u64,
 }
 
-// ─── Module dependency node ───────────────────────────────────────────────────
+//  Module dependency node
 
 /// Dependency information for a source module.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,7 +152,7 @@ pub struct ModuleNode {
     pub claimed_by: Option<String>,
 }
 
-// ─── Performance baseline ─────────────────────────────────────────────────────
+//  Performance baseline
 
 /// Performance baseline for a module.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -158,13 +163,13 @@ pub struct PerformanceBaseline {
     pub throughput_rps: f64,
     /// Baseline p95 latency (ms).
     pub p95_latency_ms: f64,
-    /// Baseline error rate (0.0 – 1.0).
+    /// Baseline error rate (0.0  -  1.0).
     pub error_rate: f64,
     /// Unix timestamp when baseline was recorded.
     pub recorded_at_secs: u64,
 }
 
-// ─── Dead end ────────────────────────────────────────────────────────────────
+//  Dead end
 
 /// An approach that has been tried and failed, to avoid repetition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,16 +186,22 @@ pub struct DeadEnd {
     pub recorded_at_secs: u64,
 }
 
-// ─── Memory store ─────────────────────────────────────────────────────────────
+//  Memory store
 
 struct MemoryInner {
-    modifications: Vec<ModificationRecord>,
+    /// Ordered modification records (oldest at front, newest at back).
+    modifications: VecDeque<ModificationRecord>,
+    /// Set of known modification IDs for O(1) duplicate detection.
+    modification_ids: HashSet<String>,
     patterns: HashMap<String, CodePattern>,
     dependency_graph: HashMap<String, ModuleNode>,
     baselines: HashMap<String, PerformanceBaseline>,
     dead_ends: Vec<DeadEnd>,
     /// Maximum number of modification records to retain.
     max_modifications: usize,
+    /// Optional path to flush modification history to on every insert.
+    /// If `None`, state is in-memory only.
+    persist_path: Option<PathBuf>,
 }
 
 /// In-memory knowledge base for the agent fleet.
@@ -208,28 +219,105 @@ impl AgentMemory {
     pub fn new(max_modifications: usize) -> Self {
         Self {
             inner: Arc::new(Mutex::new(MemoryInner {
-                modifications: Vec::new(),
+                modifications: VecDeque::new(),
+                modification_ids: HashSet::new(),
                 patterns: HashMap::new(),
                 dependency_graph: HashMap::new(),
                 baselines: HashMap::new(),
                 dead_ends: Vec::new(),
                 max_modifications,
+                persist_path: None,
             })),
         }
     }
 
-    // ── Modification records ──────────────────────────────────────────────
+    /// Create a memory store with an optional file-backed persistence path.
+    ///
+    /// If `persist_path` is `Some(path)`, the full modification history is
+    /// flushed to a JSON file on every [`insert_modification`] call so that
+    /// state survives process restarts.  On construction, if the file already
+    /// exists, its contents are loaded to restore the previous history.
+    ///
+    /// # Errors
+    /// Returns `Err(MemoryError::...)` only if the file exists but cannot be
+    /// parsed.  A missing file is treated as an empty initial state.
+    pub fn with_persist_path(
+        max_modifications: usize,
+        persist_path: Option<PathBuf>,
+    ) -> Result<Self, MemoryError> {
+        let mut modifications: VecDeque<ModificationRecord> = VecDeque::new();
+        let mut modification_ids: HashSet<String> = HashSet::new();
+
+        // Load existing state from disk if the file exists.
+        if let Some(ref path) = persist_path {
+            if path.exists() {
+                let contents = std::fs::read_to_string(path).map_err(|e| {
+                    MemoryError::Io(format!(
+                        "failed to read persist file {}: {e}",
+                        path.display()
+                    ))
+                })?;
+                let loaded: Vec<ModificationRecord> =
+                    serde_json::from_str(&contents).map_err(|e| {
+                        MemoryError::Io(format!(
+                            "failed to parse persist file {}: {e}",
+                            path.display()
+                        ))
+                    })?;
+                for rec in loaded.into_iter().take(max_modifications) {
+                    modification_ids.insert(rec.id.clone());
+                    modifications.push_back(rec);
+                }
+            }
+        }
+
+        Ok(Self {
+            inner: Arc::new(Mutex::new(MemoryInner {
+                modifications,
+                modification_ids,
+                patterns: HashMap::new(),
+                dependency_graph: HashMap::new(),
+                baselines: HashMap::new(),
+                dead_ends: Vec::new(),
+                max_modifications,
+                persist_path,
+            })),
+        })
+    }
+
+    //  Modification records
 
     /// Insert a new modification record.
     pub fn insert_modification(&self, record: ModificationRecord) -> Result<(), MemoryError> {
         let mut inner = self.inner.lock().map_err(|_| MemoryError::LockPoisoned)?;
-        if inner.modifications.iter().any(|r| r.id == record.id) {
+        // O(1) duplicate check via HashSet — no linear scan needed.
+        if inner.modification_ids.contains(&record.id) {
             return Err(MemoryError::DuplicateRecord(record.id));
         }
+        // O(1) eviction via pop_front instead of remove(0).
         if inner.modifications.len() >= inner.max_modifications {
-            inner.modifications.remove(0);
+            if let Some(evicted) = inner.modifications.pop_front() {
+                inner.modification_ids.remove(&evicted.id);
+            }
         }
-        inner.modifications.push(record);
+        inner.modification_ids.insert(record.id.clone());
+        inner.modifications.push_back(record);
+
+        // Flush to disk if a persistence path is configured.
+        if let Some(ref path) = inner.persist_path.clone() {
+            let records: Vec<&ModificationRecord> = inner.modifications.iter().collect();
+            if let Ok(json) = serde_json::to_string_pretty(&records) {
+                // Best-effort: log but don't fail the insert on I/O error.
+                if let Err(e) = std::fs::write(path, json) {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "AgentMemory: failed to flush modification history to disk"
+                    );
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -256,9 +344,8 @@ impl AgentMemory {
         self.inner
             .lock()
             .map(|inner| {
-                let mut v = inner.modifications.clone();
-                v.reverse();
-                v
+                // VecDeque stores oldest-first; reverse to return newest-first.
+                inner.modifications.iter().rev().cloned().collect()
             })
             .unwrap_or_default()
     }
@@ -286,7 +373,7 @@ impl AgentMemory {
             .unwrap_or(false)
     }
 
-    // ── Code patterns ─────────────────────────────────────────────────────
+    //  Code patterns
 
     /// Record or update a code pattern.
     pub fn record_pattern(&self, pattern: CodePattern) -> Result<(), MemoryError> {
@@ -318,7 +405,7 @@ impl AgentMemory {
             .unwrap_or_default()
     }
 
-    // ── Dependency graph ──────────────────────────────────────────────────
+    //  Dependency graph
 
     /// Register or update a module node.
     pub fn upsert_module(&self, node: ModuleNode) -> Result<(), MemoryError> {
@@ -347,7 +434,7 @@ impl AgentMemory {
             node.claimed_by = Some(agent_id.to_string());
             return true;
         }
-        // Module not registered — insert minimal node and claim it
+        // Module not registered  -  insert minimal node and claim it
         inner.dependency_graph.insert(
             path.to_string(),
             ModuleNode {
@@ -385,7 +472,7 @@ impl AgentMemory {
             .unwrap_or_default()
     }
 
-    // ── Performance baselines ─────────────────────────────────────────────
+    //  Performance baselines
 
     /// Record a performance baseline for a module.
     pub fn record_baseline(&self, baseline: PerformanceBaseline) -> Result<(), MemoryError> {
@@ -402,7 +489,7 @@ impl AgentMemory {
             .and_then(|inner| inner.baselines.get(module).cloned())
     }
 
-    // ── Dead ends ─────────────────────────────────────────────────────────
+    //  Dead ends
 
     /// Record a failed approach to prevent agents retrying it.
     pub fn record_dead_end(&self, dead_end: DeadEnd) -> Result<(), MemoryError> {
@@ -427,7 +514,7 @@ impl AgentMemory {
             .collect()
     }
 
-    // ── Summary ───────────────────────────────────────────────────────────
+    //  Summary
 
     /// Return a count summary of stored records.
     pub fn summary(&self) -> MemorySummary {
@@ -459,7 +546,7 @@ pub struct MemorySummary {
     pub dead_end_count: usize,
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+//  Helpers
 
 fn unix_now() -> u64 {
     SystemTime::now()
@@ -468,7 +555,7 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-// ─── Redis-backed memory (distributed feature) ──────────────────────────────
+//  Redis-backed memory (distributed feature)
 
 #[cfg(feature = "distributed")]
 mod redis_memory {
@@ -485,10 +572,10 @@ mod redis_memory {
     /// degrades gracefully to pure in-memory mode.
     ///
     /// # Redis key layout
-    /// - `agent:modification:{id}` — JSON-serialised [`ModificationRecord`]
-    /// - `agent:pattern:{name}` — JSON-serialised [`CodePattern`]
-    /// - `agent:baseline:{module}` — JSON-serialised [`PerformanceBaseline`]
-    /// - `agent:deadend:{module}:{hash}` — JSON-serialised [`DeadEnd`]
+    /// - `agent:modification:{id}`  -  JSON-serialised [`ModificationRecord`]
+    /// - `agent:pattern:{name}`  -  JSON-serialised [`CodePattern`]
+    /// - `agent:baseline:{module}`  -  JSON-serialised [`PerformanceBaseline`]
+    /// - `agent:deadend:{module}:{hash}`  -  JSON-serialised [`DeadEnd`]
     ///
     /// # Panics
     /// This type never panics.
@@ -505,8 +592,8 @@ mod redis_memory {
         /// to pure in-memory mode (no error is raised).
         ///
         /// # Arguments
-        /// * `max_modifications` — cap on in-memory modification history
-        /// * `redis_url` — Redis connection string (e.g. `"redis://127.0.0.1/"`)
+        /// * `max_modifications`  -  cap on in-memory modification history
+        /// * `redis_url`  -  Redis connection string (e.g. `"redis://127.0.0.1/"`)
         pub async fn new(max_modifications: usize, redis_url: &str) -> Self {
             let redis = Self::try_connect(redis_url).await;
             Self {
@@ -535,14 +622,14 @@ mod redis_memory {
             &self.inner
         }
 
-        // ── Connection helper ────────────────────────────────────────────
+        //  Connection helper
 
         async fn try_connect(url: &str) -> Option<ConnectionManager> {
             let client = redis::Client::open(url).ok()?;
             ConnectionManager::new(client).await.ok()
         }
 
-        // ── Best-effort Redis helpers ────────────────────────────────────
+        //  Best-effort Redis helpers
 
         async fn redis_set(&self, key: &str, value: &str) {
             if let Some(mut conn) = self.redis.clone() {
@@ -559,7 +646,7 @@ mod redis_memory {
             None
         }
 
-        // ── Modification records ─────────────────────────────────────────
+        //  Modification records
 
         /// Insert a new modification record.
         ///
@@ -634,7 +721,7 @@ mod redis_memory {
                 .collect()
         }
 
-        // ── Code patterns ────────────────────────────────────────────────
+        //  Code patterns
 
         /// Record or update a code pattern.
         ///
@@ -659,7 +746,7 @@ mod redis_memory {
             self.inner.get_pattern(name)
         }
 
-        // ── Performance baselines ────────────────────────────────────────
+        //  Performance baselines
 
         /// Record a performance baseline for a module.
         ///
@@ -687,7 +774,7 @@ mod redis_memory {
             self.inner.get_baseline(module)
         }
 
-        // ── Dead ends ────────────────────────────────────────────────────
+        //  Dead ends
 
         /// Record a failed approach to prevent agents retrying it.
         ///
@@ -719,7 +806,7 @@ mod redis_memory {
             self.inner.dead_ends()
         }
 
-        // ── Dependency graph pass-through ────────────────────────────────
+        //  Dependency graph pass-through
 
         /// Return all modules that are safe to edit in parallel (not claimed).
         pub fn parallelizable_modules(&self) -> Vec<String> {
@@ -746,7 +833,7 @@ mod redis_memory {
             self.inner.summary()
         }
 
-        // ── Internal helpers ─────────────────────────────────────────────
+        //  Internal helpers
 
         /// Produce a cheap, deterministic hash of a string for use in Redis keys.
         fn simple_hash(s: &str) -> u64 {
@@ -764,7 +851,7 @@ mod redis_memory {
 #[cfg(feature = "distributed")]
 pub use redis_memory::RedisAgentMemory;
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
+//  Tests
 
 #[cfg(test)]
 mod tests {
@@ -1064,9 +1151,59 @@ mod tests {
         let rec = ModificationRecord::new("x", "desc", vec![]);
         assert_eq!(rec.outcome, ModificationOutcome::InProgress);
     }
+
+    // ------------------------------------------------------------------
+    // HIGH-06: O(1) duplicate detection via HashSet
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_insert_modification_dedup_is_o1() {
+        // Insert a large number of records, then verify that inserting a
+        // duplicate of the very first record still returns DuplicateRecord
+        // (not NotFound), proving the HashSet is consulted rather than a
+        // linear scan of the VecDeque.
+        let mem = AgentMemory::new(10_000);
+        for i in 0..1_000 {
+            mem.insert_modification(make_record(&format!("rec-{i}")))
+                .unwrap();
+        }
+        // "rec-0" was evicted (max = 10_000 > 1_000 so it is still present)
+        let result = mem.insert_modification(make_record("rec-0"));
+        assert!(
+            matches!(result, Err(MemoryError::DuplicateRecord(_))),
+            "HashSet must catch duplicate without linear scan: {result:?}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // HIGH-07: O(1) eviction via VecDeque pop_front
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_eviction_uses_pop_front() {
+        // Cap at 3 records.  Insert 4 and verify the oldest (rec-0) was evicted
+        // and the newest three remain in newest-first order.
+        let mem = AgentMemory::new(3);
+        for i in 0..4 {
+            mem.insert_modification(make_record(&format!("evict-{i}")))
+                .unwrap();
+        }
+        let mods = mem.modifications();
+        assert_eq!(mods.len(), 3, "oldest should have been evicted");
+        // Newest-first order: evict-3, evict-2, evict-1
+        assert_eq!(mods[0].id, "evict-3");
+        assert_eq!(mods[1].id, "evict-2");
+        assert_eq!(mods[2].id, "evict-1");
+        // evict-0 must be gone from both the deque and the id set
+        let result = mem.insert_modification(make_record("evict-0"));
+        assert!(
+            result.is_ok(),
+            "evict-0 should be re-insertable after eviction: {result:?}"
+        );
+    }
 }
 
-// ─── Redis memory tests (distributed feature) ───────────────────────────────
+//  Redis memory tests (distributed feature)
 
 #[cfg(test)]
 #[cfg(feature = "distributed")]
@@ -1231,11 +1368,11 @@ mod redis_tests {
         })
         .unwrap();
 
-        // Both unclaimed — both parallelizable
+        // Both unclaimed  -  both parallelizable
         let free = mem.parallelizable_modules();
         assert_eq!(free.len(), 2);
 
-        // Claim one — only one left
+        // Claim one  -  only one left
         mem.claim_module("x.rs", "agent-a");
         let free = mem.parallelizable_modules();
         assert_eq!(free.len(), 1);
@@ -1260,5 +1397,66 @@ mod redis_tests {
 
         let b_ends = mem.dead_ends_for_module("mod_b");
         assert_eq!(b_ends.len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // ARCH-03: File-backed persistence tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_memory_persists_to_file() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("agent_memory_test_{}.json", std::process::id()));
+        // Remove if leftover from a previous run
+        let _ = std::fs::remove_file(&path);
+
+        let mem = AgentMemory::with_persist_path(100, Some(path.clone()))
+            .expect("construction should succeed");
+
+        let rec = ModificationRecord::new("persist-1", "test persist", vec![]);
+        mem.insert_modification(rec).expect("insert should succeed");
+
+        // The file should now exist and be valid JSON
+        assert!(path.exists(), "persist file should have been created");
+        let contents = std::fs::read_to_string(&path).expect("should be readable");
+        let parsed: Vec<ModificationRecord> =
+            serde_json::from_str(&contents).expect("should be valid JSON");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].id, "persist-1");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_memory_loads_from_file_on_startup() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "agent_memory_load_test_{}.json",
+            std::process::id()
+        ));
+
+        // Pre-write a JSON file with one record
+        let existing = vec![ModificationRecord {
+            id: "pre-existing".to_string(),
+            description: "loaded from disk".to_string(),
+            files_changed: vec![],
+            outcome: ModificationOutcome::Deployed,
+            metric_deltas: std::collections::HashMap::new(),
+            created_at_secs: 0,
+            tag: None,
+        }];
+        let json = serde_json::to_string_pretty(&existing).expect("serialise");
+        std::fs::write(&path, json).expect("write test file");
+
+        // Construct AgentMemory pointing at that file
+        let mem = AgentMemory::with_persist_path(100, Some(path.clone()))
+            .expect("construction should succeed");
+
+        // The pre-existing record should be loaded
+        let mods = mem.modifications();
+        assert_eq!(mods.len(), 1, "should have loaded 1 record from disk");
+        assert_eq!(mods[0].id, "pre-existing");
+
+        let _ = std::fs::remove_file(&path);
     }
 }

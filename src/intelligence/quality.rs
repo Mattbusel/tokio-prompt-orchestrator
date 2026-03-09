@@ -10,9 +10,24 @@
 )]
 #![cfg(feature = "intelligence")]
 
-//! # Stage: Quality Estimator
-//! Estimates output quality via heuristic signals: coherence, completeness,
-//! and confidence. Detects per-backend regressions over time.
+//! # Stage: Quality Estimator — HEURISTIC PLACEHOLDER
+//!
+//! **WARNING**: This module implements a *heuristic* quality estimator only.
+//! The coherence, completeness, and confidence scoring functions use simple
+//! rule-based signals (length checks, punctuation, keyword overlap) and are
+//! **NOT** production-quality scoring. They serve as a reasonable baseline
+//! while a proper embedding-based scorer is developed.
+//!
+//! ## Known limitations
+//! - Coherence is approximated by sentence-ending punctuation — this is
+//!   a very crude proxy for actual linguistic coherence.
+//! - Completeness is checked via keyword overlap, not semantic coverage.
+//! - Confidence is a monotonic function of response length with no language
+//!   understanding whatsoever.
+//!
+//! ## Roadmap
+//! Replace with `QualityEstimatorKind::EmbeddingBased` once a sentence-
+//! embedding model is available in the inference pipeline.
 
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
@@ -21,6 +36,19 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use tracing::{debug, warn};
+
+/// Discriminates between the heuristic placeholder and a future
+/// embedding-based quality estimator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QualityEstimatorKind {
+    /// Heuristic scorer — rule-based, no language understanding.
+    /// This is the only currently implemented variant.
+    Heuristic,
+    /// Embedding-based scorer — not yet implemented.
+    /// # Note
+    /// This variant is a stub for future development.
+    EmbeddingBased,
+}
 
 #[derive(Debug, Error)]
 pub enum QualityError {
@@ -326,6 +354,72 @@ mod tests {
         e.estimate("q", "a fine answer here for sure.", "local")
             .unwrap();
         assert!(!e.detect_regression("local"));
+    }
+
+    #[test]
+    fn test_quality_score_always_in_range() {
+        let e = estimator();
+        // 20+ varied inputs — every score must be in [0.0, 1.0]
+        let cases = [
+            ("", ""),
+            ("how?", "x"),
+            ("what is this?", "This is what you need."),
+            ("why?", "Because."),
+            ("explain", "A very long answer that covers the topic in great detail. It addresses the question thoroughly."),
+            ("how does it work?", "It works by processing input data through multiple stages."),
+            ("what?", "Short."),
+            ("q", &"a".repeat(1000)),
+            ("hello", "world!"),
+            ("tell me more", "More information is available here. Please see the documentation."),
+            ("what is the capital?", "The capital is Paris."),
+            ("how do I do this?", "Follow these steps carefully."),
+            ("why?", "Due to the underlying mechanism."),
+            ("when?", "It happens every day at noon."),
+            ("where?", "At the main office building."),
+            ("who is responsible?", "The engineering team handles this."),
+            ("which option?", "Option A is the best choice here."),
+            ("what and why?", "This is what it is because of that reason."),
+            ("explain briefly", "Ok."),
+            ("long prompt with many words what why when where who", "A comprehensive answer."),
+            ("test", ""),
+        ];
+        for (prompt, response) in &cases {
+            let est = e.estimate(prompt, response, "test").unwrap();
+            assert!(
+                est.overall_score >= 0.0 && est.overall_score <= 1.0,
+                "overall_score {} out of [0,1] for prompt={:?} response={:?}",
+                est.overall_score,
+                prompt,
+                response
+            );
+            assert!(
+                est.coherence_score >= 0.0 && est.coherence_score <= 1.0,
+                "coherence_score {} out of range",
+                est.coherence_score
+            );
+            assert!(
+                est.completeness_score >= 0.0 && est.completeness_score <= 1.0,
+                "completeness_score {} out of range",
+                est.completeness_score
+            );
+            assert!(
+                est.confidence_score >= 0.0 && est.confidence_score <= 1.0,
+                "confidence_score {} out of range",
+                est.confidence_score
+            );
+        }
+    }
+
+    #[test]
+    fn test_quality_estimator_kind_variants() {
+        assert_ne!(
+            QualityEstimatorKind::Heuristic,
+            QualityEstimatorKind::EmbeddingBased
+        );
+        assert_eq!(
+            QualityEstimatorKind::Heuristic,
+            QualityEstimatorKind::Heuristic
+        );
     }
 
     #[test]

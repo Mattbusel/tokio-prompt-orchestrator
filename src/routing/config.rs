@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-// ── Default value functions ────────────────────────────────────────────
+//  Default value functions
 
 /// Default complexity threshold below which prompts route to the local model.
 fn default_local_threshold() -> f64 {
@@ -48,7 +48,37 @@ fn default_adaptive_enabled() -> bool {
     true
 }
 
-// ── RoutingConfig ──────────────────────────────────────────────────────
+/// Default domain-specific terms used by the complexity scorer.
+fn default_domain_terms() -> Vec<String> {
+    vec![
+        // Rust / systems programming
+        "borrow checker".into(),
+        "lifetime".into(),
+        "async fn".into(),
+        "impl trait".into(),
+        "tokio".into(),
+        "unsafe".into(),
+        "pin<".into(),
+        "box<dyn".into(),
+        "arc<mutex".into(),
+        "send + sync".into(),
+        "derive(".into(),
+        "#[cfg(".into(),
+        "cargo.toml".into(),
+        "clippy".into(),
+        // Financial / quantitative
+        "black-scholes".into(),
+        "monte carlo".into(),
+        "sharpe ratio".into(),
+        "portfolio".into(),
+        "var(".into(),
+        "yield curve".into(),
+        "derivative pricing".into(),
+        "risk-adjusted".into(),
+    ]
+}
+
+//  RoutingConfig
 
 /// Configuration for the model routing layer.
 ///
@@ -83,6 +113,14 @@ pub struct RoutingConfig {
     /// Adaptive threshold tuning settings.
     #[serde(default)]
     pub adaptive: AdaptiveConfig,
+
+    /// Domain-specific terminology used by the complexity scorer.
+    ///
+    /// Any prompt containing two or more of these terms (case-insensitive)
+    /// receives the `+0.15` domain-term complexity bonus.
+    /// Defaults to a built-in list of Rust and financial terms.
+    #[serde(default = "default_domain_terms")]
+    pub domain_terms: Vec<String>,
 }
 
 impl Default for RoutingConfig {
@@ -93,6 +131,7 @@ impl Default for RoutingConfig {
             local_cost_per_1k_tokens: default_local_cost_per_1k_tokens(),
             cloud_cost_per_1k_tokens: default_cloud_cost_per_1k_tokens(),
             adaptive: AdaptiveConfig::default(),
+            domain_terms: default_domain_terms(),
         }
     }
 }
@@ -140,7 +179,7 @@ impl Default for AdaptiveConfig {
 ///
 /// # Arguments
 ///
-/// * `config` — The routing configuration to validate.
+/// * `config`  -  The routing configuration to validate.
 ///
 /// # Returns
 ///
@@ -204,7 +243,7 @@ pub fn validate(config: &RoutingConfig) -> Vec<String> {
     errors
 }
 
-// ── Tests ──────────────────────────────────────────────────────────────
+//  Tests
 
 #[cfg(test)]
 mod tests {
@@ -407,6 +446,7 @@ mod tests {
             local_cost_per_1k_tokens: -5.0,
             cloud_cost_per_1k_tokens: -3.0,
             adaptive: AdaptiveConfig::default(),
+            domain_terms: vec![],
         };
         let errors = validate(&cfg);
         assert!(

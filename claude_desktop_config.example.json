@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "tokio-prompt-orchestrator": {
+      "command": "cargo",
+      "args": ["run", "--bin", "mcp", "--features", "mcp", "--release"],
+      "cwd": "/path/to/tokio-prompt-orchestrator",
+      "env": {
+        "OPENAI_API_KEY": "${OPENAI_API_KEY}",
+        "ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY}",
+        "RUST_LOG": "info"
+      }
+    }
+  }
+}

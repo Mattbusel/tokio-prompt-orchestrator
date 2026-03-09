@@ -165,7 +165,7 @@ async fn test_cache_eviction_at_capacity() {
     cache.set("b", "2", 3600).await;
     cache.set("c", "3", 3600).await; // evicts one
 
-    assert_eq!(cache.stats().entries, 2);
+    assert_eq!(cache.stats().entries, Some(2));
     assert_eq!(cache.get("c").await, Some("3".to_string()));
 }
 
@@ -187,7 +187,7 @@ async fn test_cache_concurrent_writes_no_panic() {
         h.await.unwrap_or(());
     }
 
-    assert!(cache.stats().entries <= 500);
+    assert!(cache.stats().entries.unwrap_or(0) <= 500);
 }
 
 #[tokio::test]
@@ -197,10 +197,10 @@ async fn test_cache_clear_and_stats() {
     for i in 0..5 {
         cache.set(format!("key-{i}"), "val", 3600).await;
     }
-    assert_eq!(cache.stats().entries, 5);
+    assert_eq!(cache.stats().entries, Some(5));
 
     cache.clear().await;
-    assert_eq!(cache.stats().entries, 0);
+    assert_eq!(cache.stats().entries, Some(0));
 }
 
 #[tokio::test]

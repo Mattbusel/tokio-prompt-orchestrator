@@ -6,16 +6,16 @@
 //! | Score       | Route                                       |
 //! |-------------|---------------------------------------------|
 //! | `< 0.4`     | Local model (free, fast)                    |
-//! | `0.4 – 0.7` | Local model with cloud fallback on failure  |
+//! | `0.4  -  0.7` | Local model with cloud fallback on failure  |
 //! | `> 0.7`     | Cloud model directly                        |
 //!
 //! ## Heuristics
 //!
-//! 1. **Token count** — >500 whitespace-delimited tokens → +0.3
-//! 2. **Code blocks** — presence of fenced code blocks (` ``` `) → +0.2
-//! 3. **Multi-step instructions** — numbered list items → +0.2
-//! 4. **Ambiguous references** — words like "it", "that", "the thing" → +0.15
-//! 5. **Domain-specific terms** — Rust/financial keywords → +0.15
+//! 1. **Token count**  -  >500 whitespace-delimited tokens → +0.3
+//! 2. **Code blocks**  -  presence of fenced code blocks (` ``` `) → +0.2
+//! 3. **Multi-step instructions**  -  numbered list items → +0.2
+//! 4. **Ambiguous references**  -  words like "it", "that", "the thing" → +0.15
+//! 5. **Domain-specific terms**  -  Rust/financial keywords → +0.15
 //!
 //! The raw sum is clamped to `[0.0, 1.0]`.
 
@@ -31,25 +31,48 @@
 pub struct ComplexityScorer {
     /// Minimum token count before the "long prompt" signal fires.
     token_count_threshold: usize,
+    /// Domain-specific terms that trigger the domain-term complexity signal.
+    /// Loaded from [`super::config::RoutingConfig::domain_terms`] when
+    /// constructed via [`ComplexityScorer::from_config`].
+    domain_terms: Vec<String>,
 }
 
 impl ComplexityScorer {
-    /// Create a new scorer with the default token-count threshold (500).
+    /// Create a new scorer with the default token-count threshold (500) and
+    /// the built-in domain term list.
     pub fn new() -> Self {
         Self {
             token_count_threshold: 500,
+            domain_terms: super::config::RoutingConfig::default().domain_terms,
         }
     }
 
-    /// Create a new scorer with a custom token-count threshold.
+    /// Create a new scorer with a custom token-count threshold and the built-in
+    /// domain term list.
     ///
     /// # Arguments
     ///
-    /// * `token_count_threshold` — Prompts with more whitespace-delimited
+    /// * `token_count_threshold`  -  Prompts with more whitespace-delimited
     ///   tokens than this value receive the long-prompt bonus.
     pub fn with_token_threshold(token_count_threshold: usize) -> Self {
         Self {
             token_count_threshold,
+            domain_terms: super::config::RoutingConfig::default().domain_terms,
+        }
+    }
+
+    /// Create a scorer configured from a [`super::config::RoutingConfig`].
+    ///
+    /// The domain term list is taken directly from `config.domain_terms` so
+    /// operators can customise scoring without code changes.
+    ///
+    /// # Panics
+    ///
+    /// This function never panics.
+    pub fn from_config(config: &super::config::RoutingConfig) -> Self {
+        Self {
+            token_count_threshold: 500,
+            domain_terms: config.domain_terms.clone(),
         }
     }
 
@@ -57,7 +80,7 @@ impl ComplexityScorer {
     ///
     /// # Arguments
     ///
-    /// * `prompt` — The raw prompt text to analyse.
+    /// * `prompt`  -  The raw prompt text to analyse.
     ///
     /// # Returns
     ///
@@ -82,7 +105,7 @@ impl ComplexityScorer {
         total += Self::code_block_signal(prompt);
         total += Self::multi_step_signal(prompt);
         total += Self::ambiguous_reference_signal(prompt);
-        total += Self::domain_term_signal(prompt);
+        total += self.domain_term_signal(prompt);
 
         clamp_score(total)
     }
@@ -93,7 +116,7 @@ impl ComplexityScorer {
     ///
     /// # Arguments
     ///
-    /// * `prompt` — The raw prompt text to analyse.
+    /// * `prompt`  -  The raw prompt text to analyse.
     ///
     /// # Returns
     ///
@@ -108,7 +131,7 @@ impl ComplexityScorer {
         let code_blocks = Self::code_block_signal(prompt);
         let multi_step = Self::multi_step_signal(prompt);
         let ambiguous_refs = Self::ambiguous_reference_signal(prompt);
-        let domain_terms = Self::domain_term_signal(prompt);
+        let domain_terms = self.domain_term_signal(prompt);
         let total =
             clamp_score(token_count + code_blocks + multi_step + ambiguous_refs + domain_terms);
 
@@ -122,7 +145,7 @@ impl ComplexityScorer {
         }
     }
 
-    // ── Individual signals ─────────────────────────────────────────────
+    //  Individual signals
 
     /// +0.3 if the prompt exceeds the token-count threshold.
     fn token_count_signal(&self, prompt: &str) -> f64 {
@@ -204,47 +227,17 @@ impl ComplexityScorer {
         }
     }
 
-    /// +0.15 if the prompt contains domain-specific terminology.
-    fn domain_term_signal(prompt: &str) -> f64 {
+    /// +0.15 if the prompt contains domain-specific terminology from
+    /// `self.domain_terms` (loaded from [`super::config::RoutingConfig`]).
+    fn domain_term_signal(&self, prompt: &str) -> f64 {
         let lower = prompt.to_lowercase();
-
-        // Rust keywords / concepts
-        let rust_terms = [
-            "borrow checker",
-            "lifetime",
-            "async fn",
-            "impl trait",
-            "tokio",
-            "unsafe",
-            "pin<",
-            "box<dyn",
-            "arc<mutex",
-            "send + sync",
-            "derive(",
-            "#[cfg(",
-            "cargo.toml",
-            "clippy",
-        ];
-
-        // Financial / quantitative terms
-        let financial_terms = [
-            "black-scholes",
-            "monte carlo",
-            "sharpe ratio",
-            "portfolio",
-            "var(",
-            "yield curve",
-            "derivative pricing",
-            "risk-adjusted",
-        ];
-
-        let rust_hits = rust_terms.iter().filter(|t| lower.contains(*t)).count();
-        let fin_hits = financial_terms
+        let hits = self
+            .domain_terms
             .iter()
-            .filter(|t| lower.contains(*t))
+            .filter(|t| lower.contains(t.as_str()))
             .count();
-
-        if rust_hits >= 2 || fin_hits >= 2 || (rust_hits >= 1 && fin_hits >= 1) {
+        // Two or more domain terms triggers the signal
+        if hits >= 2 {
             0.15
         } else {
             0.0
@@ -286,7 +279,7 @@ pub struct ScoreBreakdown {
     pub total: f64,
 }
 
-// ── Tests ──────────────────────────────────────────────────────────────
+//  Tests
 
 #[cfg(test)]
 mod tests {
@@ -554,6 +547,35 @@ Here are many words to push over the token threshold for this test case."#;
         assert!(bd.ambiguous_refs.abs() < f64::EPSILON);
         assert!(bd.domain_terms.abs() < f64::EPSILON);
         assert!(bd.total.abs() < f64::EPSILON);
+    }
+
+    // -- config-driven domain terms --------------------------------------
+
+    #[test]
+    fn test_complexity_scorer_uses_config_terms() {
+        use super::super::config::RoutingConfig;
+        // Build a config with custom domain terms
+        let mut cfg = RoutingConfig::default();
+        cfg.domain_terms = vec!["frobnicator".into(), "wigglesworth".into()];
+        let scorer = ComplexityScorer::from_config(&cfg);
+
+        // Prompt with both custom terms should get the domain signal
+        let prompt = "Use the frobnicator to call wigglesworth here";
+        let bd = scorer.breakdown(prompt);
+        assert!(
+            (bd.domain_terms - 0.15).abs() < f64::EPSILON,
+            "custom config terms should trigger domain signal, got {}",
+            bd.domain_terms
+        );
+
+        // Prompt with default terms (borrow checker etc.) should NOT trigger
+        // because we replaced the list
+        let no_match = "borrow checker lifetime issues";
+        let bd2 = scorer.breakdown(no_match);
+        assert!(
+            bd2.domain_terms.abs() < f64::EPSILON,
+            "default terms should not trigger when config overrides list"
+        );
     }
 
     // -- Default trait ---------------------------------------------------

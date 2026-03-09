@@ -7,22 +7,22 @@
 //!
 //! ```text
 //!   TelemetryBus
-//!       │  subscribe()
-//!       ▼
-//!   AnomalyDetector  ──── critical anomalies ──► TuningController
-//!       │                                               │  process(snap)
-//!       │ anomalies                                     │  tuning adjustments
-//!       ▼                                               ▼
-//!   MetaTaskGenerator ◄─────────────────────── SnapshotStore
-//!       │  process_snapshot()                  create_snapshot()
-//!       │  generated tasks
-//!       ▼
+//!         subscribe()
+//!       
+//!   AnomalyDetector   critical anomalies  TuningController
+//!                                                        process(snap)
+//!        anomalies                                       tuning adjustments
+//!                                                      
+//!   MetaTaskGenerator  SnapshotStore
+//!         process_snapshot()                  create_snapshot()
+//!         generated tasks
+//!       
 //!   ValidationGate
-//!       │  evaluate()
-//!       ▼
+//!         evaluate()
+//!       
 //!   AgentMemory
-//!       │  insert_modification()
-//!       └── loop status / metrics
+//!         insert_modification()
+//!        loop status / metrics
 //! ```
 //!
 //! ## Usage
@@ -58,6 +58,12 @@
 //!     handle.await.ok();
 //! }
 //! ```
+//!
+//! ## Prerequisites
+//!
+//! This feature requires `rustc` **and** `cargo` to be installed on the host
+//! machine.  It must **never** run on production hosts.  Set `RUST_ENV=production`
+//! to hard-disable the loop at startup, or set `SELF_IMPROVE_DISABLE=1`.
 //!
 //! ## Feature flag
 //!
@@ -127,6 +133,22 @@ pub struct LoopConfig {
     /// PID controller target throughput in requests/second.
     /// Default: 1000.0.
     pub target_throughput_rps: f64,
+
+    /// Maximum number of improvement tasks that may be generated within any
+    /// rolling 1-hour window.  Prevents runaway task generation on noisy metrics.
+    /// Default: 20.
+    pub max_tasks_per_hour: u32,
+
+    /// Relative degradation that triggers automatic parameter rollback.
+    /// A value of `0.10` means a >10% increase in p95 latency since the last
+    /// parameter change triggers a rollback of that parameter.
+    /// Default: 0.10.
+    pub rollback_threshold_pct: f64,
+
+    /// How long (seconds) after a parameter change to watch for metric
+    /// degradation before declaring the change safe.
+    /// Default: 30 seconds.
+    pub rollback_window_secs: u64,
 }
 
 impl Default for LoopConfig {
@@ -140,6 +162,9 @@ impl Default for LoopConfig {
             max_memory_records: 512,
             target_p95_ms: 50.0,
             target_throughput_rps: 1_000.0,
+            max_tasks_per_hour: 20,
+            rollback_threshold_pct: 0.10,
+            rollback_window_secs: 30,
         }
     }
 }
@@ -172,7 +197,7 @@ pub struct LoopStatus {
 }
 
 // ---------------------------------------------------------------------------
-// SelfImprovementLoop — internal state
+// SelfImprovementLoop  -  internal state
 // ---------------------------------------------------------------------------
 
 struct Inner {
@@ -237,12 +262,16 @@ impl SelfImprovementLoop {
     /// dependencies are required.
     pub fn new(cfg: LoopConfig, bus: Arc<TelemetryBus>) -> Self {
         let anomaly = Arc::new(AnomalyDetector::with_defaults());
-        let controller = Mutex::new(TuningController::new(
+        let controller = Mutex::new(TuningController::with_rollback_config(
             cfg.target_p95_ms,
             cfg.target_throughput_rps,
+            cfg.rollback_threshold_pct,
+            Duration::from_secs(cfg.rollback_window_secs),
         ));
         let snapshots = Arc::new(SnapshotStore::new(cfg.max_snapshots));
-        let task_gen = Arc::new(MetaTaskGenerator::new());
+        let task_gen = Arc::new(MetaTaskGenerator::new_with_rate_limit(
+            cfg.max_tasks_per_hour,
+        ));
         let gate_cfg = GateConfig::default();
         let gate = Arc::new(ValidationGate::new(gate_cfg));
         let memory = Arc::new(AgentMemory::new(cfg.max_memory_records));
@@ -322,12 +351,26 @@ impl SelfImprovementLoop {
 
     /// Drive the self-improvement loop until `shutdown_rx` is set to `true`.
     ///
+    /// ## Production guard
+    /// If `RUST_ENV=production` is set, this method logs a warning and returns
+    /// immediately without starting the loop.  The self-improvement loop requires
+    /// `rustc`/`cargo` on the host and must not run in production environments.
+    ///
     /// This method is designed to be spawned in a `tokio::spawn` call:
     ///
     /// ```rust,ignore
     /// let handle = tokio::spawn(async move { sil.run(shutdown_rx).await });
     /// ```
     pub async fn run(&self, mut shutdown_rx: watch::Receiver<bool>) {
+        // Production guard: refuse to start on production hosts.
+        if std::env::var("RUST_ENV").unwrap_or_default() == "production" {
+            warn!(
+                "SelfImprovementLoop refused to start: RUST_ENV=production. \
+                 This feature requires rustc/cargo and must not run on production hosts."
+            );
+            return;
+        }
+
         info!("SelfImprovementLoop starting");
         self.inner.running.store(true, Ordering::SeqCst);
         if let Ok(mut g) = self.inner.started_at.lock() {
@@ -390,7 +433,7 @@ impl SelfImprovementLoop {
             .fetch_add(1, Ordering::Relaxed);
         debug!("Processing telemetry snapshot #{snap_id}");
 
-        // ── 1. Anomaly detection ─────────────────────────────────────────
+        //  1. Anomaly detection
         let anomalies = self.run_anomaly_detection(&snap)?;
         let critical_count = anomalies
             .iter()
@@ -406,7 +449,7 @@ impl SelfImprovementLoop {
             );
         }
 
-        // ── 2. PID tuning controller ─────────────────────────────────────
+        //  2. PID tuning controller
         let adjustments = self.run_tuning_controller(&snap);
         if !adjustments.is_empty() {
             self.inner
@@ -418,10 +461,10 @@ impl SelfImprovementLoop {
             );
         }
 
-        // ── 3. Snapshot store — record current config ────────────────────
+        //  3. Snapshot store  -  record current config
         self.record_config_snapshot(&snap, &adjustments)?;
 
-        // ── 4. Task generation ───────────────────────────────────────────
+        //  4. Task generation
         // Only generate tasks when anomaly severity meets the threshold.
         let should_generate = anomalies
             .iter()
@@ -441,7 +484,7 @@ impl SelfImprovementLoop {
                     .fetch_add(generated.len() as u64, Ordering::Relaxed);
                 info!("Snapshot #{snap_id}: {} tasks generated", generated.len());
 
-                // ── 5. Validate each task through the gate ────────────────
+                //  5. Validate each task through the gate
                 for task in &generated {
                     self.run_gate_and_record(task, snap_id).await;
                 }
@@ -663,7 +706,7 @@ mod tests {
         SelfImprovementLoop::new(cfg, bus)
     }
 
-    // ── status ──────────────────────────────────────────────────────────────
+    //  status
 
     #[test]
     fn test_status_initial_state_all_zeros() {
@@ -677,7 +720,7 @@ mod tests {
         assert!(!s.running);
     }
 
-    // ── snapshot_to_metrics ──────────────────────────────────────────────────
+    //  snapshot_to_metrics
 
     #[test]
     fn test_snapshot_to_metrics_includes_error_rate() {
@@ -703,7 +746,7 @@ mod tests {
         assert!(m.contains_key("dedup.error_rate"));
     }
 
-    // ── severity helpers ─────────────────────────────────────────────────────
+    //  severity helpers
 
     #[test]
     fn test_severity_gte_critical_ge_warn() {
@@ -720,7 +763,7 @@ mod tests {
         assert!(severity_gte(&Severity::Warning, &Severity::Warning));
     }
 
-    // ── LoopConfig defaults ──────────────────────────────────────────────────
+    //  LoopConfig defaults
 
     #[test]
     fn test_loop_config_defaults_sane() {
@@ -731,7 +774,7 @@ mod tests {
         assert!(cfg.target_throughput_rps > 0.0);
     }
 
-    // ── run + shutdown ───────────────────────────────────────────────────────
+    //  run + shutdown
 
     #[tokio::test]
     async fn test_run_stops_on_shutdown_signal() {
@@ -753,7 +796,7 @@ mod tests {
         assert!(!sil.inner.running.load(Ordering::Relaxed));
     }
 
-    // ── process_snapshot counter increments ──────────────────────────────────
+    //  process_snapshot counter increments
 
     #[tokio::test]
     async fn test_process_snapshot_increments_counter() {
@@ -773,12 +816,12 @@ mod tests {
         assert!(sil.snapshots.version_count() >= 1);
     }
 
-    // ── gate counters ────────────────────────────────────────────────────────
+    //  gate counters
     // NOTE: test_run_gate_increments_gate_evaluations is an integration test
     // (tests/self_improve_integration.rs) because ValidationGate::evaluate
     // runs `cargo test` as a subprocess which would deadlock inside a unit test.
 
-    // ── live_tuning actuation ────────────────────────────────────────────────
+    //  live_tuning actuation
 
     #[tokio::test]
     async fn test_live_tuning_accessible_after_construction() {
@@ -846,7 +889,39 @@ mod tests {
         assert!((clone.get(ParameterId::DedupTtlMs) - expected).abs() < f64::EPSILON);
     }
 
-    // ── with_components constructor ──────────────────────────────────────────
+    //  production guard
+
+    #[tokio::test]
+    async fn test_self_improve_loop_refuses_in_production() {
+        let prev = std::env::var("RUST_ENV").ok();
+        std::env::set_var("RUST_ENV", "production");
+
+        let sil = Arc::new(make_loop(false));
+        let (_tx, rx) = watch::channel(false);
+
+        // run() should return immediately without setting running=true
+        let sil_clone = Arc::clone(&sil);
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio::spawn(async move { sil_clone.run(rx).await }),
+        )
+        .await
+        .expect("should return quickly in production mode")
+        .expect("join error");
+
+        // running must never have been set to true
+        assert!(
+            !sil.inner.running.load(std::sync::atomic::Ordering::Relaxed),
+            "loop should not start in production environment"
+        );
+
+        match prev {
+            Some(v) => std::env::set_var("RUST_ENV", v),
+            None => std::env::remove_var("RUST_ENV"),
+        }
+    }
+
+    //  with_components constructor
 
     #[test]
     fn test_with_components_constructs_without_panic() {

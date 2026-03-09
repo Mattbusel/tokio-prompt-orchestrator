@@ -88,7 +88,7 @@ impl RateLimiter {
     pub fn new_governor(max_requests: u32, _window_secs: u64) -> Result<Self, OrchestratorError> {
         let requests = NonZeroU32::new(max_requests)
             .ok_or_else(|| OrchestratorError::ConfigError("max_requests must be > 0".into()))?;
-        // saturating_mul(2): since max_requests >= 1, burst_count >= 2 — never zero
+        // saturating_mul(2): since max_requests >= 1, burst_count >= 2  -  never zero
         let burst_count = max_requests.saturating_mul(2);
         let burst = NonZeroU32::new(burst_count)
             .ok_or_else(|| OrchestratorError::ConfigError("burst limit overflow".into()))?;
@@ -278,7 +278,7 @@ mod tests {
         assert_eq!(info.remaining, 8);
     }
 
-    // ── Hardening tests ──────────────────────────────────────────────
+    //  Hardening tests
 
     #[tokio::test]
     async fn test_zero_max_requests_blocks_all() {
@@ -399,6 +399,46 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
 
         assert!(limiter.check("s").await, "window must have reset");
+    }
+
+    #[tokio::test]
+    async fn test_rate_limiter_concurrent_window_reset_does_not_double_allow() {
+        // Spawn many concurrent tasks all hitting the same session at the moment
+        // the window resets (window_secs = 1).  Each task fires 10 rapid checks.
+        // After the dust settles we verify that at no point was more than
+        // max_requests allowed within any single window.
+        //
+        // This exercises the atomicity guarantee of the DashMap-entry-based
+        // check-and-reset: because the entry borrow is held for the entire
+        // check → reset → increment sequence there is no window for a second
+        // goroutine to observe the reset state and also increment from 0.
+        let limiter = Arc::new(RateLimiter::new(5, 1));
+
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let l = limiter.clone();
+            handles.push(tokio::spawn(async move {
+                let mut allowed = 0usize;
+                for _ in 0..10 {
+                    if l.check("concurrent-session").await {
+                        allowed += 1;
+                    }
+                }
+                allowed
+            }));
+        }
+
+        let mut total_allowed: usize = 0;
+        for h in handles {
+            total_allowed += h.await.unwrap_or(0);
+        }
+
+        // Within a 1-second window at most max_requests (5) should be allowed.
+        // Because we may span a window boundary the upper bound is 2×5 = 10.
+        assert!(
+            total_allowed <= 10,
+            "concurrent resets must not allow more than 2 windows worth: {total_allowed}"
+        );
     }
 
     #[cfg(feature = "rate-limiting")]

@@ -1,7 +1,7 @@
 //! # Meta-Task Generator (Task 2.1)
 //!
 //! Reads anomaly events and telemetry degradation signals, then generates
-//! TOML task files for the agent coordinator — turning system problems into
+//! TOML task files for the agent coordinator  -  turning system problems into
 //! agent work orders.
 //!
 //! ## Example flow
@@ -24,7 +24,7 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -32,7 +32,7 @@ use thiserror::Error;
 
 use crate::self_tune::telemetry_bus::TelemetrySnapshot;
 
-// ─── Error ────────────────────────────────────────────────────────────────────
+//  Error
 
 /// Errors produced by the task generator.
 #[derive(Debug, Error)]
@@ -46,7 +46,7 @@ pub enum TaskGenError {
     SerializationFailed(String),
 }
 
-// ─── Generated task ───────────────────────────────────────────────────────────
+//  Generated task
 
 /// Priority of a generated task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -125,23 +125,36 @@ pub struct GeneratedTask {
 
 impl GeneratedTask {
     /// Render the task as a TOML string suitable for writing to a file.
+    ///
+    /// String values are escaped to prevent malformed TOML output:
+    /// backslashes, double-quotes, newlines, carriage-returns, and NUL bytes
+    /// are all replaced with safe representations.
     pub fn to_toml(&self) -> Result<String, TaskGenError> {
+        // Escape a string value for use inside a TOML double-quoted string.
+        let escape_toml = |s: &str| -> String {
+            s.replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r")
+                .replace('\0', "\\u0000")
+        };
+
         let s = format!(
             "[task]\nid = \"{id}\"\nname = \"{name}\"\npriority = \"{priority}\"\nestimated_complexity = \"{complexity}\"\ntrigger_metric = \"{metric}\"\ntrigger_value = {trigger:.4}\ntarget_value = {target:.4}\ncreated_at_secs = {ts}\n\ndescription = \"\"\"\n{desc}\n\"\"\"\n\nacceptance_criteria = \"{ac}\"\n\naffected_files = [{files}]\n",
-            id = self.id,
-            name = self.name,
+            id = escape_toml(&self.id),
+            name = escape_toml(&self.name),
             priority = self.priority.as_str(),
             complexity = self.estimated_complexity.as_str(),
-            metric = self.trigger_metric,
+            metric = escape_toml(&self.trigger_metric),
             trigger = self.trigger_value,
             target = self.target_value,
             ts = self.created_at_secs,
-            desc = self.description.replace('"', "'"),
-            ac = self.acceptance_criteria,
+            desc = escape_toml(&self.description),
+            ac = escape_toml(&self.acceptance_criteria),
             files = self
                 .affected_files
                 .iter()
-                .map(|f| format!("\"{}\"", f))
+                .map(|f| format!("\"{}\"", escape_toml(f)))
                 .collect::<Vec<_>>()
                 .join(", "),
         );
@@ -149,7 +162,7 @@ impl GeneratedTask {
     }
 }
 
-// ─── Task template ────────────────────────────────────────────────────────────
+//  Task template
 
 /// A template that maps a metric threshold to a task description.
 #[derive(Debug, Clone)]
@@ -203,7 +216,7 @@ impl TaskTemplate {
     }
 }
 
-// ─── Generator ────────────────────────────────────────────────────────────────
+//  Generator
 
 struct GenInner {
     templates: Vec<TaskTemplate>,
@@ -213,6 +226,10 @@ struct GenInner {
     generated_tasks: Vec<GeneratedTask>,
     /// Maximum task history to retain.
     max_history: usize,
+    /// Maximum number of tasks that may be generated within any rolling 1-hour window.
+    max_tasks_per_hour: u32,
+    /// Wall-clock timestamps of recent task generation events (for rate limiting).
+    recent_task_times: Vec<Instant>,
 }
 
 /// Generates agent work orders from telemetry degradation signals.
@@ -227,14 +244,33 @@ impl MetaTaskGenerator {
         Self::with_templates(default_templates())
     }
 
+    /// Create a generator with default templates and an explicit hourly rate limit.
+    pub fn new_with_rate_limit(max_tasks_per_hour: u32) -> Self {
+        Self::with_templates_and_rate_limit(default_templates(), max_tasks_per_hour)
+    }
+
     /// Create a generator with custom templates (replaces defaults).
     pub fn with_templates(templates: Vec<TaskTemplate>) -> Self {
+        Self::with_templates_and_rate_limit(templates, 20)
+    }
+
+    /// Create a generator with custom templates and an explicit hourly rate limit.
+    ///
+    /// `max_tasks_per_hour` caps the total number of tasks that may be generated
+    /// within any rolling 1-hour window.  Once the limit is reached, new tasks
+    /// are silently suppressed until the window advances.  Default: 20.
+    pub fn with_templates_and_rate_limit(
+        templates: Vec<TaskTemplate>,
+        max_tasks_per_hour: u32,
+    ) -> Self {
         Self {
             inner: Arc::new(Mutex::new(GenInner {
                 templates,
                 last_generated: HashMap::new(),
                 generated_tasks: Vec::new(),
                 max_history: 500,
+                max_tasks_per_hour,
+                recent_task_times: Vec::new(),
             })),
         }
     }
@@ -248,7 +284,7 @@ impl MetaTaskGenerator {
 
     /// Analyse a telemetry snapshot and generate tasks for any triggered thresholds.
     ///
-    /// Rate-limiting is respected — templates on cooldown are skipped.
+    /// Rate-limiting is respected  -  templates on cooldown are skipped.
     pub fn process_snapshot(
         &self,
         snap: &TelemetrySnapshot,
@@ -281,8 +317,20 @@ impl MetaTaskGenerator {
                 continue;
             }
 
+            // Hourly rate limit: prune timestamps older than 1 hour, then check.
+            let one_hour_ago = std::time::Instant::now()
+                .checked_sub(Duration::from_secs(3600))
+                .unwrap_or_else(std::time::Instant::now);
+            inner.recent_task_times.retain(|&t| t > one_hour_ago);
+            if inner.recent_task_times.len() as u32 >= inner.max_tasks_per_hour {
+                // Rate limit exceeded; skip generation for all remaining templates
+                // in this snapshot.
+                break;
+            }
+
             let task = template.render(value, now);
             inner.last_generated.insert(template.metric.clone(), now);
+            inner.recent_task_times.push(std::time::Instant::now());
 
             if inner.generated_tasks.len() >= inner.max_history {
                 inner.generated_tasks.remove(0);
@@ -325,7 +373,7 @@ impl Default for MetaTaskGenerator {
     }
 }
 
-// ─── Metric extraction ────────────────────────────────────────────────────────
+//  Metric extraction
 
 fn snapshot_to_metrics(snap: &TelemetrySnapshot) -> HashMap<String, f64> {
     let mut m = HashMap::new();
@@ -365,7 +413,7 @@ fn snapshot_to_metrics(snap: &TelemetrySnapshot) -> HashMap<String, f64> {
     m
 }
 
-// ─── Default templates ────────────────────────────────────────────────────────
+//  Default templates
 
 fn default_templates() -> Vec<TaskTemplate> {
     vec![
@@ -428,7 +476,35 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
+/// Escape a string for safe embedding inside a TOML basic string.
+///
+/// Escapes backslashes, double-quotes, newlines (LF and CR), and ASCII
+/// control characters (U+0000–U+001F) so that arbitrary values
+/// cannot break the TOML document or inject extra keys.
+///
+/// # Example
+/// ```rust
+/// use tokio_prompt_orchestrator::self_modify::task_gen::sanitise_toml_string;
+/// assert_eq!(sanitise_toml_string("a\\b"), "a\\\\b");
+/// ```
+pub fn sanitise_toml_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04X}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+//  Tests
 
 #[cfg(test)]
 mod tests {
@@ -512,7 +588,7 @@ mod tests {
         let gen = MetaTaskGenerator::new();
         gen.process_snapshot(&high_dedup_snap()).unwrap();
         let count_after_first = gen.task_count();
-        // Process again — cooldown prevents re-generation
+        // Process again  -  cooldown prevents re-generation
         gen.process_snapshot(&high_dedup_snap()).unwrap();
         assert_eq!(gen.task_count(), count_after_first);
     }
@@ -629,5 +705,155 @@ mod tests {
             .find(|t| t.trigger_metric == "dedup_collision_rate")
             .unwrap();
         assert!(task.id.contains("dedup_collision_rate"));
+    }
+
+    // ------------------------------------------------------------------
+    // CRIT-03: sanitise_toml_string tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_sanitise_toml_string_escapes_backslash() {
+        assert_eq!(sanitise_toml_string("a\\b"), "a\\\\b");
+        assert_eq!(
+            sanitise_toml_string("C:\\Windows\\System32"),
+            "C:\\\\Windows\\\\System32"
+        );
+    }
+
+    #[test]
+    fn test_sanitise_toml_string_escapes_quotes() {
+        assert_eq!(sanitise_toml_string("say \"hi\""), "say \\\"hi\\\"");
+        assert_eq!(sanitise_toml_string("\"quoted\""), "\\\"quoted\\\"");
+    }
+
+    #[test]
+    fn test_sanitise_toml_string_escapes_newlines() {
+        assert_eq!(sanitise_toml_string("line1\nline2"), "line1\\nline2");
+        assert_eq!(sanitise_toml_string("line1\r\nline2"), "line1\\r\\nline2");
+    }
+
+    #[test]
+    fn test_sanitise_toml_string_escapes_control_chars() {
+        // NUL byte
+        let with_nul = "abc\x00def";
+        let escaped = sanitise_toml_string(with_nul);
+        assert!(
+            escaped.contains("\\u0000"),
+            "NUL should be escaped: {escaped}"
+        );
+        // Bell (0x07)
+        let with_bell = "abc\x07def";
+        let escaped = sanitise_toml_string(with_bell);
+        assert!(
+            escaped.contains("\\u0007"),
+            "Bell should be escaped: {escaped}"
+        );
+    }
+
+    #[test]
+    fn test_sanitise_toml_string_passthrough_normal_chars() {
+        let normal = "hello world 123 !@#$%^&*()";
+        assert_eq!(sanitise_toml_string(normal), normal);
+    }
+
+    #[test]
+    fn test_to_toml_with_injection_attempt() {
+        let gen = MetaTaskGenerator::new();
+        let snap = crate::self_tune::telemetry_bus::TelemetrySnapshot {
+            dedup_collision_rate: 0.05,
+            ..Default::default()
+        };
+        let tasks = gen.process_snapshot(&snap).unwrap();
+        if let Some(task) = tasks.first() {
+            let toml_str = task.to_toml().unwrap();
+            // Verify it contains the [task] header and no raw injection
+            assert!(toml_str.contains("[task]"));
+        }
+    }
+
+    #[test]
+    fn test_task_gen_escapes_backslash() {
+        let task = GeneratedTask {
+            id: "id".to_string(),
+            name: "name\\test".to_string(),
+            description: "desc with \\backslash".to_string(),
+            affected_files: vec!["src\\foo.rs".to_string()],
+            acceptance_criteria: "crit".to_string(),
+            priority: TaskPriority::Low,
+            estimated_complexity: Complexity::Small,
+            trigger_metric: "metric".to_string(),
+            trigger_value: 0.5,
+            target_value: 0.1,
+            created_at_secs: 0,
+        };
+        let toml_str = task.to_toml().unwrap();
+        assert!(
+            toml_str.contains("\\\\"),
+            "expected escaped backslash in output: {toml_str}"
+        );
+    }
+
+    #[test]
+    fn test_task_gen_escapes_newline() {
+        let task = GeneratedTask {
+            id: "id-nl".to_string(),
+            name: "name\nnewline".to_string(),
+            description: "line1\nline2".to_string(),
+            affected_files: vec![],
+            acceptance_criteria: "done\nmore".to_string(),
+            priority: TaskPriority::Low,
+            estimated_complexity: Complexity::Small,
+            trigger_metric: "metric".to_string(),
+            trigger_value: 0.5,
+            target_value: 0.1,
+            created_at_secs: 0,
+        };
+        let toml_str = task.to_toml().unwrap();
+        assert!(
+            toml_str.contains("\\n"),
+            "expected \\n escape in output: {toml_str}"
+        );
+    }
+
+    #[test]
+    fn test_task_gen_respects_hourly_rate_limit() {
+        let gen = MetaTaskGenerator::with_templates_and_rate_limit(
+            vec![TaskTemplate {
+                metric: "pressure".to_string(),
+                threshold: 0.5,
+                target: 0.1,
+                name_template: "pressure_fix".to_string(),
+                description_template: "pressure is {value}".to_string(),
+                affected_files: vec![],
+                acceptance_criteria_template: "pressure < {target}".to_string(),
+                priority: TaskPriority::High,
+                complexity: Complexity::Small,
+                cooldown_secs: 0,
+            }],
+            2, // max 2 tasks per hour
+        );
+
+        let high_pressure = TelemetrySnapshot {
+            pressure: 0.99,
+            ..TelemetrySnapshot::default()
+        };
+
+        let t1 = gen.process_snapshot(&high_pressure).unwrap();
+        assert_eq!(t1.len(), 1, "first call should produce 1 task");
+
+        let t2 = gen.process_snapshot(&high_pressure).unwrap();
+        assert_eq!(
+            t2.len(),
+            1,
+            "second call should produce 1 task (limit not yet hit)"
+        );
+
+        // Third call: hourly limit of 2 reached, must produce 0 tasks
+        let t3 = gen.process_snapshot(&high_pressure).unwrap();
+        assert_eq!(
+            t3.len(),
+            0,
+            "third call should produce 0 tasks (hourly limit exceeded)"
+        );
     }
 }

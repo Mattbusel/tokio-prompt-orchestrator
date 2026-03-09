@@ -31,11 +31,34 @@ count_meaningful() {
 # braces), then immediately exited because depth < test_depth.
 extract_test_ranges() {
     local file="$1"
+    # NOTE: This AWK script handles single-line #[cfg(test)] and the common
+    # multi-line variant:
+    #   #[cfg(
+    #       test
+    #   )]
+    #
+    # It does NOT handle arbitrarily complex attribute forms such as
+    # #[cfg(all(test, feature = "x"))] -- those would require a full Rust
+    # parser and are out of scope for this shell-based check.
     awk '
-    BEGIN { in_test=0; pending_test=0; depth=0; test_depth=0 }
+    BEGIN { in_test=0; pending_test=0; pending_cfg=0; depth=0; test_depth=0 }
     {
+        # Single-line form: #[cfg(test)]
         if (!in_test && !pending_test && /^[[:space:]]*#\[cfg\(test\)\]/) {
             pending_test = 1
+        }
+        # Multi-line form: opening line is #[cfg(  (no closing paren yet)
+        if (!in_test && !pending_test && !pending_cfg && /^[[:space:]]*#\[cfg\(/ && !/test\)/) {
+            pending_cfg = 1
+        }
+        # Second line of multi-line form contains just "test"
+        if (!in_test && !pending_test && pending_cfg && /^[[:space:]]*test[[:space:]]*$/) {
+            pending_cfg = 0
+            pending_test = 1
+        }
+        # If we encounter something else while in pending_cfg state, cancel it
+        if (pending_cfg && !/^[[:space:]]*#\[cfg\(/ && !/^[[:space:]]*test[[:space:]]*$/ && !/^[[:space:]]*\)\]/) {
+            pending_cfg = 0
         }
         opens = gsub(/{/, "{")
         closes = gsub(/}/, "}")

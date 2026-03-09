@@ -21,7 +21,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-// ─── Error ────────────────────────────────────────────────────────────────────
+//  Error
 
 /// Errors from the capability discovery module.
 #[derive(Debug, Error)]
@@ -35,7 +35,7 @@ pub enum DiscoveryError {
     WorkspaceError(String),
 }
 
-// ─── Discovery finding ────────────────────────────────────────────────────────
+//  Discovery finding
 
 /// Category of a discovery finding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,11 +103,7 @@ impl DiscoveryFinding {
             title = self.title,
             id = self.id,
             effort = self.estimated_effort,
-            status = if self.resolved {
-                "✅ Resolved"
-            } else {
-                "🔍 Open"
-            },
+            status = if self.resolved { " Resolved" } else { " Open" },
             desc = self.description,
             action = self.suggested_action,
             files = self
@@ -120,7 +116,7 @@ impl DiscoveryFinding {
     }
 }
 
-// ─── Scan result ─────────────────────────────────────────────────────────────
+//  Scan result
 
 /// Result of a single discovery scan run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,7 +131,7 @@ pub struct ScanResult {
     pub categories_scanned: Vec<FindingCategory>,
 }
 
-// ─── Scanner configuration ────────────────────────────────────────────────────
+//  Scanner configuration
 
 /// Configuration for the capability discovery scanner.
 #[derive(Debug, Clone)]
@@ -167,7 +163,7 @@ impl Default for DiscoveryConfig {
     }
 }
 
-// ─── Scanner ─────────────────────────────────────────────────────────────────
+//  Scanner
 
 struct DiscoveryInner {
     cfg: DiscoveryConfig,
@@ -354,7 +350,7 @@ impl CapabilityDiscovery {
             .unwrap_or(0)
     }
 
-    // ── Internal scan implementations ──────────────────────────────────────
+    //  Internal scan implementations
 
     fn scan_category(
         &self,
@@ -383,7 +379,8 @@ impl CapabilityDiscovery {
             }
         };
 
-        let output = match std::process::Command::new("cargo")
+        // Use cargo_bin() to avoid PATH-hijacking; see its doc comment.
+        let output = match std::process::Command::new(cargo_bin())
             .args(["check", "--message-format=json", "--quiet"])
             .current_dir(&workspace)
             .output()
@@ -467,14 +464,15 @@ impl CapabilityDiscovery {
             }
         };
 
-        let output = match std::process::Command::new("cargo")
+        // Use cargo_bin() to avoid PATH-hijacking; see its doc comment.
+        let output = match std::process::Command::new(cargo_bin())
             .args(["audit", "--json"])
             .current_dir(&workspace)
             .output()
         {
             Ok(o) => o,
             Err(_) => {
-                // cargo-audit not installed — return empty, don't fail scan
+                // cargo-audit not installed  -  return empty, don't fail scan
                 return Vec::new();
             }
         };
@@ -526,14 +524,24 @@ impl CapabilityDiscovery {
     }
 
     fn scan_test_coverage(&self) -> Vec<DiscoveryFinding> {
-        // Coverage requires llvm-cov; stub returns empty until tooling is available.
-        // The dead_code scan is a partial proxy for missing tests.
+        // NOT IMPLEMENTED: awaiting llvm-cov integration.
+        // This category intentionally returns no findings until the toolchain is
+        // available in CI.  Do not interpret an empty result as "full coverage".
+        //
+        // TODO: integrate llvm-cov by:
+        //   1. Add `cargo-llvm-cov` to the CI toolchain install step.
+        //   2. Run `cargo llvm-cov --json --output-path coverage.json`.
+        //   3. Parse `coverage.json` and emit a `DiscoveryFinding` for any
+        //      function / branch below the configured threshold.
+        //   4. Remove this comment and return real findings here.
+        //
+        // status: "not_implemented"
         Vec::new()
     }
 
     fn scan_performance(&self) -> Vec<DiscoveryFinding> {
         // Performance hotspot analysis requires criterion benchmark output.
-        // Stub returns empty — performance findings come from telemetry-driven
+        // Stub returns empty  -  performance findings come from telemetry-driven
         // anomaly detection instead.
         Vec::new()
     }
@@ -545,6 +553,20 @@ impl CapabilityDiscovery {
     }
 }
 
+/// Return the path to the `cargo` binary.
+///
+/// # Threat model
+/// Resolving `cargo` through `PATH` is vulnerable to PATH-hijacking attacks
+/// where a malicious binary earlier in `PATH` shadows the real Cargo.  When
+/// Cargo runs build scripts or test harnesses it sets the `CARGO` environment
+/// variable to its own absolute path; reading that variable gives us the exact
+/// binary that launched this process and eliminates the PATH-injection vector.
+/// If `CARGO` is not set (e.g. when invoked outside of Cargo), we fall back to
+/// the bare `"cargo"` name, which is the best we can do in that context.
+fn cargo_bin() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string()))
+}
+
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -552,7 +574,7 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
+//  Tests
 
 #[cfg(test)]
 mod tests {

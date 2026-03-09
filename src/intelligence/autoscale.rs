@@ -288,6 +288,27 @@ mod tests {
     }
 
     #[test]
+    fn test_autoscaler_respects_max_instances_config() {
+        // Set a very low max to verify it is honoured
+        let config = AutoscalerConfig {
+            max_local_instances: 2,
+            min_history_points: 3,
+            ..AutoscalerConfig::default()
+        };
+        let s = Autoscaler::new(config, 200);
+        // High RPS would normally suggest many instances
+        for _ in 0..6 {
+            s.record_rps(10_000.0);
+        }
+        let rec = s.forecast().unwrap();
+        assert!(
+            rec.recommended_local_instances <= 2,
+            "must not exceed configured max_local_instances=2, got {}",
+            rec.recommended_local_instances
+        );
+    }
+
+    #[test]
     fn test_forecast_buffer_size_positive() {
         let s = make_scaler(3);
         for _ in 0..6 {

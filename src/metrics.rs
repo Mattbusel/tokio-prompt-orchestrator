@@ -5,7 +5,7 @@
 //! Call [`init_metrics`] once at process startup **before** spawning any pipeline
 //! stages. The helper functions (`record_stage_latency`, `inc_request`, …) are
 //! no-ops if `init_metrics` was never called, so the pipeline is always safe to
-//! run — observability simply degrades gracefully.
+//! run  -  observability simply degrades gracefully.
 //!
 //! ## Metrics Exposed
 //!
@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-// ── Internal metrics bundle ────────────────────────────────────────────────
+//  Internal metrics bundle
 
 /// All Prometheus metrics for the orchestrator, bundled together so they can
 /// be stored in a single [`OnceLock`] and initialised atomically.
@@ -47,7 +47,7 @@ pub struct Metrics {
 
 static METRICS: OnceLock<Metrics> = OnceLock::new();
 
-// ── Initialisation ─────────────────────────────────────────────────────────
+//  Initialisation
 
 /// Initialise all Prometheus metrics and register them with a private registry.
 ///
@@ -120,7 +120,7 @@ pub fn init_metrics() -> Result<(), OrchestratorError> {
         .register(Box::new(queue_depth.clone()))
         .map_err(|e| OrchestratorError::Other(format!("metrics registration failed: {e}")))?;
 
-    // If another thread raced us, the first one wins — both initializations
+    // If another thread raced us, the first one wins  -  both initializations
     // produce identical metric descriptors, so neither outcome is incorrect.
     let _ = METRICS.set(Metrics {
         registry,
@@ -140,7 +140,7 @@ fn metrics() -> Option<&'static Metrics> {
     METRICS.get()
 }
 
-// ── Public helper functions ────────────────────────────────────────────────
+//  Public helper functions
 
 /// Record the processing latency for a pipeline stage.
 ///

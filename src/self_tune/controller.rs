@@ -38,12 +38,7 @@ use tracing::{info, warn};
 
 use crate::self_tune::telemetry_bus::{StageMetrics, TelemetrySnapshot};
 
-// ─── Constants ───────────────────────────────────────────────────────────────
-
-/// How long after a parameter change we watch for metric degradation.
-const ROLLBACK_WINDOW: Duration = Duration::from_secs(30);
-
-// ─── ParameterId ─────────────────────────────────────────────────────────────
+//  ParameterId
 
 /// One of the 12 tunable pipeline parameters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -84,10 +79,12 @@ pub enum ParameterId {
     /// Interval in milliseconds between priority-queue promotion sweeps.
     /// Interval in milliseconds between priority-queue promotion sweeps.
     PriorityQueuePromotionIntervalMs,
+    /// Maximum number of local autoscaler instances.
+    MaxLocalInstances,
 }
 
 impl ParameterId {
-    /// Return a slice containing all 12 tunable parameters in declaration order.
+    /// Return a slice containing all tunable parameters in declaration order.
     pub fn all() -> &'static [ParameterId] {
         &[
             ParameterId::ChannelBufStage1,
@@ -102,6 +99,7 @@ impl ParameterId {
             ParameterId::DedupTtlMs,
             ParameterId::RateLimiterRefillRate,
             ParameterId::PriorityQueuePromotionIntervalMs,
+            ParameterId::MaxLocalInstances,
         ]
     }
 
@@ -121,11 +119,12 @@ impl ParameterId {
             ParameterId::DedupTtlMs => "dedup_ttl_ms",
             ParameterId::RateLimiterRefillRate => "rate_limiter_refill_rate",
             ParameterId::PriorityQueuePromotionIntervalMs => "priority_queue_promotion_interval_ms",
+            ParameterId::MaxLocalInstances => "max_local_instances",
         }
     }
 }
 
-// ─── ParameterSpec ───────────────────────────────────────────────────────────
+//  ParameterSpec
 
 /// Constraints and rollback policy for a single tunable parameter.
 #[derive(Debug, Clone)]
@@ -206,6 +205,13 @@ impl ParameterSpec {
                 cooldown: Duration::from_secs(15),
                 rollback_threshold: 0.10,
             },
+            ParameterId::MaxLocalInstances => Self {
+                min: 1.0,
+                max: 64.0,
+                step: 1.0,
+                cooldown: Duration::from_secs(30),
+                rollback_threshold: 0.10,
+            },
         }
     }
 
@@ -214,7 +220,7 @@ impl ParameterSpec {
     }
 }
 
-// ─── PidState ────────────────────────────────────────────────────────────────
+//  PidState
 
 /// State for a single PID controller instance.
 #[derive(Debug, Clone)]
@@ -260,7 +266,7 @@ impl PidState {
     }
 }
 
-// ─── ParameterValue ──────────────────────────────────────────────────────────
+//  ParameterValue
 
 #[derive(Debug, Clone)]
 struct ParameterValue {
@@ -281,7 +287,7 @@ impl ParameterValue {
     }
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+//  Helpers
 
 /// Round `value` to the nearest multiple of `step`.
 pub fn pid_round_to_step(value: f64, step: f64) -> f64 {
@@ -331,7 +337,7 @@ fn avg_p99_ms(snap: &TelemetrySnapshot) -> f64 {
     stages.iter().map(|s| s.latency.p99_ms as f64).sum::<f64>() / stages.len() as f64
 }
 
-// ─── TuningController ────────────────────────────────────────────────────────
+//  TuningController
 
 /// Top-level PID controller that tunes all 12 pipeline parameters simultaneously.
 pub struct TuningController {
@@ -342,11 +348,40 @@ pub struct TuningController {
     pub target_p95_ms: f64,
     /// Target aggregate throughput in requests per second.
     pub target_throughput_rps: f64,
+    /// Relative degradation threshold that triggers automatic rollback (e.g. 0.10 = 10%).
+    /// When the p95 latency rises more than this fraction above the value at the time of
+    /// the last parameter change, the parameter is rolled back automatically.
+    pub rollback_threshold_pct: f64,
+    /// How long after a parameter change to observe for metric degradation before
+    /// declaring the change safe.
+    pub rollback_window: Duration,
 }
 
 impl TuningController {
     /// Create a new controller with the given latency and throughput targets.
+    /// Uses default rollback threshold (10%) and window (30 seconds).
     pub fn new(target_p95_ms: f64, target_throughput_rps: f64) -> Self {
+        Self::with_rollback_config(
+            target_p95_ms,
+            target_throughput_rps,
+            0.10,
+            Duration::from_secs(30),
+        )
+    }
+
+    /// Create a controller with explicit rollback configuration.
+    ///
+    /// # Arguments
+    /// * `target_p95_ms`          — Target p95 latency
+    /// * `target_throughput_rps`  — Target throughput
+    /// * `rollback_threshold_pct` — Fraction of latency increase that triggers rollback (e.g. 0.10)
+    /// * `rollback_window`        — How long after a change to watch for degradation
+    pub fn with_rollback_config(
+        target_p95_ms: f64,
+        target_throughput_rps: f64,
+        rollback_threshold_pct: f64,
+        rollback_window: Duration,
+    ) -> Self {
         let mut specs = HashMap::new();
         let mut values = HashMap::new();
         let mut pid_states = HashMap::new();
@@ -363,6 +398,8 @@ impl TuningController {
             pid_states,
             target_p95_ms,
             target_throughput_rps,
+            rollback_threshold_pct,
+            rollback_window,
         }
     }
 
@@ -413,6 +450,14 @@ impl TuningController {
                     0.0
                 }
             }
+            ParameterId::MaxLocalInstances => {
+                // Scale up instances when throughput is below target
+                if self.target_throughput_rps > 0.0 {
+                    (self.target_throughput_rps - tput) / self.target_throughput_rps
+                } else {
+                    0.0
+                }
+            }
         }
     }
 
@@ -430,14 +475,22 @@ impl TuningController {
             Some(s) => s,
             None => return false,
         };
-        if now.duration_since(val.last_changed) > ROLLBACK_WINDOW {
+        // Use the controller-level rollback_window (configurable via LoopConfig).
+        if now.duration_since(val.last_changed) > self.rollback_window {
             return false;
         }
         if metric_at_change <= 0.0 {
             return false;
         }
+        // Use the controller-level rollback_threshold_pct (configurable via LoopConfig).
+        // The per-ParameterSpec threshold is ignored when the controller-level value is set.
+        let threshold = if self.rollback_threshold_pct > 0.0 {
+            self.rollback_threshold_pct
+        } else {
+            spec.rollback_threshold
+        };
         let current_p95 = avg_p95_ms(snap);
-        current_p95 > metric_at_change * (1.0 + spec.rollback_threshold)
+        current_p95 > metric_at_change * (1.0 + threshold)
     }
 
     /// Process a snapshot: check rollbacks, then apply PID updates.
@@ -568,7 +621,7 @@ impl TuningController {
     }
 }
 
-// ─── Tests ───────────────────────────────────────────────────────────────────
+//  Tests
 
 #[cfg(test)]
 mod tests {
@@ -608,11 +661,11 @@ mod tests {
         }
     }
 
-    // ── ParameterId ──────────────────────────────────────────────────────────
+    //  ParameterId
 
     #[test]
     fn test_parameter_id_all_has_12_elements() {
-        assert_eq!(ParameterId::all().len(), 12);
+        assert_eq!(ParameterId::all().len(), 13);
     }
 
     #[test]
@@ -633,10 +686,10 @@ mod tests {
     fn test_parameter_id_names_are_unique() {
         let names: std::collections::HashSet<&str> =
             ParameterId::all().iter().map(|id| id.name()).collect();
-        assert_eq!(names.len(), 12);
+        assert_eq!(names.len(), ParameterId::all().len());
     }
 
-    // ── ParameterSpec ────────────────────────────────────────────────────────
+    //  ParameterSpec
 
     #[test]
     fn test_parameter_spec_default_valid_for_all() {
@@ -672,7 +725,7 @@ mod tests {
         assert_eq!(s.max, 300_000.0);
     }
 
-    // ── PidState ─────────────────────────────────────────────────────────────
+    //  PidState
 
     #[test]
     fn test_pid_zero_error_zero_output() {
@@ -729,7 +782,7 @@ mod tests {
         assert_eq!(pid.update(100.0, 0.0), 0.0);
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────────────
+    //  Helpers
 
     #[test]
     fn test_round_to_step_basic() {
@@ -789,14 +842,15 @@ mod tests {
         assert!((avg_throughput_rps(&s) - 42.5).abs() < 1e-6);
     }
 
-    // ── TuningController ─────────────────────────────────────────────────────
+    //  TuningController
 
     #[test]
     fn test_controller_new_initialises_all_12() {
         let ctrl = TuningController::new(200.0, 100.0);
-        assert_eq!(ctrl.values.len(), 12);
-        assert_eq!(ctrl.specs.len(), 12);
-        assert_eq!(ctrl.pid_states.len(), 12);
+        let n = ParameterId::all().len();
+        assert_eq!(ctrl.values.len(), n);
+        assert_eq!(ctrl.specs.len(), n);
+        assert_eq!(ctrl.pid_states.len(), n);
     }
 
     #[test]
@@ -847,7 +901,7 @@ mod tests {
         let s = snap(999, 1.0, 0.95);
         let first: std::collections::HashSet<ParameterId> =
             ctrl.process(&s).into_iter().map(|(id, _)| id).collect();
-        // Second call immediately — cooldowns should prevent re-adjusting same params
+        // Second call immediately  -  cooldowns should prevent re-adjusting same params
         for (id, _) in ctrl.process(&s) {
             assert!(
                 !first.contains(&id),
@@ -912,7 +966,7 @@ mod tests {
     #[test]
     fn test_rollback_all_returns_12() {
         let mut ctrl = TuningController::new(200.0, 100.0);
-        assert_eq!(ctrl.rollback_all().len(), 12);
+        assert_eq!(ctrl.rollback_all().len(), ParameterId::all().len());
     }
 
     #[test]
@@ -932,5 +986,50 @@ mod tests {
         let changes = ctrl.process(&snap(100, 200.0, 0.5));
         // At target the error signals are near zero; most should not change
         assert!(changes.len() <= 5, "too many changes: {}", changes.len());
+    }
+
+    #[test]
+    fn test_rollback_uses_configured_threshold() {
+        // Use a very low threshold (1%) so that a small latency increase triggers rollback
+        let mut ctrl = TuningController::with_rollback_config(
+            100.0,
+            200.0,
+            0.01, // 1% threshold
+            Duration::from_secs(300),
+        );
+
+        let base_snap = snap(100, 200.0, 0.5);
+        ctrl.process(&base_snap);
+
+        // Manually inject a metric_at_change value for one parameter
+        if let Some(val) = ctrl.values.get_mut(&ParameterId::DedupTtlMs) {
+            val.metric_at_change = Some(100.0); // baseline p95 = 100ms
+            val.last_changed = Instant::now();
+        }
+
+        // A snapshot with p95 = 102ms (2% above baseline) should trigger rollback
+        // at the 1% configured threshold
+        let degraded = snap(102, 200.0, 0.5);
+        assert!(
+            ctrl.should_rollback(ParameterId::DedupTtlMs, &degraded, Instant::now()),
+            "should rollback when p95 exceeds configured 1% threshold"
+        );
+
+        // Verify that with a 10% threshold the same degradation does NOT trigger rollback
+        let mut ctrl2 = TuningController::with_rollback_config(
+            100.0,
+            200.0,
+            0.10, // 10% threshold
+            Duration::from_secs(300),
+        );
+        ctrl2.process(&base_snap);
+        if let Some(val) = ctrl2.values.get_mut(&ParameterId::DedupTtlMs) {
+            val.metric_at_change = Some(100.0);
+            val.last_changed = Instant::now();
+        }
+        assert!(
+            !ctrl2.should_rollback(ParameterId::DedupTtlMs, &degraded, Instant::now()),
+            "should NOT rollback when p95 is within the 10% threshold"
+        );
     }
 }

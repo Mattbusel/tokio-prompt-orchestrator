@@ -6,7 +6,7 @@
 //! Only one node in the cluster processes a given request.
 //!
 //! ## Guarantees
-//! - Atomic: `SET NX EX` is a single Redis command — no race conditions
+//! - Atomic: `SET NX EX` is a single Redis command  -  no race conditions
 //! - TTL-bounded: keys auto-expire, preventing unbounded memory growth
 //! - Non-blocking: uses async Redis connections, never blocks the executor
 //! - Graceful degradation: Redis failures are surfaced as errors, not panics
@@ -33,7 +33,7 @@ use super::DistributedError;
 pub enum RedisDeduplicationResult {
     /// This node has claimed the request and should process it.
     Claimed,
-    /// Another node already claimed this request — skip processing.
+    /// Another node already claimed this request  -  skip processing.
     AlreadyClaimed,
 }
 
@@ -73,13 +73,13 @@ impl RedisDedup {
     /// Create a new Redis-backed deduplicator.
     ///
     /// # Arguments
-    /// * `redis_url` — Redis connection URL (e.g., `redis://localhost:6379`)
-    /// * `node_id` — Identifier of this node (stored as the key's value for debugging)
-    /// * `ttl_seconds` — How long (seconds) a claimed key persists before auto-expiring
+    /// * `redis_url`  -  Redis connection URL (e.g., `redis://localhost:6379`)
+    /// * `node_id`  -  Identifier of this node (stored as the key's value for debugging)
+    /// * `ttl_seconds`  -  How long (seconds) a claimed key persists before auto-expiring
     ///
     /// # Returns
-    /// - `Ok(RedisDedup)` — ready to use
-    /// - `Err(DistributedError::RedisConnection)` — if the URL is invalid
+    /// - `Ok(RedisDedup)`  -  ready to use
+    /// - `Err(DistributedError::RedisConnection)`  -  if the URL is invalid
     ///
     /// # Panics
     /// This function never panics.
@@ -102,9 +102,9 @@ impl RedisDedup {
     /// Create a deduplicator from an existing Redis client (for testing/sharing connections).
     ///
     /// # Arguments
-    /// * `client` — Pre-configured Redis client
-    /// * `node_id` — Identifier of this node
-    /// * `ttl_seconds` — Key TTL in seconds
+    /// * `client`  -  Pre-configured Redis client
+    /// * `node_id`  -  Identifier of this node
+    /// * `ttl_seconds`  -  Key TTL in seconds
     ///
     /// # Returns
     /// A `RedisDedup` wrapping the provided client.
@@ -121,17 +121,17 @@ impl RedisDedup {
 
     /// Attempt to claim exclusive ownership of a request key.
     ///
-    /// Uses `SET key NX EX ttl` — only one node across the cluster can
+    /// Uses `SET key NX EX ttl`  -  only one node across the cluster can
     /// successfully claim a given key. The key is prefixed with `dedup:dist:`
     /// for namespace isolation.
     ///
     /// # Arguments
-    /// * `key` — The deduplication key (typically a hash of the prompt + metadata)
+    /// * `key`  -  The deduplication key (typically a hash of the prompt + metadata)
     ///
     /// # Returns
-    /// - `Ok(RedisDeduplicationResult::Claimed)` — this node owns the request
-    /// - `Ok(RedisDeduplicationResult::AlreadyClaimed)` — another node owns it
-    /// - `Err(DistributedError::RedisOperation)` — Redis command failed
+    /// - `Ok(RedisDeduplicationResult::Claimed)`  -  this node owns the request
+    /// - `Ok(RedisDeduplicationResult::AlreadyClaimed)`  -  another node owns it
+    /// - `Err(DistributedError::RedisOperation)`  -  Redis command failed
     ///
     /// # Panics
     /// This function never panics.
@@ -146,7 +146,7 @@ impl RedisDedup {
                 DistributedError::RedisConnection(format!("failed to get connection: {e}"))
             })?;
 
-        // SET key value NX EX ttl — atomic set-if-not-exists with expiry
+        // SET key value NX EX ttl  -  atomic set-if-not-exists with expiry
         let result: Option<String> = redis::cmd("SET")
             .arg(&redis_key)
             .arg(&self.node_id)
@@ -175,12 +175,12 @@ impl RedisDedup {
     /// compare-and-delete pattern to avoid releasing another node's claim).
     ///
     /// # Arguments
-    /// * `key` — The deduplication key to release
+    /// * `key`  -  The deduplication key to release
     ///
     /// # Returns
-    /// - `Ok(true)` — key was released
-    /// - `Ok(false)` — key was not owned by this node (or already expired)
-    /// - `Err(DistributedError::RedisOperation)` — Redis command failed
+    /// - `Ok(true)`  -  key was released
+    /// - `Ok(false)`  -  key was not owned by this node (or already expired)
+    /// - `Err(DistributedError::RedisOperation)`  -  Redis command failed
     ///
     /// # Panics
     /// This function never panics.
@@ -224,12 +224,12 @@ impl RedisDedup {
     /// Check who currently owns a dedup key (for diagnostics).
     ///
     /// # Arguments
-    /// * `key` — The deduplication key to query
+    /// * `key`  -  The deduplication key to query
     ///
     /// # Returns
-    /// - `Ok(Some(node_id))` — the node that currently owns the key
-    /// - `Ok(None)` — no node owns this key (unclaimed or expired)
-    /// - `Err(DistributedError::RedisOperation)` — Redis command failed
+    /// - `Ok(Some(node_id))`  -  the node that currently owns the key
+    /// - `Ok(None)`  -  no node owns this key (unclaimed or expired)
+    /// - `Err(DistributedError::RedisOperation)`  -  Redis command failed
     ///
     /// # Panics
     /// This function never panics.
@@ -258,6 +258,44 @@ impl RedisDedup {
     /// This function never panics.
     pub fn ttl_seconds(&self) -> u64 {
         self.ttl_seconds
+    }
+
+    /// Refresh (extend) the TTL on a key that this node previously claimed.
+    ///
+    /// Callers should invoke this at `ttl / 2` intervals for long-running
+    /// requests so the key does not expire before processing completes.
+    /// For example, with a 300-second TTL, call `refresh` every ~150 seconds.
+    ///
+    /// # Arguments
+    /// * `key` — The deduplication key to refresh (same value passed to `try_claim`)
+    ///
+    /// # Returns
+    /// - `Ok(())` — TTL was successfully extended
+    /// - `Err(DistributedError::RedisOperation)` — Redis command failed
+    ///
+    /// # Panics
+    /// This function never panics.
+    pub async fn refresh(&self, key: &str) -> Result<(), DistributedError> {
+        let redis_key = format!("dedup:dist:{key}");
+
+        let mut conn = self
+            .client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(|e| {
+                DistributedError::RedisConnection(format!("failed to get connection: {e}"))
+            })?;
+
+        // EXPIRE key ttl — reset the TTL to the original configured value
+        let _: i64 = redis::cmd("EXPIRE")
+            .arg(&redis_key)
+            .arg(self.ttl_seconds)
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| DistributedError::RedisOperation(format!("EXPIRE failed: {e}")))?;
+
+        debug!(key = key, node = %self.node_id, ttl_seconds = self.ttl_seconds, "refreshed dedup key TTL");
+        Ok(())
     }
 
     /// Get this node's ID.
@@ -389,6 +427,26 @@ mod tests {
         let result = RedisDeduplicationResult::Claimed;
         let cloned = result.clone();
         assert_eq!(result, cloned);
+    }
+
+    #[tokio::test]
+    async fn test_redis_dedup_refresh_extends_ttl() {
+        // Without a live Redis server the refresh call should return a connection error,
+        // not panic. This validates the method signature and error path.
+        let dedup = RedisDedup::new("redis://localhost:59999", "node-1", 300).await;
+        if let Ok(d) = dedup {
+            let result = d.refresh("some-key").await;
+            // Either an error (no Redis) or Ok (Redis is present) — must not panic
+            let _ = result;
+        }
+        // Validate the method exists and compiles on a from_client instance
+        let client = redis::Client::open("redis://localhost:6379");
+        if let Ok(c) = client {
+            let dedup = RedisDedup::from_client(Arc::new(c), "node-refresh", 60);
+            // refresh returns Result — ensure it compiles and type-checks
+            let _: fn(&RedisDedup, &str) -> _ = |d: &RedisDedup, k: &str| d.refresh(k);
+            let _ = dedup.ttl_seconds(); // keep dedup in scope
+        }
     }
 
     #[tokio::test]

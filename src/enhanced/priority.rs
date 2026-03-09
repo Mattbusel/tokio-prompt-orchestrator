@@ -23,7 +23,7 @@
 //! queue.push(Priority::Normal, request2).await.ok();
 //! queue.push(Priority::Low, request3).await.ok();
 //!
-//! // Dequeue by priority — highest priority first
+//! // Dequeue by priority  -  highest priority first
 //! if let Some((_priority, request)) = queue.pop().await {
 //!     println!("{}", request.input);
 //! }
@@ -32,6 +32,7 @@
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::sync::atomic::{AtomicUsize, Ordering as AOrdering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::debug;
@@ -41,14 +42,14 @@ use crate::PromptRequest;
 /// Request priority levels
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Priority {
-    /// Lowest priority — background / batch work.
+    /// Lowest priority  -  background / batch work.
     Low = 0,
     /// Standard priority for most requests.
     #[default]
     Normal = 1,
     /// Elevated priority, processed before `Normal`.
     High = 2,
-    /// Highest priority — processed immediately ahead of all others.
+    /// Highest priority  -  processed immediately ahead of all others.
     Critical = 3,
 }
 
@@ -105,6 +106,11 @@ pub struct PriorityQueue {
     heap: Arc<Mutex<BinaryHeap<PrioritizedRequest>>>,
     sequence: Arc<Mutex<u64>>,
     max_size: usize,
+    /// Per-priority-level request counters (lock-free).
+    count_low: Arc<AtomicUsize>,
+    count_normal: Arc<AtomicUsize>,
+    count_high: Arc<AtomicUsize>,
+    count_critical: Arc<AtomicUsize>,
 }
 
 impl PriorityQueue {
@@ -119,6 +125,19 @@ impl PriorityQueue {
             heap: Arc::new(Mutex::new(BinaryHeap::new())),
             sequence: Arc::new(Mutex::new(0)),
             max_size,
+            count_low: Arc::new(AtomicUsize::new(0)),
+            count_normal: Arc::new(AtomicUsize::new(0)),
+            count_high: Arc::new(AtomicUsize::new(0)),
+            count_critical: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn counter_for(&self, priority: Priority) -> &Arc<AtomicUsize> {
+        match priority {
+            Priority::Low => &self.count_low,
+            Priority::Normal => &self.count_normal,
+            Priority::High => &self.count_high,
+            Priority::Critical => &self.count_critical,
         }
     }
 
@@ -139,6 +158,8 @@ impl PriorityQueue {
             request,
         });
 
+        self.counter_for(priority).fetch_add(1, AOrdering::Relaxed);
+
         debug!(
             priority = ?priority,
             sequence = *seq,
@@ -153,6 +174,8 @@ impl PriorityQueue {
     pub async fn pop(&self) -> Option<(Priority, PromptRequest)> {
         let mut heap = self.heap.lock().await;
         heap.pop().map(|pr| {
+            self.counter_for(pr.priority)
+                .fetch_sub(1, AOrdering::Relaxed);
             debug!(
                 priority = ?pr.priority,
                 sequence = pr.sequence,
@@ -173,26 +196,39 @@ impl PriorityQueue {
         self.heap.lock().await.is_empty()
     }
 
-    /// Get queue statistics by priority
+    /// Get queue statistics by priority.
+    ///
+    /// Reads from lock-free atomic counters — O(1), no mutex held.
     pub async fn stats(&self) -> QueueStats {
-        let heap = self.heap.lock().await;
-
-        let mut stats = QueueStats {
-            total: heap.len(),
-            by_priority: std::collections::HashMap::new(),
-        };
-
-        for item in heap.iter() {
-            *stats.by_priority.entry(item.priority).or_insert(0) += 1;
+        let mut by_priority = std::collections::HashMap::new();
+        let low = self.count_low.load(AOrdering::Relaxed);
+        let normal = self.count_normal.load(AOrdering::Relaxed);
+        let high = self.count_high.load(AOrdering::Relaxed);
+        let critical = self.count_critical.load(AOrdering::Relaxed);
+        if low > 0 {
+            by_priority.insert(Priority::Low, low);
         }
-
-        stats
+        if normal > 0 {
+            by_priority.insert(Priority::Normal, normal);
+        }
+        if high > 0 {
+            by_priority.insert(Priority::High, high);
+        }
+        if critical > 0 {
+            by_priority.insert(Priority::Critical, critical);
+        }
+        let total = low + normal + high + critical;
+        QueueStats { total, by_priority }
     }
 
     /// Clear all requests
     pub async fn clear(&self) {
         let mut heap = self.heap.lock().await;
         heap.clear();
+        self.count_low.store(0, AOrdering::Relaxed);
+        self.count_normal.store(0, AOrdering::Relaxed);
+        self.count_high.store(0, AOrdering::Relaxed);
+        self.count_critical.store(0, AOrdering::Relaxed);
         debug!("priority queue cleared");
     }
 }
@@ -345,7 +381,7 @@ mod tests {
         assert_eq!(*stats.by_priority.get(&Priority::Low).unwrap(), 1);
     }
 
-    // ── Hardening tests ──────────────────────────────────────────────
+    //  Hardening tests
 
     #[tokio::test]
     async fn test_empty_queue_pop_returns_none() {
@@ -497,13 +533,61 @@ mod tests {
             .await
             .unwrap();
 
-        // Pop all — verify FIFO within each priority band
+        // Pop all  -  verify FIFO within each priority band
         assert_eq!(queue.pop().await.unwrap().1.input, "h1");
         assert_eq!(queue.pop().await.unwrap().1.input, "h2");
         assert_eq!(queue.pop().await.unwrap().1.input, "n1");
         assert_eq!(queue.pop().await.unwrap().1.input, "n2");
         assert_eq!(queue.pop().await.unwrap().1.input, "l1");
         assert_eq!(queue.pop().await.unwrap().1.input, "l2");
+    }
+
+    #[tokio::test]
+    async fn test_priority_queue_stats_reflect_pushes_and_pops() {
+        let queue = PriorityQueue::new();
+
+        queue
+            .push(Priority::High, create_request("h1"))
+            .await
+            .unwrap();
+        queue
+            .push(Priority::High, create_request("h2"))
+            .await
+            .unwrap();
+        queue
+            .push(Priority::Normal, create_request("n1"))
+            .await
+            .unwrap();
+        queue
+            .push(Priority::Low, create_request("l1"))
+            .await
+            .unwrap();
+        queue
+            .push(Priority::Critical, create_request("c1"))
+            .await
+            .unwrap();
+
+        let stats = queue.stats().await;
+        assert_eq!(stats.total, 5);
+        assert_eq!(*stats.by_priority.get(&Priority::High).unwrap(), 2);
+        assert_eq!(*stats.by_priority.get(&Priority::Normal).unwrap(), 1);
+        assert_eq!(*stats.by_priority.get(&Priority::Low).unwrap(), 1);
+        assert_eq!(*stats.by_priority.get(&Priority::Critical).unwrap(), 1);
+
+        // Pop removes the highest-priority item (Critical), not High
+        queue.pop().await;
+        let stats2 = queue.stats().await;
+        assert_eq!(stats2.total, 4);
+        // Critical was popped — it should no longer appear in the map
+        assert_eq!(
+            stats2
+                .by_priority
+                .get(&Priority::Critical)
+                .copied()
+                .unwrap_or(0),
+            0
+        );
+        assert_eq!(*stats2.by_priority.get(&Priority::High).unwrap(), 2);
     }
 
     #[tokio::test]

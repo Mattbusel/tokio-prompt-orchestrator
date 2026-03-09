@@ -57,6 +57,10 @@ pub enum BrainError {
     /// Maximum number of active proposals has been reached.
     #[error("max active proposals reached: {0}")]
     MaxProposalsReached(usize),
+
+    /// The supplied `quorum_fraction` is outside the valid range `(0.0, 1.0]`.
+    #[error("quorum_fraction {0} is out of range; must be in (0.0, 1.0]")]
+    InvalidQuorumFraction(f64),
 }
 
 // ---------------------------------------------------------------------------
@@ -167,11 +171,20 @@ pub struct ConsensusBrain {
 impl ConsensusBrain {
     /// Create a new `ConsensusBrain` with the given configuration.
     ///
+    /// # Errors
+    /// Returns [`BrainError::InvalidQuorumFraction`] if `config.quorum_fraction`
+    /// is not in the range `(0.0, 1.0]`.  Zero and negative values would make
+    /// quorum unreachable (no votes ever required), and values above 1.0 can
+    /// never be satisfied.
+    ///
     /// # Panics
     /// This function never panics.
-    pub fn new(config: ConsensusConfig) -> Self {
+    pub fn new(config: ConsensusConfig) -> Result<Self, BrainError> {
+        if config.quorum_fraction <= 0.0 || config.quorum_fraction > 1.0 {
+            return Err(BrainError::InvalidQuorumFraction(config.quorum_fraction));
+        }
         let node_id = config.node_id.clone();
-        Self {
+        Ok(Self {
             inner: Arc::new(Mutex::new(Inner {
                 config,
                 proposals: HashMap::new(),
@@ -180,7 +193,7 @@ impl ConsensusBrain {
                 max_history: 1000,
                 next_id: 1,
             })),
-        }
+        })
     }
 
     /// Register a peer node so it counts toward quorum calculations.
@@ -448,6 +461,7 @@ mod tests {
             max_active_proposals: 10,
             node_id: "node-1".to_string(),
         })
+        .expect("valid default config must succeed")
     }
 
     #[test]
@@ -540,7 +554,8 @@ mod tests {
             proposal_timeout_secs: 0, // immediate timeout
             max_active_proposals: 10,
             node_id: "node-1".to_string(),
-        });
+        })
+        .expect("valid config");
         let id = brain.propose("p", 1.0, 2.0, "test").unwrap();
         let expired = brain.check_timeouts().unwrap();
         assert!(expired.contains(&id));
@@ -642,7 +657,8 @@ mod tests {
         let brain = ConsensusBrain::new(ConsensusConfig {
             max_active_proposals: 2,
             ..ConsensusConfig::default()
-        });
+        })
+        .expect("valid config");
         brain.propose("a", 0.0, 1.0, "r").unwrap();
         brain.propose("b", 0.0, 1.0, "r").unwrap();
         let err = brain.propose("c", 0.0, 1.0, "r").unwrap_err();
@@ -706,5 +722,60 @@ mod tests {
             proposal_id: "p".to_string(),
         };
         assert!(err.to_string().contains("duplicate vote"));
+    }
+
+    // ------------------------------------------------------------------
+    // MED-13: quorum_fraction validation
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_quorum_fraction_zero_rejected() {
+        let err = ConsensusBrain::new(ConsensusConfig {
+            quorum_fraction: 0.0,
+            ..ConsensusConfig::default()
+        })
+        .unwrap_err();
+        assert!(
+            matches!(err, BrainError::InvalidQuorumFraction(f) if f == 0.0),
+            "zero quorum fraction must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_quorum_fraction_negative_rejected() {
+        let err = ConsensusBrain::new(ConsensusConfig {
+            quorum_fraction: -0.5,
+            ..ConsensusConfig::default()
+        })
+        .unwrap_err();
+        assert!(matches!(err, BrainError::InvalidQuorumFraction(_)));
+    }
+
+    #[test]
+    fn test_quorum_fraction_above_one_rejected() {
+        let err = ConsensusBrain::new(ConsensusConfig {
+            quorum_fraction: 1.1,
+            ..ConsensusConfig::default()
+        })
+        .unwrap_err();
+        assert!(
+            matches!(err, BrainError::InvalidQuorumFraction(f) if f == 1.1),
+            "fraction > 1.0 must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_quorum_fraction_valid_accepted() {
+        // Boundary values within the valid range.
+        for frac in [0.01, 0.5, 0.75, 1.0] {
+            let result = ConsensusBrain::new(ConsensusConfig {
+                quorum_fraction: frac,
+                ..ConsensusConfig::default()
+            });
+            assert!(
+                result.is_ok(),
+                "quorum_fraction {frac} should be accepted but got: {result:?}"
+            );
+        }
     }
 }

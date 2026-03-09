@@ -30,6 +30,7 @@
 //! - Model configuration or health checking
 //! - Load balancing (this is routing by quality, not by load)
 
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -126,7 +127,7 @@ struct Inner {
     current_epsilon: f64,
     /// Configuration snapshot.
     config: RouterConfig,
-    /// Simple counter used for pseudo-random exploration.
+    /// Counter incremented on each selection (used for index into model list).
     selection_counter: u64,
 }
 
@@ -212,14 +213,8 @@ impl LearnedRouter {
         let decay = inner.config.epsilon_decay;
         let default_score = inner.config.default_score;
 
-        // Pseudo-random exploration based on counter and epsilon
-        let explore = {
-            let hash = counter
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            let normalized = (hash % 10000) as f64 / 10000.0;
-            normalized < epsilon
-        };
+        // Non-deterministic exploration using a real PRNG
+        let explore = rand::thread_rng().gen::<f64>() < epsilon;
 
         let selected = if explore {
             let idx = (counter as usize) % inner.models.len();
@@ -748,6 +743,47 @@ mod tests {
     fn test_model_count_empty() {
         let router = LearnedRouter::with_defaults();
         assert_eq!(router.model_count(), 0);
+    }
+
+    #[test]
+    fn test_exploration_uses_nondeterministic_rng() {
+        // With epsilon=1.0 all selections should be explore (random index).
+        // With two models we expect both to appear over 1000 draws.
+        let config = RouterConfig {
+            epsilon: 1.0,
+            epsilon_decay: 1.0, // no decay so epsilon stays at 1.0
+            min_epsilon: 1.0,
+            default_score: 0.5,
+        };
+        let router = LearnedRouter::new(config);
+        router.register_model("model-a").unwrap();
+        router.register_model("model-b").unwrap();
+
+        let features = make_features("test");
+        let mut saw_a = false;
+        let mut saw_b = false;
+
+        for _ in 0..1000 {
+            let model = router.select_model(&features).unwrap();
+            if model == "model-a" {
+                saw_a = true;
+            }
+            if model == "model-b" {
+                saw_b = true;
+            }
+            if saw_a && saw_b {
+                break;
+            }
+        }
+
+        assert!(
+            saw_a,
+            "model-a should appear at least once in 1000 explores"
+        );
+        assert!(
+            saw_b,
+            "model-b should appear at least once in 1000 explores"
+        );
     }
 
     #[test]

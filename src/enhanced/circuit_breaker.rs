@@ -18,7 +18,7 @@
 //! let breaker = CircuitBreaker::new(5, 0.5, Duration::from_secs(60));
 //!
 //! match breaker.call(|| async {
-//!     // Your operation — replace with a real async call
+//!     // Your operation  -  replace with a real async call
 //!     Ok::<&str, &str>("inference result")
 //! }).await {
 //!     Ok(result) => println!("{result}"), // Success
@@ -70,11 +70,11 @@ struct CircuitState {
 /// Current state of a circuit breaker.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CircuitStatus {
-    /// Circuit is closed — requests flow through normally.
+    /// Circuit is closed  -  requests flow through normally.
     Closed,
-    /// Circuit is open — requests are rejected immediately without calling the operation.
+    /// Circuit is open  -  requests are rejected immediately without calling the operation.
     Open,
-    /// Circuit is half-open — one probe request is allowed through to test recovery.
+    /// Circuit is half-open  -  one probe request is allowed through to test recovery.
     HalfOpen,
 }
 
@@ -128,7 +128,7 @@ impl CircuitBreaker {
                     // Check if timeout elapsed
                     if let Some(last_failure) = state.last_failure_time {
                         if last_failure.elapsed() >= self.config.timeout {
-                            // Try half-open — clear window so success-rate is
+                            // Try half-open  -  clear window so success-rate is
                             // calculated only from post-recovery requests.
                             state.status = CircuitStatus::HalfOpen;
                             state.recent_results.clear();
@@ -295,7 +295,7 @@ pub struct CircuitBreakerStats {
     pub failures: usize,
     /// Total successes recorded in the current window.
     pub successes: usize,
-    /// Fraction of recent requests that succeeded (0.0 – 1.0).
+    /// Fraction of recent requests that succeeded (0.0  -  1.0).
     pub success_rate: f64,
     /// Wall-clock time spent in the current state.
     pub time_in_current_state: Duration,
@@ -362,6 +362,43 @@ mod tests {
         // Manual reset
         breaker.reset().await;
         assert_eq!(breaker.status().await, CircuitStatus::Closed);
+    }
+
+    #[tokio::test]
+    async fn test_circuit_breaker_clears_history_on_half_open() {
+        // Open the breaker with 2 failures, then wait for the timeout.
+        let breaker = CircuitBreaker::new(2, 0.8, Duration::from_millis(50));
+
+        for _ in 0..2 {
+            let _: Result<(), CircuitBreakerError<()>> = breaker.call(|| async { Err(()) }).await;
+        }
+        assert_eq!(breaker.status().await, CircuitStatus::Open);
+
+        // The recent_results window should have 2 failures recorded.
+        {
+            let state = breaker.state.read().await;
+            assert!(
+                !state.recent_results.is_empty(),
+                "should have failure history before half-open"
+            );
+        }
+
+        // Wait for the open timeout to elapse.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // First successful probe transitions to HalfOpen and clears history.
+        let _: Result<(), CircuitBreakerError<()>> = breaker.call(|| async { Ok(()) }).await;
+
+        // After the transition the history must contain only the single probe
+        // result (the success above), not the old failures.
+        {
+            let state = breaker.state.read().await;
+            assert!(
+                !state.recent_results.contains(&false),
+                "old failures must be cleared on half-open transition; results: {:?}",
+                state.recent_results
+            );
+        }
     }
 
     #[tokio::test]

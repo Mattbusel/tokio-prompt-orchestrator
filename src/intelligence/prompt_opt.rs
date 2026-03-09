@@ -31,6 +31,12 @@ pub enum OptimizationStrategy {
     SystemPromptCompression,
     InstructionReordering,
     RedundancyRemoval,
+    /// Not yet implemented — returns input unchanged.
+    ///
+    /// This variant is a placeholder. Enabling it has no effect on the prompt.
+    // TODO: implement ExampleInjection by selecting and prepending relevant
+    // few-shot examples from a retrieval store.
+    #[doc = "Not yet implemented — returns input unchanged"]
     ExampleInjection,
 }
 
