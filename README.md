@@ -16,111 +16,6 @@ Anthropic's documented ceiling is 16 concurrent agents. We hit 24. The bottlenec
 
 ---
 
-## Library Usage
-
-```toml
-# Cargo.toml
-[dependencies]
-tokio-prompt-orchestrator = { git = "https://github.com/Mattbusel/tokio-prompt-orchestrator" }
-tokio = { version = "1", features = ["full"] }
-```
-
-```rust
-use tokio_prompt_orchestrator::{Pipeline, PipelineConfig, EchoWorker, InferenceRequest};
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Build a pipeline with an echo worker.
-    // Swap in OpenAIWorker, AnthropicWorker, or LlamaCppWorker for real inference.
-    let config = PipelineConfig::default();
-    let worker = EchoWorker::new();
-    let pipeline = Pipeline::new(config, worker).await?;
-
-    // Dedup, circuit breaker, and retry all happen transparently.
-    let req = InferenceRequest::new("Explain backpressure in one sentence.");
-    let response = pipeline.infer(req).await?;
-
-    println!("{}", response.text);
-    Ok(())
-}
-```
-
-See [`examples/`](examples/) for full working examples: OpenAI, Anthropic, llama.cpp, vLLM, REST, WebSocket, SSE streaming, and multi-worker setups.
-
----
-
-## Live Dashboard
-
-![TUI Dashboard](assets/tui-dashboard.png)
-
-Real-time terminal dashboard: 985 requests in, 323 actual inferences (67.2% dedup collapse, **$7.94 saved in 3 minutes**). Circuit breakers across OpenAI, Anthropic, and llama.cpp all CLOSED. A latency spike at INFER p99=483ms caused the circuit to open; a probe was sent, and recovery was confirmed in 15 seconds. Built with ratatui.
-
----
-
-## What It Does
-
-A five-stage async pipeline for LLM inference with a closed-loop self-improving control system. Bounded channels enforce backpressure end-to-end. Every request flows through:
-
-```
-RAG -> Assemble -> Inference -> Post-Process -> Stream
-```
-
-The self-improving stack runs alongside the pipeline as a live background service. It observes telemetry, detects anomalies, tunes parameters, and records outcomes without human intervention.
-
----
-
-## Architecture
-
-**Pipeline** -- Bounded async channels (RAG->ASM: 512, ASM->INF: 512, INF->PST: 1024, PST->STR: 256). Session affinity via deterministic sharding. Requests are shed rather than blocked when queues fill.
-
-**Resilience** -- Circuit breaker (opens at 5 failures, closes at 80% success rate, 60s timeout). Retry with exponential backoff and jitter. Token-bucket rate limiting. Priority queues with 4 levels. In-memory and Redis caching with TTL.
-
-**Self-Improving Loop** -- `SelfImprovementLoop` runs as a single background Tokio task:
-
-```
-TelemetryBus
-    |  broadcast snapshot every 5s
-    v
-AnomalyDetector  ---- Z-score + CUSUM ---> TuningController
-                                                |  PID adjusts 12 params
-                                                v
-MetaTaskGenerator <------------------- SnapshotStore
-    |  triggered on Warning/Critical       records best configs
-    v
-ValidationGate  (cargo test + clippy)
-    v
-AgentMemory  (outcome recorded, dead ends flagged)
-```
-
-Start it: `cargo run --bin coordinator --features self-improving -- --self-improve`
-
-**Intelligence Layer** -- `IntelligenceBridge` wires six learned systems into the pipeline:
-
-- `LearnedRouter` -- epsilon-greedy multi-armed bandit, routes by observed quality
-- `Autoscaler` -- predictive, scales worker capacity before demand arrives
-- `FeedbackCollector` -- aggregates quality signals from post-processing
-- `QualityEstimator` -- scores response quality at inference time
-- `PromptOptimizer` -- rewrites prompts to minimize token spend
-- `SemanticDedup` -- embedding-based dedup that collapses semantically equivalent prompts before they reach the provider
-
-These run as a closed loop: feedback scores update the router, the router changes load distribution, and the autoscaler reacts.
-
-**HelixRouter Integration** -- Three `self_tune` modules bridge the orchestrator to HelixRouter in real time. `helix_probe` polls `/api/stats` and converts queue depth, drop rate, and latency into a pressure signal. `helix_config_pusher` writes PID-derived adjustments back via `PATCH /api/config`. `helix_feedback` forwards quality scores from the intelligence layer as routing hints.
-
-**Capability Discovery** -- `CapabilityDiscovery` runs `cargo check --message-format=json` to detect dead code and `cargo audit --json` to surface CVEs. Findings become tasks for the agent fleet.
-
-**Distributed** -- NATS pub/sub for inter-node messaging. Redis-based cross-node dedup via atomic `SET NX EX`. Leader election with TTL renewal. Cluster manager with heartbeat tracking.
-
-**Coordination** -- Agent fleet management. Atomic task claiming via filesystem locks. Priority ordering from TOML task files. Configurable health monitoring.
-
-**Routing** -- Complexity scoring routes simple prompts to local llama.cpp and complex ones to cloud APIs. Adaptive thresholds tune themselves on success/failure feedback. Per-model cost tracking with budget awareness.
-
-**Observability** -- Prometheus metrics, TUI terminal dashboard, web dashboard with SSE streaming, structured JSON tracing. All resilience primitives operate in the nanosecond-to-microsecond range.
-
-**MCP** -- `infer`, `pipeline_status`, `batch_infer`, and `configure_pipeline` are all callable from Claude Desktop and Claude Code, with live stage latency reporting.
-
----
-
 ## Windows .exe — No Install Required
 
 Download **[orchestrator.exe](https://github.com/Mattbusel/tokio-prompt-orchestrator/releases/tag/v0.1.0)** from the releases page and double-click it. No Rust, no dependencies, nothing to install.
@@ -241,6 +136,111 @@ print(r.json()["text"])
 ### Changing your key or provider
 
 Run `orchestrator.exe --reset` — it wipes the saved settings and runs the wizard again. Or edit `orchestrator.env` directly (it's a plain text file next to the `.exe`).
+
+---
+
+## Library Usage
+
+```toml
+# Cargo.toml
+[dependencies]
+tokio-prompt-orchestrator = { git = "https://github.com/Mattbusel/tokio-prompt-orchestrator" }
+tokio = { version = "1", features = ["full"] }
+```
+
+```rust
+use tokio_prompt_orchestrator::{Pipeline, PipelineConfig, EchoWorker, InferenceRequest};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Build a pipeline with an echo worker.
+    // Swap in OpenAIWorker, AnthropicWorker, or LlamaCppWorker for real inference.
+    let config = PipelineConfig::default();
+    let worker = EchoWorker::new();
+    let pipeline = Pipeline::new(config, worker).await?;
+
+    // Dedup, circuit breaker, and retry all happen transparently.
+    let req = InferenceRequest::new("Explain backpressure in one sentence.");
+    let response = pipeline.infer(req).await?;
+
+    println!("{}", response.text);
+    Ok(())
+}
+```
+
+See [`examples/`](examples/) for full working examples: OpenAI, Anthropic, llama.cpp, vLLM, REST, WebSocket, SSE streaming, and multi-worker setups.
+
+---
+
+## Live Dashboard
+
+![TUI Dashboard](assets/tui-dashboard.png)
+
+Real-time terminal dashboard: 985 requests in, 323 actual inferences (67.2% dedup collapse, **$7.94 saved in 3 minutes**). Circuit breakers across OpenAI, Anthropic, and llama.cpp all CLOSED. A latency spike at INFER p99=483ms caused the circuit to open; a probe was sent, and recovery was confirmed in 15 seconds. Built with ratatui.
+
+---
+
+## What It Does
+
+A five-stage async pipeline for LLM inference with a closed-loop self-improving control system. Bounded channels enforce backpressure end-to-end. Every request flows through:
+
+```
+RAG -> Assemble -> Inference -> Post-Process -> Stream
+```
+
+The self-improving stack runs alongside the pipeline as a live background service. It observes telemetry, detects anomalies, tunes parameters, and records outcomes without human intervention.
+
+---
+
+## Architecture
+
+**Pipeline** -- Bounded async channels (RAG->ASM: 512, ASM->INF: 512, INF->PST: 1024, PST->STR: 256). Session affinity via deterministic sharding. Requests are shed rather than blocked when queues fill.
+
+**Resilience** -- Circuit breaker (opens at 5 failures, closes at 80% success rate, 60s timeout). Retry with exponential backoff and jitter. Token-bucket rate limiting. Priority queues with 4 levels. In-memory and Redis caching with TTL.
+
+**Self-Improving Loop** -- `SelfImprovementLoop` runs as a single background Tokio task:
+
+```
+TelemetryBus
+    |  broadcast snapshot every 5s
+    v
+AnomalyDetector  ---- Z-score + CUSUM ---> TuningController
+                                                |  PID adjusts 12 params
+                                                v
+MetaTaskGenerator <------------------- SnapshotStore
+    |  triggered on Warning/Critical       records best configs
+    v
+ValidationGate  (cargo test + clippy)
+    v
+AgentMemory  (outcome recorded, dead ends flagged)
+```
+
+Start it: `cargo run --bin coordinator --features self-improving -- --self-improve`
+
+**Intelligence Layer** -- `IntelligenceBridge` wires six learned systems into the pipeline:
+
+- `LearnedRouter` -- epsilon-greedy multi-armed bandit, routes by observed quality
+- `Autoscaler` -- predictive, scales worker capacity before demand arrives
+- `FeedbackCollector` -- aggregates quality signals from post-processing
+- `QualityEstimator` -- scores response quality at inference time
+- `PromptOptimizer` -- rewrites prompts to minimize token spend
+- `SemanticDedup` -- embedding-based dedup that collapses semantically equivalent prompts before they reach the provider
+
+These run as a closed loop: feedback scores update the router, the router changes load distribution, and the autoscaler reacts.
+
+**HelixRouter Integration** -- Three `self_tune` modules bridge the orchestrator to HelixRouter in real time. `helix_probe` polls `/api/stats` and converts queue depth, drop rate, and latency into a pressure signal. `helix_config_pusher` writes PID-derived adjustments back via `PATCH /api/config`. `helix_feedback` forwards quality scores from the intelligence layer as routing hints.
+
+**Capability Discovery** -- `CapabilityDiscovery` runs `cargo check --message-format=json` to detect dead code and `cargo audit --json` to surface CVEs. Findings become tasks for the agent fleet.
+
+**Distributed** -- NATS pub/sub for inter-node messaging. Redis-based cross-node dedup via atomic `SET NX EX`. Leader election with TTL renewal. Cluster manager with heartbeat tracking.
+
+**Coordination** -- Agent fleet management. Atomic task claiming via filesystem locks. Priority ordering from TOML task files. Configurable health monitoring.
+
+**Routing** -- Complexity scoring routes simple prompts to local llama.cpp and complex ones to cloud APIs. Adaptive thresholds tune themselves on success/failure feedback. Per-model cost tracking with budget awareness.
+
+**Observability** -- Prometheus metrics, TUI terminal dashboard, web dashboard with SSE streaming, structured JSON tracing. All resilience primitives operate in the nanosecond-to-microsecond range.
+
+**MCP** -- `infer`, `pipeline_status`, `batch_infer`, and `configure_pipeline` are all callable from Claude Desktop and Claude Code, with live stage latency reporting.
 
 ---
 
