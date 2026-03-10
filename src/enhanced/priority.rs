@@ -150,6 +150,8 @@ impl PriorityQueue {
         }
 
         let mut seq = self.sequence.lock().await;
+        // u64 sequence: wraps after ~1.8×10^19 operations. At 1M ops/sec
+        // that's ~585,000 years. FIFO ordering is undefined post-wrap.
         *seq += 1;
 
         heap.push(PrioritizedRequest {

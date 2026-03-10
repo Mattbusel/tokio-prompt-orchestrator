@@ -181,15 +181,21 @@ impl RetryPolicy {
                 max_delay,
                 multiplier,
             } => {
-                let delay =
-                    initial_delay.as_millis() as f64 * multiplier.powi((attempt - 1) as i32);
-                let delay = Duration::from_millis(delay as u64);
-                delay.min(*max_delay)
+                let max_ms = max_delay.as_millis() as f64;
+                let delay_ms = (initial_delay.as_millis() as f64
+                    * multiplier.powi((attempt - 1) as i32))
+                .min(max_ms);
+                Duration::from_millis(delay_ms as u64)
             }
             RetryStrategy::Linear {
                 initial_delay,
                 increment,
-            } => *initial_delay + *increment * (attempt as u32 - 1),
+            } => {
+                let steps = attempt.saturating_sub(1) as u32;
+                let added = increment.as_millis().saturating_mul(steps as u128);
+                let total_ms = initial_delay.as_millis().saturating_add(added);
+                Duration::from_millis(total_ms.min(u64::MAX as u128) as u64)
+            }
         }
     }
 

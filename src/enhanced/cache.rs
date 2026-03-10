@@ -126,6 +126,13 @@ impl CacheLayer {
         let key = key.into();
         let value = value.into();
 
+        if ttl_secs == 0 {
+            // TTL of 0 is meaningless — the entry would expire immediately on
+            // the first get().  Treat it as a no-op rather than inserting a
+            // permanently-stale entry.
+            return;
+        }
+
         match &self.backend {
             CacheBackend::Memory(cache) => {
                 // Evict if at capacity

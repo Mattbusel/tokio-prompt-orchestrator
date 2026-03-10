@@ -132,6 +132,7 @@ impl CircuitBreaker {
                             // calculated only from post-recovery requests.
                             state.status = CircuitStatus::HalfOpen;
                             state.recent_results.clear();
+                            state.failures = 0;
                             state.last_state_change = Instant::now();
                             info!("circuit breaker: transitioning to half-open");
                         } else {
@@ -182,6 +183,7 @@ impl CircuitBreaker {
                 if success_rate >= self.config.success_threshold {
                     state.status = CircuitStatus::Closed;
                     state.failures = 0;
+                    state.successes = 0;
                     state.last_state_change = Instant::now();
                     info!(
                         success_rate = success_rate,

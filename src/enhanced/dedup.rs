@@ -33,6 +33,7 @@
 //! ```
 
 use dashmap::DashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::broadcast;
@@ -76,6 +77,8 @@ enum RequestState {
 pub struct Deduplicator {
     requests: Arc<DashMap<String, RequestState>>,
     cache_duration: Duration,
+    /// Signals the background cleanup task to stop when set to `true`.
+    shutdown: Arc<AtomicBool>,
 }
 
 impl Deduplicator {
@@ -83,17 +86,23 @@ impl Deduplicator {
     ///
     /// `cache_duration` - How long to cache completed requests
     pub fn new(cache_duration: Duration) -> Self {
+        let shutdown = Arc::new(AtomicBool::new(false));
         let dedup = Self {
             requests: Arc::new(DashMap::new()),
             cache_duration,
+            shutdown: shutdown.clone(),
         };
 
-        // Start cleanup task
+        // Start cleanup task; checks `shutdown` flag each iteration so it
+        // stops promptly when the last Deduplicator handle is dropped.
         let requests = dedup.requests.clone();
         let cache_duration = dedup.cache_duration;
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(60)).await;
+                if shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
                 cleanup_expired(&requests, cache_duration);
             }
         });
@@ -118,7 +127,11 @@ impl Deduplicator {
                         info!(key = key, "duplicate request detected (cached)");
                         DeduplicationResult::Cached(result.clone())
                     } else {
-                        // Expired, treat as new
+                        // Expired, treat as new.
+                        // Note: any task waiting on the old broadcast channel will receive
+                        // a RecvError when the sender is dropped here. Callers of
+                        // wait_for_result() must handle RecvError as a "request cancelled,
+                        // retry" signal.
                         drop(state);
                         self.register_new(key).await
                     }
@@ -208,6 +221,16 @@ impl Deduplicator {
     pub fn clear(&self) {
         self.requests.clear();
         debug!("deduplication cache cleared");
+    }
+}
+
+impl Drop for Deduplicator {
+    fn drop(&mut self) {
+        // Signal the background cleanup task to stop on its next wake-up.
+        // Only the last owner sets this; clones share the same Arc.
+        if Arc::strong_count(&self.shutdown) == 1 {
+            self.shutdown.store(true, Ordering::Relaxed);
+        }
     }
 }
 
