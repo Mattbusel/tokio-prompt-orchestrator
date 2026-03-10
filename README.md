@@ -125,64 +125,92 @@ These run as a closed loop: feedback scores update the router, the router change
 
 Download **[orchestrator.exe](https://github.com/Mattbusel/tokio-prompt-orchestrator/releases/tag/v0.1.0)** from the releases page and double-click it. No Rust, no dependencies, nothing to install.
 
-### First run — setup wizard
+### Step 1 — Get an API key (one-time, ~2 minutes)
 
-The first time you open it, the terminal walks you through everything:
+You need a key from whichever AI provider you want to use:
+
+| Provider | Where to get a key | Starting cost |
+|---|---|---|
+| **Anthropic** (recommended) | https://console.anthropic.com/settings/keys | ~$5 credit |
+| **OpenAI** | https://platform.openai.com/api-keys | ~$5 credit |
+| **llama.cpp** | No key needed — runs locally | Free |
+| **echo** | No key needed — offline test mode | Free |
+
+### Step 2 — Run the wizard
+
+The first time you open `orchestrator.exe` it walks you through setup:
 
 ```
-  Which LLM provider do you want to use?
-  1) openai     (requires OPENAI_API_KEY)
-  2) anthropic  (requires ANTHROPIC_API_KEY)
-  3) llama      (local llama.cpp server)
-  4) echo       (offline test mode — no key needed)
-  Enter number or name [4]: 2
+  ┌──────────────────────────────────────────────────┐
+  │       Welcome to tokio-prompt-orchestrator        │
+  │  Setup takes about 60 seconds.                    │
+  └──────────────────────────────────────────────────┘
 
-  Anthropic API key (sk-ant-…): sk-ant-xxxxx
-  Model name [claude-sonnet-4-6]: ↵
-  Web API port [8080]: ↵
-  API_KEY (optional bearer token, Enter to skip): ↵
+  Which AI provider do you want to use?
+
+  1) Anthropic  (Claude — recommended for most users)
+     Get a key: https://console.anthropic.com/settings/keys
+
+  2) OpenAI     (GPT-4o and friends)
+     Get a key: https://platform.openai.com/api-keys
+
+  3) llama      (run models locally — no key needed)
+  4) echo       (test mode — no key, no internet)
+
+  Enter 1, 2, 3, or 4 [1]: 1
+
+  Paste your key here (sk-ant-…): sk-ant-xxxxx
+  ✓ Key saved.
+
+  Model name (press Enter to use default) [claude-sonnet-4-6]: ↵
+  Port for the web API [8080]: ↵
+
+  ✓ All done! Settings saved to orchestrator.env next to this .exe.
+    Run with --reset any time to change your key or provider.
 ```
 
-Your answers are saved to `orchestrator.env` in the same folder as the `.exe`. Every run after that skips the wizard and boots straight to the prompt.
+Your key is stored only in `orchestrator.env` on your machine — never transmitted anywhere except to the provider you chose.
 
-> **Your API key is stored only on your machine** in `orchestrator.env`. It is never transmitted anywhere except to the provider you chose (OpenAI or Anthropic).
+### Step 3 — Start using it
 
-### After setup — type prompts directly
-
-Once the banner appears you can type prompts straight into the terminal:
+After setup the banner appears and you can type prompts straight into the terminal:
 
 ```
 ╔══════════════════════════════════════════════════╗
 ║   tokio-prompt-orchestrator v0.1.0               ║
 ║  Provider : anthropic (claude-sonnet-4-6)        ║
 ║  Web API  : http://127.0.0.1:8080                ║
-║  POST http://127.0.0.1:8080/v1/prompt            ║
+╠══════════════════════════════════════════════════╣
+║  HOW TO USE                                      ║
+║                                                  ║
+║  Terminal  ─ type any question below             ║
+║                                                  ║
+║  Agents / IDEs ─ HTTP while this window is open: ║
+║   POST http://127.0.0.1:8080/v1/prompt           ║
+║   WS   ws://127.0.0.1:8080/v1/stream             ║
+║                                                  ║
+║  Claude Desktop ─ claude_desktop_config.json:    ║
+║   mcpServers > orchestrator > url:               ║
+║     "http://127.0.0.1:8080"                      ║
 ╚══════════════════════════════════════════════════╝
 
-Type a prompt and press Enter.  Type 'exit' to quit.
+Ask me anything — try: What can you help me with?
+Type 'exit' to quit.
 
-> Explain backpressure in one sentence
-Backpressure is when a consumer signals a producer to slow down
-so the queue between them never overflows.
+> What can you help me with?
 
-> exit
-Goodbye.
+I can answer questions, write and review code, summarise documents,
+help plan projects, and more — routed through a resilience pipeline
+with automatic retries and deduplication.
+
+>
 ```
 
-The terminal REPL and the web API run **at the same time** — you can type in the terminal while agents and IDEs send requests to `http://127.0.0.1:8080` in the background.
+The terminal REPL and the web API **run at the same time** — you type in the window while agents and IDEs connect to `http://127.0.0.1:8080` in the background.
 
 ### Connecting agents and IDEs
 
-While the `.exe` is running, any tool that can make HTTP requests can use it:
-
-**Send a prompt from the terminal (curl):**
-```bash
-curl -X POST http://127.0.0.1:8080/v1/prompt \
-  -H "Content-Type: application/json" \
-  -d '{"input": "What is the capital of France?"}'
-```
-
-**Claude Desktop** — add to `claude_desktop_config.json`:
+**Claude Desktop** — add to `claude_desktop_config.json` and restart Claude Desktop:
 ```json
 {
   "mcpServers": {
@@ -192,14 +220,17 @@ curl -X POST http://127.0.0.1:8080/v1/prompt \
   }
 }
 ```
-Then restart Claude Desktop. The orchestrator appears as a connected MCP server.
 
-**VS Code / Cursor / Windsurf** — point your AI extension's custom endpoint at:
-```
-http://127.0.0.1:8080/v1/prompt
+**VS Code / Cursor / Windsurf** — point your AI extension's custom endpoint at `http://127.0.0.1:8080/v1/prompt`
+
+**curl:**
+```bash
+curl -X POST http://127.0.0.1:8080/v1/prompt \
+  -H "Content-Type: application/json" \
+  -d '{"input": "What is the capital of France?"}'
 ```
 
-**From any script or agent:**
+**Python / any script:**
 ```python
 import requests
 r = requests.post("http://127.0.0.1:8080/v1/prompt",
@@ -207,9 +238,9 @@ r = requests.post("http://127.0.0.1:8080/v1/prompt",
 print(r.json()["text"])
 ```
 
-### Reconfiguring
+### Changing your key or provider
 
-Delete or edit `orchestrator.env` next to the `.exe` and the wizard runs again on the next launch. You can also switch providers at any time by changing the `PROVIDER=` line in that file.
+Run `orchestrator.exe --reset` — it wipes the saved settings and runs the wizard again. Or edit `orchestrator.env` directly (it's a plain text file next to the `.exe`).
 
 ---
 
