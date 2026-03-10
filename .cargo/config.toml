@@ -9,3 +9,6 @@
 # If you hit LNK1104 or file lock errors: wait 30 seconds, then retry once.
 # Do NOT spawn parallel build attempts to resolve lock errors.
 target-dir = "target/claude"
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
