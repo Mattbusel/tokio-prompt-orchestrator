@@ -265,12 +265,95 @@ fn run_wizard(args: CliArgs) -> ResolvedConfig {
         println!("  Done. Please enter your new settings below.\n");
     }
 
-    let is_interactive = args.provider.is_none()
+    let is_first_run = args.provider.is_none()
         && env::var("OPENAI_API_KEY").is_err()
-        && env::var("ANTHROPIC_API_KEY").is_err();
+        && env::var("ANTHROPIC_API_KEY").is_err()
+        && env::var("PROVIDER").is_err();
+
+    // ── Returning user: show saved settings and offer a menu ─────────────────
+    if !is_first_run && !args.reset {
+        let saved_provider = env::var("PROVIDER").unwrap_or_else(|_| "unknown".to_string());
+        let saved_model = env::var("MODEL").unwrap_or_else(|_| "default".to_string());
+        let key_status = match saved_provider.as_str() {
+            "anthropic" => {
+                if env::var("ANTHROPIC_API_KEY")
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false)
+                {
+                    "key saved ✓"
+                } else {
+                    "NO KEY SAVED ✗"
+                }
+            }
+            "openai" => {
+                if env::var("OPENAI_API_KEY")
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false)
+                {
+                    "key saved ✓"
+                } else {
+                    "NO KEY SAVED ✗"
+                }
+            }
+            _ => "no key needed",
+        };
+
+        println!();
+        println!("  ┌─────────────────────────────────────────────────────┐");
+        println!("  │         tokio-prompt-orchestrator                    │");
+        println!("  ├─────────────────────────────────────────────────────┤");
+        println!("  │  Saved settings:                                     │");
+        println!("  │    Provider : {:<38}│", saved_provider);
+        println!("  │    Model    : {:<38}│", saved_model);
+        println!("  │    API Key  : {:<38}│", key_status);
+        println!("  ├─────────────────────────────────────────────────────┤");
+        println!("  │  [Enter]  Start with these settings                  │");
+        println!("  │  [S]      Change provider / API key / model          │");
+        println!("  │  [Q]      Quit                                        │");
+        println!("  └─────────────────────────────────────────────────────┘");
+        println!();
+
+        let choice = prompt_line("  Your choice: ");
+        match choice.to_lowercase().as_str() {
+            "q" | "quit" => {
+                println!("  Goodbye.");
+                std::process::exit(0);
+            }
+            "s" | "settings" => {
+                // Wipe saved config and fall through to the wizard below
+                for key in &[
+                    "PROVIDER",
+                    "MODEL",
+                    "OPENAI_API_KEY",
+                    "ANTHROPIC_API_KEY",
+                    "LLAMA_CPP_URL",
+                    "API_KEY",
+                ] {
+                    delete_env_value(key);
+                    unsafe { env::remove_var(key) };
+                }
+                println!();
+            }
+            _ => {
+                // Enter or anything else — use saved settings, skip wizard
+                return ResolvedConfig {
+                    provider: saved_provider,
+                    model: saved_model,
+                    port: args.port,
+                    host: args.host,
+                    log_level: args.log_level,
+                    no_web: args.no_web,
+                };
+            }
+        }
+    }
+
+    let is_interactive = is_first_run
+        || args.reset
+        || env::var("OPENAI_API_KEY").is_err() && env::var("ANTHROPIC_API_KEY").is_err();
 
     // ── Welcome message on first run ─────────────────────────────────────────
-    if is_interactive {
+    if is_first_run || args.reset {
         println!();
         println!("  ┌─────────────────────────────────────────────────────┐");
         println!("  │         Welcome to tokio-prompt-orchestrator         │");
@@ -548,7 +631,7 @@ async fn run_repl(
     let session = SessionId("repl".to_string());
 
     println!("Ask me anything — try: What can you help me with?");
-    println!("Type 'exit' to quit.\n");
+    println!("Commands: 'exit' to quit  |  'settings' to change key/provider\n");
 
     loop {
         print!("> ");
@@ -569,6 +652,14 @@ async fn run_repl(
             None => break,
             Some(ref s) if s.eq_ignore_ascii_case("exit") || s.eq_ignore_ascii_case("quit") => {
                 break
+            }
+            Some(ref s) if s.eq_ignore_ascii_case("settings") => {
+                println!();
+                println!("  To change your key or provider, close this window and");
+                println!("  reopen orchestrator.exe — choose [S] at the startup menu.");
+                println!("  Or run: orchestrator.exe --reset");
+                println!();
+                continue;
             }
             Some(ref s) if s.is_empty() => continue,
             Some(s) => s,
