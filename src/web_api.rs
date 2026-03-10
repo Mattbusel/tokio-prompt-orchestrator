@@ -364,17 +364,18 @@ async fn auth_middleware(
     next: Next,
 ) -> Response {
     // Public endpoints that do not require authentication.
-    let is_public = {
-        let path = req.uri().path();
-        path == "/health" || path == "/metrics" || path == "/api/v1/schema"
-    };
+    let req_path = req.uri().path().to_owned();
+    let is_public = req_path == "/health" || req_path == "/metrics" || req_path == "/api/v1/schema";
     if is_public {
         return next.run(req).await;
     }
 
     // Auth disabled — allow all but warn.
     let Some(ref expected_key) = state.api_key else {
-        warn!(path, "auth disabled — allowing unauthenticated request");
+        warn!(
+            request_path = req_path,
+            "auth disabled — allowing unauthenticated request"
+        );
         return next.run(req).await;
     };
 

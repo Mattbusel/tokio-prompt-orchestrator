@@ -252,6 +252,7 @@ impl RedisCache {
     }
 
     /// Issue DBSIZE to get the number of keys in the current Redis database.
+    #[allow(dead_code)]
     async fn dbsize_redis(&self) -> Result<usize, redis::RedisError> {
         let mut conn = self.client.get_multiplexed_async_connection().await?;
         let count: i64 = redis::cmd("DBSIZE").query_async(&mut conn).await?;
