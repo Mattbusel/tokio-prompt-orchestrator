@@ -824,7 +824,7 @@ mod tests {
             log_level: "info".to_string(),
             no_web: false,
         };
-        let err = build_worker(&cfg).unwrap_err();
+        let err = build_worker(&cfg).err().unwrap();
         assert!(err.contains("OpenAI API key"));
         assert!(err.contains("platform.openai.com"));
     }
@@ -842,7 +842,7 @@ mod tests {
             log_level: "info".to_string(),
             no_web: false,
         };
-        let err = build_worker(&cfg).unwrap_err();
+        let err = build_worker(&cfg).err().unwrap();
         assert!(err.contains("Anthropic API key"));
         assert!(err.contains("console.anthropic.com"));
     }
@@ -857,7 +857,7 @@ mod tests {
             log_level: "info".to_string(),
             no_web: false,
         };
-        let err = build_worker(&cfg).unwrap_err();
+        let err = build_worker(&cfg).err().unwrap();
         assert!(err.contains("Unknown provider"));
         assert!(err.contains("--reset"));
     }
