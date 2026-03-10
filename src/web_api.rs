@@ -55,7 +55,7 @@ use tokio::sync::mpsc;
 #[cfg(feature = "web-api")]
 use tower_http::cors::CorsLayer;
 #[cfg(feature = "web-api")]
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 #[cfg(feature = "web-api")]
 use uuid::Uuid;
 
@@ -223,7 +223,7 @@ pub async fn start_server(
     let api_key = match std::env::var("API_KEY") {
         Ok(k) if !k.is_empty() => Some(k),
         _ => {
-            warn!("API_KEY env var not set or empty — authentication is DISABLED");
+            debug!("API_KEY not set — web API auth disabled (fine for local use)");
             None
         }
     };
@@ -241,7 +241,7 @@ pub async fn start_server(
             CorsLayer::new().allow_origin(AllowOrigin::list(allowed_vec))
         }
         _ => {
-            warn!("ALLOWED_ORIGINS env var not set — CORS is permissive (wildcard). Set ALLOWED_ORIGINS for production.");
+            debug!("ALLOWED_ORIGINS not set — CORS wildcard enabled (fine for local use)");
             CorsLayer::new().allow_origin(AllowOrigin::any())
         }
     };
