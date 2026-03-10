@@ -305,7 +305,7 @@ LOG_FORMAT="json"                     # Structured logs for Datadog/Loki
 ## Numbers
 
 ```
-Lines of code       58,457
+Lines of code       165,000+
 Tests               1,491 passing, 0 failing
 Benchmarks          30+ criterion, all within budget
 Dedup savings       66.7% collapse rate in live demo
@@ -330,7 +330,7 @@ Channel send        <1us p99
 | Dedup collapse | 67% in production | Not built-in | Not built-in |
 | Self-improving loop | Live, autonomous | Not built-in | Not built-in |
 | Concurrency | Tokio async, zero-copy | Python GIL | Python GIL |
-| Binary size | 4 MB (LTO) | 100s of MB deps | 100s of MB deps |
+| Binary size | 7.6 MB (LTO) | 100s of MB deps | 100s of MB deps |
 
 Use LangChain if you need to prototype quickly in Python. Use this if you need predictable latency, zero panics, and autonomous optimization at scale.
 
