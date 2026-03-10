@@ -404,18 +404,25 @@ fn print_banner(cfg: &ResolvedConfig) {
     println!("╠══════════════════════════════════════════════════╣");
 
     if !cfg.no_web {
+        let endpoint = format!("http://{}:{}", cfg.host, cfg.port);
+        println!("╠══════════════════════════════════════════════════╣");
+        println!("║  HOW TO USE                                      ║");
+        println!("║                                                  ║");
+        println!("║  1. Terminal — type a prompt below, hit Enter    ║");
+        println!("║                                                  ║");
+        println!("║  2. Agents / IDEs — HTTP while this window runs: ║");
+        println!("║   POST {:<41}║", format!("{endpoint}/v1/prompt"));
         println!(
-            "║  POST http://{}:{}/v1/prompt          ║",
-            cfg.host, cfg.port
-        );
-        println!(
-            "║  WS   ws://{}:{}/v1/stream            ║",
-            cfg.host, cfg.port
+            "║   WS   {:<41}║",
+            format!("ws://{}:{}/v1/stream", cfg.host, cfg.port)
         );
         println!("║                                                  ║");
-        println!("║  Claude Desktop config:                          ║");
-        println!("║   mcpServers > orchestrator >                    ║");
-        println!("║     url: http://{}:{:<25}║", cfg.host, cfg.port);
+        println!("║  3. Claude Desktop — claude_desktop_config.json: ║");
+        println!("║   mcpServers > orchestrator > url:               ║");
+        println!("║     {:<45}║", format!("\"{endpoint}\""));
+        println!("║                                                  ║");
+        println!("║  Settings saved to orchestrator.env (same dir)  ║");
+        println!("║  Edit that file to change provider / key / port ║");
     }
 
     println!("╚══════════════════════════════════════════════════╝");

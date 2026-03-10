@@ -121,6 +121,98 @@ These run as a closed loop: feedback scores update the router, the router change
 
 ---
 
+## Windows .exe — No Install Required
+
+Download **[orchestrator.exe](https://github.com/Mattbusel/tokio-prompt-orchestrator/releases/tag/v0.1.0)** from the releases page and double-click it. No Rust, no dependencies, nothing to install.
+
+### First run — setup wizard
+
+The first time you open it, the terminal walks you through everything:
+
+```
+  Which LLM provider do you want to use?
+  1) openai     (requires OPENAI_API_KEY)
+  2) anthropic  (requires ANTHROPIC_API_KEY)
+  3) llama      (local llama.cpp server)
+  4) echo       (offline test mode — no key needed)
+  Enter number or name [4]: 2
+
+  Anthropic API key (sk-ant-…): sk-ant-xxxxx
+  Model name [claude-sonnet-4-6]: ↵
+  Web API port [8080]: ↵
+  API_KEY (optional bearer token, Enter to skip): ↵
+```
+
+Your answers are saved to `orchestrator.env` in the same folder as the `.exe`. Every run after that skips the wizard and boots straight to the prompt.
+
+> **Your API key is stored only on your machine** in `orchestrator.env`. It is never transmitted anywhere except to the provider you chose (OpenAI or Anthropic).
+
+### After setup — type prompts directly
+
+Once the banner appears you can type prompts straight into the terminal:
+
+```
+╔══════════════════════════════════════════════════╗
+║   tokio-prompt-orchestrator v0.1.0               ║
+║  Provider : anthropic (claude-sonnet-4-6)        ║
+║  Web API  : http://127.0.0.1:8080                ║
+║  POST http://127.0.0.1:8080/v1/prompt            ║
+╚══════════════════════════════════════════════════╝
+
+Type a prompt and press Enter.  Type 'exit' to quit.
+
+> Explain backpressure in one sentence
+Backpressure is when a consumer signals a producer to slow down
+so the queue between them never overflows.
+
+> exit
+Goodbye.
+```
+
+The terminal REPL and the web API run **at the same time** — you can type in the terminal while agents and IDEs send requests to `http://127.0.0.1:8080` in the background.
+
+### Connecting agents and IDEs
+
+While the `.exe` is running, any tool that can make HTTP requests can use it:
+
+**Send a prompt from the terminal (curl):**
+```bash
+curl -X POST http://127.0.0.1:8080/v1/prompt \
+  -H "Content-Type: application/json" \
+  -d '{"input": "What is the capital of France?"}'
+```
+
+**Claude Desktop** — add to `claude_desktop_config.json`:
+```json
+{
+  "mcpServers": {
+    "orchestrator": {
+      "url": "http://127.0.0.1:8080"
+    }
+  }
+}
+```
+Then restart Claude Desktop. The orchestrator appears as a connected MCP server.
+
+**VS Code / Cursor / Windsurf** — point your AI extension's custom endpoint at:
+```
+http://127.0.0.1:8080/v1/prompt
+```
+
+**From any script or agent:**
+```python
+import requests
+r = requests.post("http://127.0.0.1:8080/v1/prompt",
+                  json={"input": "Summarise this codebase"})
+print(r.json()["text"])
+```
+
+### Reconfiguring
+
+Delete or edit `orchestrator.env` next to the `.exe` and the wizard runs again on the next launch. You can also switch providers at any time by changing the `PROVIDER=` line in that file.
+
+---
+
 ## Quick Start
 
 ```bash
