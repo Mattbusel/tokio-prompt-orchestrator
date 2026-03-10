@@ -90,14 +90,18 @@ impl ModelWorker for EchoWorker {
 #[derive(Debug, Serialize)]
 struct OpenAiRequest {
     model: String,
-    prompt: String,
+    messages: Vec<OpenAiMessage>,
     max_tokens: u32,
     temperature: f32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    stop: Option<Vec<String>>,
 }
 
-/// OpenAI API response
+#[derive(Debug, Serialize)]
+struct OpenAiMessage {
+    role: String,
+    content: String,
+}
+
+/// OpenAI chat/completions API response
 #[derive(Debug, Deserialize)]
 struct OpenAiResponse {
     choices: Vec<OpenAiChoice>,
@@ -105,7 +109,12 @@ struct OpenAiResponse {
 
 #[derive(Debug, Deserialize)]
 struct OpenAiChoice {
-    text: String,
+    message: OpenAiResponseMessage,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiResponseMessage {
+    content: String,
 }
 
 /// OpenAI API worker (GPT-4, GPT-3.5-turbo-instruct, etc.)
@@ -195,15 +204,17 @@ impl ModelWorker for OpenAiWorker {
     async fn infer(&self, prompt: &str) -> Result<Vec<String>, OrchestratorError> {
         let request = OpenAiRequest {
             model: self.model.clone(),
-            prompt: prompt.to_string(),
+            messages: vec![OpenAiMessage {
+                role: "user".to_string(),
+                content: prompt.to_string(),
+            }],
             max_tokens: self.max_tokens,
             temperature: self.temperature,
-            stop: None,
         };
 
         let response = self
             .client
-            .post(format!("{}/completions", self.base_url))
+            .post(format!("{}/chat/completions", self.base_url))
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
             .timeout(self.timeout)
@@ -238,7 +249,8 @@ impl ModelWorker for OpenAiWorker {
             .ok_or_else(|| {
                 OrchestratorError::Inference("No choices in OpenAI response".to_string())
             })?
-            .text
+            .message
+            .content
             .split_whitespace()
             .map(|s| s.to_string())
             .collect();
@@ -721,7 +733,7 @@ mod tests {
     }
 
     fn openai_success_body() -> serde_json::Value {
-        serde_json::json!({"choices": [{"text": "hello world response"}]})
+        serde_json::json!({"choices": [{"message": {"role": "assistant", "content": "hello world response"}}]})
     }
 
     fn anthropic_success_body() -> serde_json::Value {
@@ -830,7 +842,7 @@ mod tests {
     async fn test_openai_infer_success_parses_response_correctly() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/completions"))
+            .and(path("/chat/completions"))
             .respond_with(ResponseTemplate::new(200).set_body_json(openai_success_body()))
             .mount(&server)
             .await;
@@ -847,7 +859,7 @@ mod tests {
     async fn test_openai_infer_http_500_returns_inference_error() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/completions"))
+            .and(path("/chat/completions"))
             .respond_with(ResponseTemplate::new(500).set_body_string("internal error"))
             .mount(&server)
             .await;
@@ -873,7 +885,7 @@ mod tests {
     async fn test_openai_infer_empty_choices_returns_inference_error() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/completions"))
+            .and(path("/chat/completions"))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({"choices": []})),
             )
@@ -901,7 +913,7 @@ mod tests {
     async fn test_openai_infer_invalid_json_returns_inference_error() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/completions"))
+            .and(path("/chat/completions"))
             .respond_with(ResponseTemplate::new(200).set_body_string("not valid json {{{{"))
             .mount(&server)
             .await;
@@ -920,7 +932,7 @@ mod tests {
         // An unmatched request returns 404, which makes the worker return Err,
         // causing the final assert to fail — which is the desired test signal.
         Mock::given(method("POST"))
-            .and(path("/completions"))
+            .and(path("/chat/completions"))
             .and(header("authorization", "Bearer test-key-openai"))
             .respond_with(ResponseTemplate::new(200).set_body_json(openai_success_body()))
             .mount(&server)
@@ -941,7 +953,7 @@ mod tests {
     async fn test_openai_infer_sends_correct_model_in_request_body() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/completions"))
+            .and(path("/chat/completions"))
             .respond_with(ResponseTemplate::new(200).set_body_json(openai_success_body()))
             .mount(&server)
             .await;
@@ -962,7 +974,7 @@ mod tests {
     async fn test_openai_with_max_tokens_sends_correct_value() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/completions"))
+            .and(path("/chat/completions"))
             .respond_with(ResponseTemplate::new(200).set_body_json(openai_success_body()))
             .mount(&server)
             .await;
@@ -988,7 +1000,7 @@ mod tests {
     async fn test_openai_with_temperature_sends_correct_value() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/completions"))
+            .and(path("/chat/completions"))
             .respond_with(ResponseTemplate::new(200).set_body_json(openai_success_body()))
             .mount(&server)
             .await;

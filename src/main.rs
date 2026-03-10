@@ -716,15 +716,43 @@ fn uuid_simple() -> String {
 // ---------------------------------------------------------------------------
 
 fn init_tracing(level: &str) {
+    use std::fs::OpenOptions;
     use tracing_subscriber::{fmt, EnvFilter};
+
+    // Write logs to orchestrator.log next to the .exe so they never
+    // clutter the interactive terminal.  Set RUST_LOG=info to see them live,
+    // or read the log file after the fact.
     let filter = env::var("RUST_LOG")
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| level.to_string());
-    let _ = fmt()
-        .with_env_filter(EnvFilter::new(filter))
-        .with_target(false)
-        .try_init();
+
+    // Try to open the log file next to the binary; fall back to stderr.
+    let log_path = env::current_exe().ok().and_then(|mut p| {
+        p.pop();
+        p.push("orchestrator.log");
+        Some(p)
+    });
+
+    let use_file = log_path
+        .as_ref()
+        .map(|p| OpenOptions::new().create(true).append(true).open(p).ok())
+        .flatten();
+
+    if let Some(file) = use_file {
+        let _ = fmt()
+            .with_env_filter(EnvFilter::new(filter))
+            .with_target(false)
+            .with_writer(std::sync::Mutex::new(file))
+            .try_init();
+    } else {
+        // Fallback: stderr (not stdout, so it doesn't mix with REPL)
+        let _ = fmt()
+            .with_env_filter(EnvFilter::new(filter))
+            .with_target(false)
+            .with_writer(std::io::stderr)
+            .try_init();
+    }
 }
 
 // ---------------------------------------------------------------------------

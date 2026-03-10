@@ -50,7 +50,7 @@ fn make_anthropic_worker(base_url: &str) -> AnthropicWorker {
 }
 
 fn openai_success_body() -> serde_json::Value {
-    json!({"choices": [{"text": "hello world response"}]})
+    json!({"choices": [{"message": {"role": "assistant", "content": "hello world response"}}]})
 }
 
 fn anthropic_success_body() -> serde_json::Value {
@@ -73,7 +73,7 @@ fn vllm_success_body() -> serde_json::Value {
 async fn test_openai_infer_http_429_returns_inference_error() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/completions"))
+        .and(path("/chat/completions"))
         .respond_with(ResponseTemplate::new(429).set_body_json(
             json!({"error": {"type": "rate_limit_exceeded", "message": "Rate limit reached"}}),
         ))
@@ -105,7 +105,7 @@ async fn test_openai_infer_http_429_returns_inference_error() {
 async fn test_openai_infer_timeout_returns_inference_error() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/completions"))
+        .and(path("/chat/completions"))
         .respond_with(
             ResponseTemplate::new(200)
                 .set_body_json(openai_success_body())
@@ -145,7 +145,7 @@ async fn test_openai_infer_timeout_returns_inference_error() {
 async fn test_openai_infer_http_401_returns_inference_error() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/completions"))
+        .and(path("/chat/completions"))
         .respond_with(
             ResponseTemplate::new(401)
                 .set_body_json(json!({"error": {"message": "Invalid API key"}})),
@@ -193,7 +193,7 @@ fn test_openai_worker_empty_api_key_succeeds_construction() {
 async fn test_openai_infer_multiple_sequential_requests_succeed() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/completions"))
+        .and(path("/chat/completions"))
         .respond_with(ResponseTemplate::new(200).set_body_json(openai_success_body()))
         .expect(3)
         .mount(&server)
@@ -711,7 +711,7 @@ fn test_vllm_worker_full_builder_chain() {
 async fn test_openai_infer_http_503_returns_inference_error() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/completions"))
+        .and(path("/chat/completions"))
         .respond_with(ResponseTemplate::new(503).set_body_string("service temporarily unavailable"))
         .mount(&server)
         .await;
@@ -813,10 +813,10 @@ async fn test_vllm_infer_http_503_returns_inference_error() {
 async fn test_openai_infer_whitespace_only_response_returns_empty_tokens() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/completions"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"choices": [{"text": "   \t  \n  "}]})),
-        )
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"choices": [{"message": {"role": "assistant", "content": "   \t  \n  "}}]}),
+        ))
         .mount(&server)
         .await;
 

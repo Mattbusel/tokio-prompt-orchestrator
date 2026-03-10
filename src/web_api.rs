@@ -370,12 +370,8 @@ async fn auth_middleware(
         return next.run(req).await;
     }
 
-    // Auth disabled — allow all but warn.
+    // Auth disabled — allow all (no key set, local use).
     let Some(ref expected_key) = state.api_key else {
-        warn!(
-            request_path = req_path,
-            "auth disabled — allowing unauthenticated request"
-        );
         return next.run(req).await;
     };
 
