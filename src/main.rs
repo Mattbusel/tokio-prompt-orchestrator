@@ -33,7 +33,8 @@ use std::env;
 use std::io::{self, Write as _};
 use std::sync::Arc;
 use tokio_prompt_orchestrator::{
-    metrics, spawn_pipeline, AnthropicWorker, EchoWorker, LlamaCppWorker, ModelWorker, OpenAiWorker,
+    metrics, spawn_pipeline, AnthropicWorker, EchoWorker, LlamaCppWorker, ModelWorker,
+    OpenAiWorker, PostOutput, PromptRequest, SessionId,
 };
 
 #[cfg(feature = "web-api")]
@@ -468,6 +469,96 @@ fn build_worker(cfg: &ResolvedConfig) -> Result<Arc<dyn ModelWorker>, String> {
 }
 
 // ---------------------------------------------------------------------------
+// Terminal REPL — runs concurrently with the web API
+// ---------------------------------------------------------------------------
+
+/// Read prompts from stdin, send through the pipeline, print responses.
+/// Returns when the user types "exit" / "quit" / Ctrl-D.
+async fn run_repl(
+    input_tx: tokio::sync::mpsc::Sender<PromptRequest>,
+    output_rx: tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<PostOutput>>>,
+) {
+    // Take ownership of the output receiver
+    let mut rx = {
+        let mut guard = output_rx.lock().await;
+        match guard.take() {
+            Some(r) => r,
+            None => {
+                eprintln!("[repl] output channel already taken — REPL disabled");
+                return;
+            }
+        }
+    };
+
+    let session = SessionId("repl".to_string());
+    println!("Type a prompt and press Enter.  Type 'exit' to quit.\n");
+
+    loop {
+        print!("> ");
+        let _ = io::stdout().flush();
+
+        // Read a line from stdin on a blocking thread so we don't block Tokio
+        let line = tokio::task::spawn_blocking(|| {
+            let mut buf = String::new();
+            match io::stdin().read_line(&mut buf) {
+                Ok(0) => None, // EOF / Ctrl-D
+                Ok(_) => Some(buf.trim().to_string()),
+                Err(_) => None,
+            }
+        })
+        .await
+        .unwrap_or(None);
+
+        let prompt = match line {
+            None => break,
+            Some(ref s) if s.eq_ignore_ascii_case("exit") || s.eq_ignore_ascii_case("quit") => {
+                break
+            }
+            Some(ref s) if s.is_empty() => continue,
+            Some(s) => s,
+        };
+
+        let req = PromptRequest {
+            session: session.clone(),
+            request_id: uuid_simple(),
+            input: prompt,
+            meta: Default::default(),
+        };
+
+        if input_tx.send(req).await.is_err() {
+            eprintln!("[repl] pipeline closed");
+            break;
+        }
+
+        // Wait for the response (up to 60 s)
+        match tokio::time::timeout(std::time::Duration::from_secs(60), rx.recv()).await {
+            Ok(Some(out)) => println!("\n{}\n", out.text),
+            Ok(None) => {
+                eprintln!("[repl] pipeline output closed");
+                break;
+            }
+            Err(_) => eprintln!("[repl] timed out waiting for response"),
+        }
+    }
+
+    println!("Goodbye.");
+}
+
+/// Generate a short unique ID without pulling in uuid as a dependency.
+fn uuid_simple() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    // Mix with a thread-local counter for uniqueness within the same millisecond
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static CTR: AtomicU64 = AtomicU64::new(0);
+    let seq = CTR.fetch_add(1, Ordering::Relaxed);
+    format!("repl-{nanos:08x}-{seq:04x}")
+}
+
+// ---------------------------------------------------------------------------
 // Tracing
 // ---------------------------------------------------------------------------
 
@@ -548,10 +639,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // REPL runs on a separate task so the web API and terminal work simultaneously.
+    // The REPL takes the output_rx; the web API uses input_tx only.
+    let repl_tx = handles.input_tx.clone();
+    let repl_output_rx = handles.output_rx;
+    let repl_handle = tokio::spawn(async move {
+        run_repl(repl_tx, repl_output_rx).await;
+    });
+
     if cfg.no_web {
-        println!("Pipeline ready (headless). Press Ctrl+C to stop.");
-        shutdown_rx.await.ok();
-        tracing::info!("Shutdown complete");
+        // Headless: just wait for REPL to finish or Ctrl-C
+        tokio::select! {
+            _ = repl_handle => {}
+            _ = shutdown_rx => {
+                tracing::info!("Shutdown complete");
+            }
+        }
     } else {
         #[cfg(feature = "web-api")]
         {
@@ -571,6 +674,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         std::process::exit(1);
                     }
                 }
+                _ = repl_handle => {}
                 _ = shutdown_rx => {
                     tracing::info!("Shutdown signal received — stopping web API");
                 }
@@ -583,9 +687,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "Warning: built without 'web-api' feature — web server disabled.\n\
                  Rebuild with: cargo build --features web-api"
             );
-            println!("Pipeline ready (headless). Press Ctrl+C to stop.");
-            shutdown_rx.await.ok();
-            tracing::info!("Shutdown complete");
+            tokio::select! {
+                _ = repl_handle => {}
+                _ = shutdown_rx => {
+                    tracing::info!("Shutdown complete");
+                }
+            }
         }
     }
 
