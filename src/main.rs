@@ -728,16 +728,15 @@ fn init_tracing(level: &str) {
         .unwrap_or_else(|| level.to_string());
 
     // Try to open the log file next to the binary; fall back to stderr.
-    let log_path = env::current_exe().ok().and_then(|mut p| {
+    let log_path = env::current_exe().ok().map(|mut p| {
         p.pop();
         p.push("orchestrator.log");
-        Some(p)
+        p
     });
 
     let use_file = log_path
         .as_ref()
-        .map(|p| OpenOptions::new().create(true).append(true).open(p).ok())
-        .flatten();
+        .and_then(|p| OpenOptions::new().create(true).append(true).open(p).ok());
 
     if let Some(file) = use_file {
         let _ = fmt()
