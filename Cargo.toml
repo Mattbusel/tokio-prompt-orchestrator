@@ -13,6 +13,10 @@ keywords = ["tokio", "llm", "orchestration", "circuit-breaker", "async"]
 categories = ["asynchronous", "network-programming", "web-programming"]
 exclude = [".github", "scripts", "assets", "docs", "benches"]
 
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+
 [dependencies]
 # Core
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-std", "signal"] }

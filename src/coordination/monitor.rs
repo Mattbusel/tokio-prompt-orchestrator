@@ -467,7 +467,7 @@ mod tests {
     #[tokio::test]
     async fn test_monitor_register_agent() {
         let dir = tempfile::tempdir()
-            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+            .unwrap_or_else(|_| tempfile::tempdir().expect("test setup: tempdir creation failed"));
         let config = test_config(&dir);
         let queue = Arc::new(
             TaskQueue::from_tasks(config.clone(), vec![])
@@ -485,7 +485,7 @@ mod tests {
     #[tokio::test]
     async fn test_monitor_mark_finished() {
         let dir = tempfile::tempdir()
-            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+            .unwrap_or_else(|_| tempfile::tempdir().expect("test setup: tempdir creation failed"));
         let config = test_config(&dir);
         let queue = Arc::new(
             TaskQueue::from_tasks(config.clone(), vec![])
@@ -504,7 +504,7 @@ mod tests {
     #[tokio::test]
     async fn test_monitor_mark_unhealthy() {
         let dir = tempfile::tempdir()
-            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+            .unwrap_or_else(|_| tempfile::tempdir().expect("test setup: tempdir creation failed"));
         let config = test_config(&dir);
         let queue = Arc::new(
             TaskQueue::from_tasks(config.clone(), vec![])
@@ -526,7 +526,7 @@ mod tests {
     #[tokio::test]
     async fn test_monitor_snapshot_includes_task_counts() {
         let dir = tempfile::tempdir()
-            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+            .unwrap_or_else(|_| tempfile::tempdir().expect("test setup: tempdir creation failed"));
         let config = test_config(&dir);
         let tasks = vec![Task::new("t1", "p1", 1), Task::new("t2", "p2", 2)];
         let queue = Arc::new(
@@ -544,7 +544,7 @@ mod tests {
     #[tokio::test]
     async fn test_monitor_start_monitoring_can_be_stopped() {
         let dir = tempfile::tempdir()
-            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+            .unwrap_or_else(|_| tempfile::tempdir().expect("test setup: tempdir creation failed"));
         let config = Arc::new(CoordinationConfig {
             health_interval_secs: 1,
             lock_dir: dir.path().join("locks"),
@@ -573,7 +573,7 @@ mod tests {
     #[tokio::test]
     async fn test_monitor_multiple_agents() {
         let dir = tempfile::tempdir()
-            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+            .unwrap_or_else(|_| tempfile::tempdir().expect("test setup: tempdir creation failed"));
         let config = test_config(&dir);
         let queue = Arc::new(
             TaskQueue::from_tasks(config.clone(), vec![])
@@ -599,7 +599,7 @@ mod tests {
         // (Full backoff simulation would require a mock queue; this test
         //  verifies the monitor loop itself doesn't deadlock or panic.)
         let dir = tempfile::tempdir()
-            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+            .unwrap_or_else(|_| tempfile::tempdir().expect("test setup: tempdir creation failed"));
         let config = Arc::new(CoordinationConfig {
             health_interval_secs: 1,
             lock_dir: dir.path().join("locks"),

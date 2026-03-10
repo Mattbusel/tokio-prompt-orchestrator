@@ -214,7 +214,7 @@ impl ModelWorker for OpenAiWorker {
 
         if !response.status().is_success() {
             let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
+            let error_text = response.text().await.unwrap_or_else(|_| String::new());
             return Err(OrchestratorError::Inference(format!(
                 "OpenAI API error {}: {}",
                 status, error_text
@@ -232,7 +232,12 @@ impl ModelWorker for OpenAiWorker {
         }
 
         // Split response into tokens (simple whitespace split)
-        let tokens: Vec<String> = api_response.choices[0]
+        let tokens: Vec<String> = api_response
+            .choices
+            .first()
+            .ok_or_else(|| {
+                OrchestratorError::Inference("No choices in OpenAI response".to_string())
+            })?
             .text
             .split_whitespace()
             .map(|s| s.to_string())
@@ -371,7 +376,7 @@ impl ModelWorker for AnthropicWorker {
 
         if !response.status().is_success() {
             let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
+            let error_text = response.text().await.unwrap_or_else(|_| String::new());
             return Err(OrchestratorError::Inference(format!(
                 "Anthropic API error {}: {}",
                 status, error_text
@@ -510,7 +515,7 @@ impl ModelWorker for LlamaCppWorker {
 
         if !response.status().is_success() {
             let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
+            let error_text = response.text().await.unwrap_or_else(|_| String::new());
             return Err(OrchestratorError::Inference(format!(
                 "llama.cpp error {}: {}",
                 status, error_text
@@ -654,7 +659,7 @@ impl ModelWorker for VllmWorker {
 
         if !response.status().is_success() {
             let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
+            let error_text = response.text().await.unwrap_or_else(|_| String::new());
             return Err(OrchestratorError::Inference(format!(
                 "vLLM error {}: {}",
                 status, error_text
@@ -684,7 +689,7 @@ impl ModelWorker for VllmWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use parking_lot::Mutex;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -792,7 +797,7 @@ mod tests {
 
     #[test]
     fn test_openai_worker_new_missing_key_returns_config_error() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guard = ENV_MUTEX.lock();
         std::env::remove_var("OPENAI_API_KEY");
         let result = OpenAiWorker::new("gpt-4");
         assert!(
@@ -812,7 +817,7 @@ mod tests {
 
     #[test]
     fn test_openai_worker_new_with_key_succeeds() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guard = ENV_MUTEX.lock();
         std::env::set_var("OPENAI_API_KEY", "sk-test");
         let result = OpenAiWorker::new("gpt-4");
         std::env::remove_var("OPENAI_API_KEY");
@@ -831,7 +836,7 @@ mod tests {
             .await;
 
         let worker = {
-            let _g = ENV_MUTEX.lock().unwrap();
+            let _g = ENV_MUTEX.lock();
             make_openai_worker_for(&server.uri())
         };
         let tokens = worker.infer("test prompt").await.unwrap();
@@ -848,7 +853,7 @@ mod tests {
             .await;
 
         let worker = {
-            let _g = ENV_MUTEX.lock().unwrap();
+            let _g = ENV_MUTEX.lock();
             make_openai_worker_for(&server.uri())
         };
         let result = worker.infer("test").await;
@@ -876,7 +881,7 @@ mod tests {
             .await;
 
         let worker = {
-            let _g = ENV_MUTEX.lock().unwrap();
+            let _g = ENV_MUTEX.lock();
             make_openai_worker_for(&server.uri())
         };
         let result = worker.infer("test").await;
@@ -902,7 +907,7 @@ mod tests {
             .await;
 
         let worker = {
-            let _g = ENV_MUTEX.lock().unwrap();
+            let _g = ENV_MUTEX.lock();
             make_openai_worker_for(&server.uri())
         };
         assert!(worker.infer("test").await.is_err());
@@ -922,7 +927,7 @@ mod tests {
             .await;
 
         let worker = {
-            let _g = ENV_MUTEX.lock().unwrap();
+            let _g = ENV_MUTEX.lock();
             make_openai_worker_for(&server.uri())
         };
         let result = worker.infer("test").await;
@@ -942,7 +947,7 @@ mod tests {
             .await;
 
         let worker = {
-            let _g = ENV_MUTEX.lock().unwrap();
+            let _g = ENV_MUTEX.lock();
             make_openai_worker_for(&server.uri())
         };
         let _ = worker.infer("test").await;
@@ -963,7 +968,7 @@ mod tests {
             .await;
 
         let worker = {
-            let _g = ENV_MUTEX.lock().unwrap();
+            let _g = ENV_MUTEX.lock();
             std::env::set_var("OPENAI_API_KEY", "test-key-openai");
             let w = OpenAiWorker::new("gpt-4")
                 .unwrap()
@@ -989,7 +994,7 @@ mod tests {
             .await;
 
         let worker = {
-            let _g = ENV_MUTEX.lock().unwrap();
+            let _g = ENV_MUTEX.lock();
             std::env::set_var("OPENAI_API_KEY", "test-key-openai");
             let w = OpenAiWorker::new("gpt-4")
                 .unwrap()
@@ -1013,7 +1018,7 @@ mod tests {
 
     #[test]
     fn test_anthropic_worker_new_missing_key_returns_config_error() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guard = ENV_MUTEX.lock();
         std::env::remove_var("ANTHROPIC_API_KEY");
         let result = AnthropicWorker::new("claude-3-5-sonnet-20241022");
         assert!(
@@ -1033,7 +1038,7 @@ mod tests {
 
     #[test]
     fn test_anthropic_worker_new_with_key_succeeds() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guard = ENV_MUTEX.lock();
         std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test");
         let result = AnthropicWorker::new("claude-3-5-sonnet-20241022");
         std::env::remove_var("ANTHROPIC_API_KEY");
@@ -1052,7 +1057,7 @@ mod tests {
             .await;
 
         let worker = {
-            let _g = ENV_MUTEX.lock().unwrap();
+            let _g = ENV_MUTEX.lock();
             make_anthropic_worker_for(&server.uri())
         };
         let tokens = worker.infer("test prompt").await.unwrap();
@@ -1069,7 +1074,7 @@ mod tests {
             .await;
 
         let worker = {
-            let _g = ENV_MUTEX.lock().unwrap();
+            let _g = ENV_MUTEX.lock();
             make_anthropic_worker_for(&server.uri())
         };
         let result = worker.infer("test").await;
@@ -1092,7 +1097,7 @@ mod tests {
             .await;
 
         let worker = {
-            let _g = ENV_MUTEX.lock().unwrap();
+            let _g = ENV_MUTEX.lock();
             make_anthropic_worker_for(&server.uri())
         };
         assert!(worker.infer("test").await.is_err());
@@ -1109,7 +1114,7 @@ mod tests {
             .await;
 
         let worker = {
-            let _g = ENV_MUTEX.lock().unwrap();
+            let _g = ENV_MUTEX.lock();
             make_anthropic_worker_for(&server.uri())
         };
         let result = worker.infer("test").await;
@@ -1130,7 +1135,7 @@ mod tests {
             .await;
 
         let worker = {
-            let _g = ENV_MUTEX.lock().unwrap();
+            let _g = ENV_MUTEX.lock();
             make_anthropic_worker_for(&server.uri())
         };
         let result = worker.infer("test").await;
@@ -1150,7 +1155,7 @@ mod tests {
             .await;
 
         let worker = {
-            let _g = ENV_MUTEX.lock().unwrap();
+            let _g = ENV_MUTEX.lock();
             make_anthropic_worker_for(&server.uri())
         };
         let _ = worker.infer("test").await;
@@ -1171,7 +1176,7 @@ mod tests {
             .await;
 
         let worker = {
-            let _g = ENV_MUTEX.lock().unwrap();
+            let _g = ENV_MUTEX.lock();
             std::env::set_var("ANTHROPIC_API_KEY", "test-key-anthropic");
             let w = AnthropicWorker::new("claude-instant-1-2")
                 .unwrap()
@@ -1197,7 +1202,7 @@ mod tests {
             .await;
 
         let worker = {
-            let _g = ENV_MUTEX.lock().unwrap();
+            let _g = ENV_MUTEX.lock();
             make_anthropic_worker_for(&server.uri())
         };
         let _ = worker.infer("my question").await;

@@ -56,8 +56,9 @@ fn load_env_file() {
             let k = k.trim();
             let v = v.trim();
             if env::var(k).is_err() {
-                // Safety: single-threaded at this point
-                unsafe { env::set_var(k, v) };
+                // Safety: caller must ensure no other threads are running
+                // (called before the Tokio runtime starts)
+                env::set_var(k, v);
             }
         }
     }
@@ -260,7 +261,8 @@ fn run_wizard(args: CliArgs) -> ResolvedConfig {
             "API_KEY",
         ] {
             delete_env_value(key);
-            unsafe { env::remove_var(key) };
+            // Safety: called before the Tokio runtime starts (single-threaded)
+            env::remove_var(key);
         }
         println!("  Done. Please enter your new settings below.\n");
     }
@@ -330,7 +332,8 @@ fn run_wizard(args: CliArgs) -> ResolvedConfig {
                     "API_KEY",
                 ] {
                     delete_env_value(key);
-                    unsafe { env::remove_var(key) };
+                    // Safety: called before the Tokio runtime starts (single-threaded)
+                    env::remove_var(key);
                 }
                 println!();
             }
@@ -409,7 +412,8 @@ fn run_wizard(args: CliArgs) -> ResolvedConfig {
                 println!();
                 let key = prompt_line("  Paste your key here (sk-ant-…): ");
                 if !key.is_empty() {
-                    unsafe { env::set_var("ANTHROPIC_API_KEY", &key) };
+                    // Safety: called before the Tokio runtime starts (single-threaded)
+                    env::set_var("ANTHROPIC_API_KEY", &key);
                     save_env_value("ANTHROPIC_API_KEY", &key);
                     println!("  ✓ Key saved.");
                 }
@@ -429,7 +433,8 @@ fn run_wizard(args: CliArgs) -> ResolvedConfig {
                 println!();
                 let key = prompt_line("  Paste your key here (sk-…): ");
                 if !key.is_empty() {
-                    unsafe { env::set_var("OPENAI_API_KEY", &key) };
+                    // Safety: called before the Tokio runtime starts (single-threaded)
+                    env::set_var("OPENAI_API_KEY", &key);
                     save_env_value("OPENAI_API_KEY", &key);
                     println!("  ✓ Key saved.");
                 }
@@ -443,7 +448,8 @@ fn run_wizard(args: CliArgs) -> ResolvedConfig {
             if is_interactive {
                 println!();
                 let url = prompt_with_default("  llama.cpp server URL", &default_url);
-                unsafe { env::set_var("LLAMA_CPP_URL", &url) };
+                // Safety: called before the Tokio runtime starts (single-threaded)
+                env::set_var("LLAMA_CPP_URL", &url);
                 save_env_value("LLAMA_CPP_URL", &url);
             }
         }
@@ -725,8 +731,9 @@ fn init_tracing(level: &str) {
 // Entry point
 // ---------------------------------------------------------------------------
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // All env mutation happens here, before the Tokio runtime starts,
+    // so plain (non-unsafe) env::set_var / env::remove_var are sound.
     load_env_file();
 
     let args = match parse_args() {
@@ -752,8 +759,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Warning: metrics init failed: {e}");
     }
 
+    // run_wizard may call env::set_var / env::remove_var — still safe here
+    // because the Tokio runtime has not been started yet.
     let cfg = run_wizard(args);
 
+    // Build the runtime *after* all env mutation is complete.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async_main(cfg))
+}
+
+async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error>> {
     print_banner(&cfg);
 
     let worker = match build_worker(&cfg) {

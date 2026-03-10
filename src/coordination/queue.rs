@@ -618,7 +618,7 @@ mod tests {
     #[tokio::test]
     async fn test_queue_claim_next_returns_highest_priority() {
         let dir = tempfile::tempdir()
-            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+            .unwrap_or_else(|_| tempfile::tempdir().expect("test setup: tempdir creation failed"));
         let config = test_config(&dir);
         let tasks = vec![
             Task::new("low", "low priority", 10),
@@ -627,10 +627,10 @@ mod tests {
         ];
         let queue = TaskQueue::from_tasks(config, tasks).await;
         assert!(queue.is_ok());
-        let queue = queue.ok().unwrap();
+        let queue = queue.expect("test setup: queue creation failed");
         let claimed = queue.claim_next("agent-1").await;
         assert!(claimed.is_ok());
-        let task = claimed.ok().unwrap();
+        let task = claimed.expect("test setup: claim_next failed");
         assert!(task.is_some());
         assert_eq!(task.as_ref().map(|t| t.id.as_str()), Some("high"));
     }
@@ -638,49 +638,49 @@ mod tests {
     #[tokio::test]
     async fn test_queue_claim_next_returns_none_when_all_claimed() {
         let dir = tempfile::tempdir()
-            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+            .unwrap_or_else(|_| tempfile::tempdir().expect("test setup: tempdir creation failed"));
         let config = test_config(&dir);
         let tasks = vec![Task::new("only-task", "the only task", 1)];
         let queue = TaskQueue::from_tasks(config, tasks).await;
         assert!(queue.is_ok());
-        let queue = queue.ok().unwrap();
+        let queue = queue.expect("test setup: queue creation failed");
 
         // Claim the only task
         let first = queue.claim_next("agent-1").await;
         assert!(first.is_ok());
-        assert!(first.ok().unwrap().is_some());
+        assert!(first.expect("test: claim_next failed").is_some());
 
         // Second claim should return None
         let second = queue.claim_next("agent-2").await;
         assert!(second.is_ok());
-        assert!(second.ok().unwrap().is_none());
+        assert!(second.expect("test: claim_next failed").is_none());
     }
 
     #[tokio::test]
     async fn test_queue_claim_next_empty_queue_returns_none() {
         let dir = tempfile::tempdir()
-            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+            .unwrap_or_else(|_| tempfile::tempdir().expect("test setup: tempdir creation failed"));
         let config = test_config(&dir);
         let queue = TaskQueue::from_tasks(config, vec![]).await;
         assert!(queue.is_ok());
-        let queue = queue.ok().unwrap();
+        let queue = queue.expect("test setup: queue creation failed");
         let claimed = queue.claim_next("agent-1").await;
         assert!(claimed.is_ok());
-        assert!(claimed.ok().unwrap().is_none());
+        assert!(claimed.expect("test: claim_next failed").is_none());
     }
 
     #[tokio::test]
     async fn test_queue_complete_updates_status() {
         let dir = tempfile::tempdir()
-            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+            .unwrap_or_else(|_| tempfile::tempdir().expect("test setup: tempdir creation failed"));
         let config = test_config(&dir);
         let queue = TaskQueue::from_tasks(config, test_tasks()).await;
         assert!(queue.is_ok());
-        let queue = queue.ok().unwrap();
+        let queue = queue.expect("test setup: queue creation failed");
 
         let claimed = queue.claim_next("agent-1").await;
         assert!(claimed.is_ok());
-        let task = claimed.ok().unwrap();
+        let task = claimed.expect("test setup: claim_next failed");
         assert!(task.is_some());
         let task = task.as_ref().unwrap();
 
@@ -699,15 +699,15 @@ mod tests {
     #[tokio::test]
     async fn test_queue_fail_updates_status_and_reason() {
         let dir = tempfile::tempdir()
-            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+            .unwrap_or_else(|_| tempfile::tempdir().expect("test setup: tempdir creation failed"));
         let config = test_config(&dir);
         let queue = TaskQueue::from_tasks(config, test_tasks()).await;
         assert!(queue.is_ok());
-        let queue = queue.ok().unwrap();
+        let queue = queue.expect("test setup: queue creation failed");
 
         let claimed = queue.claim_next("agent-1").await;
         assert!(claimed.is_ok());
-        let task = claimed.ok().unwrap();
+        let task = claimed.expect("test setup: claim_next failed");
         assert!(task.is_some());
         let task = task.as_ref().unwrap();
 
@@ -723,11 +723,11 @@ mod tests {
     #[tokio::test]
     async fn test_queue_complete_nonexistent_task_returns_error() {
         let dir = tempfile::tempdir()
-            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+            .unwrap_or_else(|_| tempfile::tempdir().expect("test setup: tempdir creation failed"));
         let config = test_config(&dir);
         let queue = TaskQueue::from_tasks(config, test_tasks()).await;
         assert!(queue.is_ok());
-        let queue = queue.ok().unwrap();
+        let queue = queue.expect("test setup: queue creation failed");
 
         let result = queue.complete("nonexistent", "agent-1").await;
         assert!(result.is_err());
@@ -736,11 +736,11 @@ mod tests {
     #[tokio::test]
     async fn test_queue_fail_nonexistent_task_returns_error() {
         let dir = tempfile::tempdir()
-            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+            .unwrap_or_else(|_| tempfile::tempdir().expect("test setup: tempdir creation failed"));
         let config = test_config(&dir);
         let queue = TaskQueue::from_tasks(config, test_tasks()).await;
         assert!(queue.is_ok());
-        let queue = queue.ok().unwrap();
+        let queue = queue.expect("test setup: queue creation failed");
 
         let result = queue.fail("nonexistent", "agent-1", "reason").await;
         assert!(result.is_err());
@@ -749,17 +749,17 @@ mod tests {
     #[tokio::test]
     async fn test_queue_release_makes_task_claimable_again() {
         let dir = tempfile::tempdir()
-            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+            .unwrap_or_else(|_| tempfile::tempdir().expect("test setup: tempdir creation failed"));
         let config = test_config(&dir);
         let tasks = vec![Task::new("releasable", "release me", 1)];
         let queue = TaskQueue::from_tasks(config, tasks).await;
         assert!(queue.is_ok());
-        let queue = queue.ok().unwrap();
+        let queue = queue.expect("test setup: queue creation failed");
 
         // Claim
         let claimed = queue.claim_next("agent-1").await;
         assert!(claimed.is_ok());
-        assert!(claimed.ok().unwrap().is_some());
+        assert!(claimed.expect("test: claim_next failed").is_some());
 
         // Release
         let release_result = queue.release("releasable").await;
@@ -779,11 +779,11 @@ mod tests {
     #[tokio::test]
     async fn test_queue_release_nonexistent_task_returns_error() {
         let dir = tempfile::tempdir()
-            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+            .unwrap_or_else(|_| tempfile::tempdir().expect("test setup: tempdir creation failed"));
         let config = test_config(&dir);
         let queue = TaskQueue::from_tasks(config, vec![]).await;
         assert!(queue.is_ok());
-        let queue = queue.ok().unwrap();
+        let queue = queue.expect("test setup: queue creation failed");
 
         let result = queue.release("nonexistent").await;
         assert!(result.is_err());
@@ -792,11 +792,11 @@ mod tests {
     #[tokio::test]
     async fn test_queue_summary_counts_correctly() {
         let dir = tempfile::tempdir()
-            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+            .unwrap_or_else(|_| tempfile::tempdir().expect("test setup: tempdir creation failed"));
         let config = test_config(&dir);
         let queue = TaskQueue::from_tasks(config, test_tasks()).await;
         assert!(queue.is_ok());
-        let queue = queue.ok().unwrap();
+        let queue = queue.expect("test setup: queue creation failed");
 
         let (pending, claimed, completed, failed) = queue.summary().await;
         assert_eq!(pending, 3);
@@ -816,11 +816,11 @@ mod tests {
     #[tokio::test]
     async fn test_queue_all_done_initially_false() {
         let dir = tempfile::tempdir()
-            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+            .unwrap_or_else(|_| tempfile::tempdir().expect("test setup: tempdir creation failed"));
         let config = test_config(&dir);
         let queue = TaskQueue::from_tasks(config, test_tasks()).await;
         assert!(queue.is_ok());
-        let queue = queue.ok().unwrap();
+        let queue = queue.expect("test setup: queue creation failed");
 
         assert!(!queue.all_done().await);
     }
@@ -828,11 +828,11 @@ mod tests {
     #[tokio::test]
     async fn test_queue_all_done_empty_queue_returns_true() {
         let dir = tempfile::tempdir()
-            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+            .unwrap_or_else(|_| tempfile::tempdir().expect("test setup: tempdir creation failed"));
         let config = test_config(&dir);
         let queue = TaskQueue::from_tasks(config, vec![]).await;
         assert!(queue.is_ok());
-        let queue = queue.ok().unwrap();
+        let queue = queue.expect("test setup: queue creation failed");
 
         assert!(queue.all_done().await);
     }
@@ -840,12 +840,12 @@ mod tests {
     #[tokio::test]
     async fn test_queue_all_done_after_completion() {
         let dir = tempfile::tempdir()
-            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+            .unwrap_or_else(|_| tempfile::tempdir().expect("test setup: tempdir creation failed"));
         let config = test_config(&dir);
         let tasks = vec![Task::new("single", "one task", 1)];
         let queue = TaskQueue::from_tasks(config, tasks).await;
         assert!(queue.is_ok());
-        let queue = queue.ok().unwrap();
+        let queue = queue.expect("test setup: queue creation failed");
 
         let _ = queue.claim_next("agent-1").await;
         let _ = queue.complete("single", "agent-1").await;
@@ -855,7 +855,7 @@ mod tests {
     #[tokio::test]
     async fn test_queue_from_toml_file() {
         let dir = tempfile::tempdir()
-            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+            .unwrap_or_else(|_| tempfile::tempdir().expect("test setup: tempdir creation failed"));
         let toml_content = r#"
 [[tasks]]
 id = "task-from-file"
@@ -873,7 +873,7 @@ priority = 1
 
         let queue = TaskQueue::new(config).await;
         assert!(queue.is_ok());
-        let queue = queue.ok().unwrap();
+        let queue = queue.expect("test setup: queue creation failed");
         let tasks = queue.status().await;
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].id, "task-from-file");
@@ -882,7 +882,7 @@ priority = 1
     #[tokio::test]
     async fn test_queue_new_missing_file_returns_error() {
         let dir = tempfile::tempdir()
-            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+            .unwrap_or_else(|_| tempfile::tempdir().expect("test setup: tempdir creation failed"));
         let config = Arc::new(CoordinationConfig {
             task_file: dir.path().join("nonexistent.toml"),
             lock_dir: dir.path().join("locks"),
@@ -895,7 +895,7 @@ priority = 1
     #[tokio::test]
     async fn test_queue_multiple_agents_no_double_claim() {
         let dir = tempfile::tempdir()
-            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+            .unwrap_or_else(|_| tempfile::tempdir().expect("test setup: tempdir creation failed"));
         let config = test_config(&dir);
         let tasks = vec![Task::new("t1", "task 1", 1), Task::new("t2", "task 2", 2)];
         let queue = Arc::new(TaskQueue::from_tasks(config, tasks).await.ok().unwrap());
@@ -919,7 +919,7 @@ priority = 1
     #[tokio::test]
     async fn test_queue_priority_ordering_across_claims() {
         let dir = tempfile::tempdir()
-            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+            .unwrap_or_else(|_| tempfile::tempdir().expect("test setup: tempdir creation failed"));
         let config = test_config(&dir);
         let tasks = vec![
             Task::new("p3", "priority 3", 3),
@@ -941,7 +941,7 @@ priority = 1
     #[tokio::test]
     async fn test_queue_claimed_lock_file_exists_on_disk() {
         let dir = tempfile::tempdir()
-            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+            .unwrap_or_else(|_| tempfile::tempdir().expect("test setup: tempdir creation failed"));
         let config = test_config(&dir);
         let lock_dir = config.lock_dir.clone();
         let tasks = vec![Task::new("disk-check", "check disk", 1)];
@@ -955,7 +955,7 @@ priority = 1
     #[tokio::test]
     async fn test_queue_completed_marker_exists_on_disk() {
         let dir = tempfile::tempdir()
-            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+            .unwrap_or_else(|_| tempfile::tempdir().expect("test setup: tempdir creation failed"));
         let config = test_config(&dir);
         let lock_dir = config.lock_dir.clone();
         let tasks = vec![Task::new("complete-check", "check complete", 1)];
@@ -970,7 +970,7 @@ priority = 1
     #[tokio::test]
     async fn test_queue_failed_marker_exists_on_disk() {
         let dir = tempfile::tempdir()
-            .unwrap_or_else(|_| tempfile::tempdir().map_err(|e| e).ok().unwrap());
+            .unwrap_or_else(|_| tempfile::tempdir().expect("test setup: tempdir creation failed"));
         let config = test_config(&dir);
         let lock_dir = config.lock_dir.clone();
         let tasks = vec![Task::new("fail-check", "check fail", 1)];
