@@ -58,7 +58,7 @@ fn print_help() {
         r#"tokio-prompt-orchestrator {}
 
 USAGE:
-    orchestrator-demo [OPTIONS]
+    orchestrator [OPTIONS]
 
 OPTIONS:
     --provider <openai|anthropic|llama|echo>   LLM backend  (default: echo)
@@ -97,7 +97,7 @@ fn parse_args() -> Result<CliArgs, String> {
                 std::process::exit(0);
             }
             "--version" | "-V" => {
-                println!("orchestrator-demo {}", env!("CARGO_PKG_VERSION"));
+                println!("orchestrator {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
             "--no-web" => {

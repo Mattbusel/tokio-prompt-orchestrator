@@ -105,7 +105,7 @@ name = "web_api_demo"
 required-features = ["web-api"]
 
 [[bin]]
-name = "orchestrator-demo"
+name = "orchestrator"
 path = "src/main.rs"
 
 [[bin]]
