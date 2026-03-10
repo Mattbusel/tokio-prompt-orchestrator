@@ -283,12 +283,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Spawn the 5-stage pipeline
     let handles = spawn_pipeline(worker);
-    let pipeline_tx = handles.input_tx.clone();
 
     tracing::info!("Pipeline stages spawned");
 
     // Graceful shutdown channel
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
     // Ctrl-C handler
     tokio::spawn(async move {
@@ -307,6 +306,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Web API mode
         #[cfg(feature = "web-api")]
         {
+            let pipeline_tx = handles.input_tx.clone();
             let config = ServerConfig {
                 host: args.host.clone(),
                 port: args.port,
@@ -322,7 +322,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         std::process::exit(1);
                     }
                 }
-                _ = &mut shutdown_rx => {
+                _ = shutdown_rx => {
                     tracing::info!("Shutdown signal received — stopping web API");
                 }
             }
