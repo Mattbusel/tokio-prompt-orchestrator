@@ -445,6 +445,7 @@ fn print_banner(cfg: &ResolvedConfig) {
     );
     println!("║  Web API  : {:<38}║", web_status);
     println!("║  Auth     : {:<38}║", auth_status);
+    println!("║  Log level: {:<38}║", cfg.log_level);
 
     if !cfg.no_web {
         let base = format!("http://{}:{}", cfg.host, cfg.port);
