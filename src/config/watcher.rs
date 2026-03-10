@@ -114,7 +114,7 @@ impl ConfigWatcher {
         // Spawn background task to process file events
         let config_path = watch_path.clone();
         tokio::spawn(async move {
-            let debounce = Duration::from_millis(500);
+            let debounce = Duration::from_millis(200);
             let mut last_reload = std::time::Instant::now()
                 .checked_sub(debounce)
                 .unwrap_or_else(std::time::Instant::now);
@@ -266,7 +266,8 @@ log_format = "pretty"
         // Drain events until we see the updated config or time out.
         // macOS FSEvents can coalesce or deliver a stale read on the first
         // event, so we retry rather than asserting on the first notification.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        // Use a 15s deadline — macOS CI FSEvents latency can be high.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             assert!(
@@ -274,7 +275,7 @@ log_format = "pretty"
                 "timed out waiting for updated config"
             );
             let result = tokio::time::timeout(remaining, rx.recv()).await;
-            assert!(result.is_ok(), "should receive config update within 5s");
+            assert!(result.is_ok(), "should receive config update within 15s");
             let config = result.expect("test: timeout").expect("test: recv");
             if config.pipeline.name == "updated-name" {
                 break;
@@ -291,10 +292,15 @@ log_format = "pretty"
 
         let (_watcher, mut rx) = ConfigWatcher::new(path.clone()).expect("test: create watcher");
 
-        // Wait for watcher
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Drain any delayed events from the initial file write (macOS FSEvents
+        // can deliver the first event well after the watcher is created).
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        while tokio::time::timeout(Duration::from_millis(200), rx.recv())
+            .await
+            .is_ok()
+        {}
 
-        // Write invalid TOML
+        // Write invalid TOML — the watcher should reject it and not broadcast.
         std::fs::write(&path, "invalid [[[").expect("test: write invalid");
 
         // Should NOT receive a config update (invalid was rejected)
