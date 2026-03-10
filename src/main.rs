@@ -24,12 +24,11 @@
 use std::env;
 use std::sync::Arc;
 use tokio_prompt_orchestrator::{
-    metrics, spawn_pipeline, AnthropicWorker, EchoWorker, LlamaCppWorker, ModelWorker,
-    OpenAiWorker,
+    metrics, spawn_pipeline, AnthropicWorker, EchoWorker, LlamaCppWorker, ModelWorker, OpenAiWorker,
 };
 
 #[cfg(feature = "web-api")]
-use tokio_prompt_orchestrator::web_api::{ServerConfig, start_server};
+use tokio_prompt_orchestrator::web_api::{start_server, ServerConfig};
 
 // ---------------------------------------------------------------------------
 // CLI parsing — zero extra dependencies, pure std
@@ -163,9 +162,15 @@ fn print_banner(args: &CliArgs) {
 
     println!();
     println!("╔══════════════════════════════════════════════════╗");
-    println!("║      tokio-prompt-orchestrator v{:<16} ║", env!("CARGO_PKG_VERSION"));
+    println!(
+        "║      tokio-prompt-orchestrator v{:<16} ║",
+        env!("CARGO_PKG_VERSION")
+    );
     println!("╠══════════════════════════════════════════════════╣");
-    println!("║  Provider : {:<38}║", format!("{} ({})", args.provider, args.model));
+    println!(
+        "║  Provider : {:<38}║",
+        format!("{} ({})", args.provider, args.model)
+    );
     println!("║  Web API  : {:<38}║", web_status);
     println!("║  Auth     : {:<38}║", auth_status);
     println!("║  Log level: {:<38}║", args.log_level);
@@ -199,12 +204,10 @@ fn build_worker(args: &CliArgs) -> Result<Arc<dyn ModelWorker>, String> {
         }
         "anthropic" => {
             match env::var("ANTHROPIC_API_KEY") {
-                Err(_) => {
-                    return Err(
-                        "ANTHROPIC_API_KEY environment variable is required for --provider anthropic"
-                            .to_string(),
-                    )
-                }
+                Err(_) => return Err(
+                    "ANTHROPIC_API_KEY environment variable is required for --provider anthropic"
+                        .to_string(),
+                ),
                 Ok(ref k) if k.is_empty() => {
                     return Err("ANTHROPIC_API_KEY is set but empty".to_string())
                 }
@@ -411,7 +414,10 @@ mod tests {
     #[test]
     fn test_build_worker_openai_fails_without_key() {
         // If the key IS set in the environment, skip — we cannot unset env vars portably.
-        if env::var("OPENAI_API_KEY").map(|v| !v.is_empty()).unwrap_or(false) {
+        if env::var("OPENAI_API_KEY")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+        {
             return;
         }
         let args = CliArgs {
@@ -425,7 +431,10 @@ mod tests {
         let result = build_worker(&args);
         assert!(result.is_err(), "openai requires OPENAI_API_KEY");
         let msg = result.err().unwrap();
-        assert!(msg.contains("OPENAI_API_KEY"), "error must name the missing key");
+        assert!(
+            msg.contains("OPENAI_API_KEY"),
+            "error must name the missing key"
+        );
     }
 
     #[test]
