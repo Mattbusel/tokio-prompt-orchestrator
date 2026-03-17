@@ -65,7 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("   Sending same request 5 times...");
 
     let prompt = "What is the capital of France?";
-    let key = dedup::dedup_key(prompt, &HashMap::new());
+    let key = dedup::dedup_key(prompt, &HashMap::new(), None);
 
     for i in 1..=5 {
         match dedup.check_and_register(&key).await {
@@ -260,7 +260,7 @@ async fn process_with_all_features(
     circuit_breaker: &CircuitBreaker,
     retry_policy: &RetryPolicy,
 ) -> CombinedStats {
-    let key = dedup::dedup_key(prompt, &HashMap::new());
+    let key = dedup::dedup_key(prompt, &HashMap::new(), None);
     let mut was_deduplicated = false;
     let mut retry_attempts = 0;
 

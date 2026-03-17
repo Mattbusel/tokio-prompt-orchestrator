@@ -277,15 +277,51 @@ pub struct DeduplicationStats {
     pub cached: usize,
 }
 
-/// Generate deduplication key from prompt and metadata
-pub fn dedup_key(prompt: &str, metadata: &std::collections::HashMap<String, String>) -> String {
+/// Generate a deduplication key scoped to a session.
+///
+/// Including `session_id` in the key prevents two different sessions from
+/// colliding on the same cached result even when their prompts are identical.
+/// Use `None` only for anonymous/global dedup where cross-session sharing is
+/// intentional (e.g. read-only reference data queries).
+///
+/// # Example
+///
+/// ```
+/// use std::collections::HashMap;
+/// use tokio_prompt_orchestrator::enhanced::dedup_key;
+///
+/// let meta = HashMap::new();
+/// // Same prompt, different sessions → different keys.
+/// let k1 = dedup_key("hello", &meta, Some("session-alice"));
+/// let k2 = dedup_key("hello", &meta, Some("session-bob"));
+/// assert_ne!(k1, k2);
+///
+/// // Same prompt, same session → same key (deterministic).
+/// let k3 = dedup_key("hello", &meta, Some("session-alice"));
+/// assert_eq!(k1, k3);
+///
+/// // No session → global key (backward-compatible).
+/// let k4 = dedup_key("hello", &meta, None);
+/// assert_ne!(k1, k4);
+/// ```
+pub fn dedup_key(
+    prompt: &str,
+    metadata: &std::collections::HashMap<String, String>,
+    session_id: Option<&str>,
+) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
     let mut hasher = DefaultHasher::new();
+
+    // Scope by session first so collisions across sessions are impossible.
+    if let Some(sid) = session_id {
+        sid.hash(&mut hasher);
+    }
+
     prompt.hash(&mut hasher);
 
-    // Include relevant metadata in key
+    // Include relevant metadata in key (sorted for determinism).
     let mut meta_keys: Vec<_> = metadata.keys().collect();
     meta_keys.sort();
     for key in meta_keys {
@@ -295,7 +331,10 @@ pub fn dedup_key(prompt: &str, metadata: &std::collections::HashMap<String, Stri
         }
     }
 
-    format!("dedup:{:x}", hasher.finish())
+    match session_id {
+        Some(_) => format!("dedup:s:{:x}", hasher.finish()),
+        None => format!("dedup:g:{:x}", hasher.finish()),
+    }
 }
 
 #[cfg(test)]
@@ -368,18 +407,60 @@ mod tests {
 
     #[test]
     fn test_dedup_key_generation() {
-        let key1 = dedup_key("hello", &HashMap::new());
-        let key2 = dedup_key("hello", &HashMap::new());
-        let key3 = dedup_key("world", &HashMap::new());
+        let empty = HashMap::new();
 
+        // Deterministic: same inputs → same key.
+        let key1 = dedup_key("hello", &empty, None);
+        let key2 = dedup_key("hello", &empty, None);
         assert_eq!(key1, key2);
+
+        // Different prompt → different key.
+        let key3 = dedup_key("world", &empty, None);
         assert_ne!(key1, key3);
 
-        // With metadata
+        // With metadata → different from without.
         let mut meta = HashMap::new();
         meta.insert("user".to_string(), "alice".to_string());
-        let key4 = dedup_key("hello", &meta);
+        let key4 = dedup_key("hello", &meta, None);
+        assert_ne!(key1, key4);
 
-        assert_ne!(key1, key4); // Different due to metadata
+        // Global keys carry the "g:" prefix.
+        assert!(key1.starts_with("dedup:g:"), "key={key1}");
+    }
+
+    #[test]
+    fn test_dedup_key_session_isolation() {
+        let empty = HashMap::new();
+
+        // Same prompt, different sessions → different keys.
+        let k_alice = dedup_key("hello", &empty, Some("session-alice"));
+        let k_bob = dedup_key("hello", &empty, Some("session-bob"));
+        assert_ne!(k_alice, k_bob, "different sessions must not share a dedup key");
+
+        // Same prompt, same session → same key (deterministic).
+        let k_alice2 = dedup_key("hello", &empty, Some("session-alice"));
+        assert_eq!(k_alice, k_alice2);
+
+        // Session key != global key for the same prompt.
+        let k_global = dedup_key("hello", &empty, None);
+        assert_ne!(k_alice, k_global);
+
+        // Session keys carry the "s:" prefix.
+        assert!(k_alice.starts_with("dedup:s:"), "key={k_alice}");
+        assert!(k_global.starts_with("dedup:g:"), "key={k_global}");
+    }
+
+    #[test]
+    fn test_dedup_key_session_with_metadata() {
+        let mut meta = HashMap::new();
+        meta.insert("model".to_string(), "gpt-4".to_string());
+
+        // Session + metadata combination is unique.
+        let k1 = dedup_key("prompt", &meta, Some("sess-1"));
+        let k2 = dedup_key("prompt", &meta, Some("sess-2"));
+        let k3 = dedup_key("prompt", &meta, None);
+        assert_ne!(k1, k2);
+        assert_ne!(k1, k3);
+        assert_ne!(k2, k3);
     }
 }
