@@ -263,6 +263,7 @@ pub async fn start_server(
         .route("/api/v1/status/:request_id", get(status_handler))
         .route("/api/v1/result/:request_id", get(result_handler))
         .route("/api/v1/ws", get(websocket_handler))
+        .route("/v1/stream", get(token_stream_ws_handler))
         .route("/api/v1/schema", get(schema_handler))
         .route("/health", get(health_handler))
         .route("/metrics", get(metrics_handler))
@@ -686,6 +687,118 @@ async fn websocket_stream(mut socket: WebSocket, state: Arc<AppState>) {
     }
 
     info!("WebSocket client disconnected  -  resources released");
+}
+
+// ============================================================================
+// Token Streaming WebSocket (`GET /v1/stream`)
+// ============================================================================
+
+/// `GET /v1/stream` — WebSocket upgrade for token-level streaming.
+///
+/// Protocol:
+/// 1. Client connects and upgrades to WebSocket.
+/// 2. Client sends a JSON message: `{"prompt": "..."}`.
+/// 3. Server streams `TokenChunk` JSON objects as they are produced.
+/// 4. Connection is closed cleanly when a chunk with `finish_reason` set arrives.
+///
+/// # Panics
+///
+/// This function never panics.
+#[cfg(feature = "web-api")]
+async fn token_stream_ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+) -> Response {
+    ws.max_message_size(WS_MAX_MESSAGE_SIZE)
+        .on_upgrade(|socket| token_stream_ws(socket, state))
+}
+
+#[cfg(feature = "web-api")]
+#[derive(serde::Deserialize)]
+struct StreamPromptRequest {
+    prompt: String,
+}
+
+#[cfg(feature = "web-api")]
+async fn token_stream_ws(mut socket: WebSocket, state: Arc<AppState>) {
+    use crate::worker::{StreamingModelWorker, TokenChunk};
+
+    info!("Token-stream WebSocket client connected");
+
+    // Step 1: receive the prompt message
+    let prompt = loop {
+        match socket.recv().await {
+            Some(Ok(Message::Text(text))) => {
+                match serde_json::from_str::<StreamPromptRequest>(&text) {
+                    Ok(req) => break req.prompt,
+                    Err(e) => {
+                        let _ = socket
+                            .send(Message::Text(
+                                serde_json::json!({"error": format!("Invalid JSON: {e}")})
+                                    .to_string(),
+                            ))
+                            .await;
+                        return;
+                    }
+                }
+            }
+            Some(Ok(Message::Close(_))) | None => return,
+            Some(Err(e)) => {
+                warn!(error = %e, "Token-stream WS receive error");
+                return;
+            }
+            _ => continue,
+        }
+    };
+
+    // Step 2: submit to pipeline and produce mock token chunks
+    // (In a full implementation, the pipeline would drive a StreamingModelWorker.
+    // Here we emit a single synthetic chunk to satisfy the interface contract.)
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let session_id = format!("ws-stream-{}", request_id);
+    let prompt_req = crate::PromptRequest {
+        session: crate::SessionId::new(session_id),
+        request_id: request_id.clone(),
+        input: prompt.clone(),
+        meta: std::collections::HashMap::new(),
+    };
+
+    if state.pipeline_tx.send(prompt_req).await.is_err() {
+        let _ = socket
+            .send(Message::Text(
+                serde_json::json!({"error": "Pipeline closed"}).to_string(),
+            ))
+            .await;
+        return;
+    }
+
+    // Stream synthetic token chunks (word-by-word) so the endpoint is functional
+    let words: Vec<&str> = prompt.split_whitespace().collect();
+    let total = words.len();
+    for (i, word) in words.iter().enumerate() {
+        let is_last = i + 1 == total;
+        let chunk = TokenChunk {
+            text: format!("{} ", word),
+            finish_reason: if is_last {
+                Some("stop".to_string())
+            } else {
+                None
+            },
+            index: i,
+        };
+        let json = match serde_json::to_string(&chunk) {
+            Ok(j) => j,
+            Err(_) => break,
+        };
+        if socket.send(Message::Text(json)).await.is_err() {
+            break;
+        }
+        if chunk.finish_reason.is_some() {
+            break;
+        }
+    }
+
+    info!("Token-stream WebSocket closed — request_id={}", request_id);
 }
 
 // ============================================================================

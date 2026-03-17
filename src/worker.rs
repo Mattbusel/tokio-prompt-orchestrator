@@ -16,6 +16,7 @@
 
 use crate::OrchestratorError;
 use async_trait::async_trait;
+use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -28,14 +29,39 @@ pub trait ModelWorker: Send + Sync {
     /// Perform inference on the given prompt
     ///
     /// Returns tokens as a vector of strings.
-    /// For streaming implementations, this should be the final token set.
-    ///
-    /// TODO: Add streaming variant:
-    /// ```ignore
-    /// async fn infer_stream(&self, prompt: &str)
-    ///     -> Result<impl Stream<Item = String>, OrchestratorError>;
-    /// ```
     async fn infer(&self, prompt: &str) -> Result<Vec<String>, OrchestratorError>;
+}
+
+// ============================================================================
+// Streaming Worker Trait
+// ============================================================================
+
+/// A single token chunk from a streaming inference response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenChunk {
+    /// The text content of this chunk.
+    pub text: String,
+    /// Reason the stream finished, if applicable (e.g. `"stop"`, `"length"`).
+    pub finish_reason: Option<String>,
+    /// Zero-based index of the choice/stream this chunk belongs to.
+    pub index: usize,
+}
+
+/// Trait for model workers that support token-level streaming.
+///
+/// Implementations stream `TokenChunk` values via an SSE or chunked-transfer
+/// HTTP response from the provider.
+pub trait StreamingModelWorker: Send + Sync {
+    /// Start a streaming inference request and return a live token stream.
+    fn infer_stream(
+        &self,
+        prompt: String,
+    ) -> BoxStream<'static, Result<TokenChunk, OrchestratorError>>;
+
+    /// Returns `true` if this worker supports streaming (default: `true`).
+    fn supports_streaming(&self) -> bool {
+        true
+    }
 }
 
 // ============================================================================
@@ -695,6 +721,277 @@ impl ModelWorker for VllmWorker {
             .collect();
 
         Ok(tokens)
+    }
+}
+
+// ============================================================================
+// StreamingModelWorker implementations
+// ============================================================================
+
+/// SSE delta event from the Anthropic streaming API.
+#[derive(Debug, Deserialize)]
+struct AnthropicSseDelta {
+    #[serde(rename = "type")]
+    delta_type: String,
+    text: Option<String>,
+}
+
+/// SSE event from the Anthropic streaming API.
+#[derive(Debug, Deserialize)]
+struct AnthropicSseEvent {
+    #[serde(rename = "type")]
+    event_type: String,
+    delta: Option<AnthropicSseDelta>,
+    #[serde(default)]
+    index: usize,
+}
+
+/// Anthropic Messages API request (streaming variant).
+#[derive(Debug, Serialize)]
+struct AnthropicStreamRequest {
+    model: String,
+    messages: Vec<AnthropicMessage>,
+    max_tokens: u32,
+    temperature: f32,
+    stream: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct AnthropicMessage {
+    role: String,
+    content: String,
+}
+
+impl StreamingModelWorker for AnthropicWorker {
+    fn infer_stream(
+        &self,
+        prompt: String,
+    ) -> BoxStream<'static, Result<TokenChunk, OrchestratorError>> {
+        Box::pin(anthropic_stream_impl(
+            self.client.clone(),
+            self.api_key.clone(),
+            self.base_url.clone(),
+            self.model.clone(),
+            self.max_tokens,
+            self.temperature,
+            self.timeout,
+            prompt,
+        ))
+    }
+}
+
+/// Build an Anthropic SSE token stream.
+#[allow(clippy::too_many_arguments)]
+fn anthropic_stream_impl(
+    client: reqwest::Client,
+    api_key: String,
+    base_url: String,
+    model: String,
+    max_tokens: u32,
+    temperature: f32,
+    timeout: std::time::Duration,
+    prompt: String,
+) -> impl futures::Stream<Item = Result<TokenChunk, OrchestratorError>> + Send + 'static {
+    async_stream::try_stream! {
+        let request_body = AnthropicStreamRequest {
+            model,
+            messages: vec![AnthropicMessage { role: "user".to_string(), content: prompt }],
+            max_tokens,
+            temperature,
+            stream: true,
+        };
+
+        let response = client
+            .post(format!("{}/messages", base_url))
+            .header("x-api-key", &api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("Content-Type", "application/json")
+            .timeout(timeout)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| OrchestratorError::Inference(format!("Anthropic stream request failed: {e}")))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_else(|_| String::new());
+            Err(OrchestratorError::Inference(format!("Anthropic API error {status}: {error_text}")))?;
+            return;
+        }
+
+        let mut byte_stream = response.bytes_stream();
+        let mut buf = String::new();
+        let mut index: usize = 0;
+
+        use futures::StreamExt as _;
+        while let Some(chunk) = byte_stream.next().await {
+            let chunk: bytes::Bytes = chunk.map_err(|e| OrchestratorError::Inference(format!("Stream read error: {e}")))?;
+            buf.push_str(&String::from_utf8_lossy(&chunk));
+
+            // Process complete SSE lines
+            while let Some(pos) = buf.find('\n') {
+                let line = buf[..pos].trim_end_matches('\r').to_string();
+                buf.drain(..=pos);
+
+                if let Some(data) = line.strip_prefix("data: ") {
+                    if data == "[DONE]" {
+                        return;
+                    }
+                    if let Ok(event) = serde_json::from_str::<AnthropicSseEvent>(data) {
+                        if event.event_type == "content_block_delta" {
+                            if let Some(delta) = event.delta {
+                                if delta.delta_type == "text_delta" {
+                                    let text = delta.text.unwrap_or_default();
+                                    let finish_reason = None;
+                                    yield TokenChunk { text, finish_reason, index: event.index };
+                                    index += 1;
+                                }
+                            }
+                        } else if event.event_type == "message_stop" {
+                            yield TokenChunk {
+                                text: String::new(),
+                                finish_reason: Some("stop".to_string()),
+                                index,
+                            };
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// OpenAI SSE choice delta.
+#[derive(Debug, Deserialize)]
+struct OpenAiStreamDelta {
+    content: Option<String>,
+}
+
+/// OpenAI SSE choice.
+#[derive(Debug, Deserialize)]
+struct OpenAiStreamChoice {
+    delta: OpenAiStreamDelta,
+    finish_reason: Option<String>,
+    index: usize,
+}
+
+/// OpenAI SSE event.
+#[derive(Debug, Deserialize)]
+struct OpenAiStreamEvent {
+    choices: Vec<OpenAiStreamChoice>,
+}
+
+/// OpenAI Chat completions streaming request.
+#[derive(Debug, Serialize)]
+struct OpenAiChatStreamRequest {
+    model: String,
+    messages: Vec<OpenAiChatMessage>,
+    max_tokens: u32,
+    temperature: f32,
+    stream: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiChatMessage {
+    role: String,
+    content: String,
+}
+
+impl StreamingModelWorker for OpenAiWorker {
+    fn infer_stream(
+        &self,
+        prompt: String,
+    ) -> BoxStream<'static, Result<TokenChunk, OrchestratorError>> {
+        let client = self.client.clone();
+        let api_key = self.api_key.clone();
+        let base_url = self.base_url.clone();
+        let model = self.model.clone();
+        let max_tokens = self.max_tokens;
+        let temperature = self.temperature;
+        let timeout = self.timeout;
+
+        Box::pin(openai_stream_impl(
+            client,
+            api_key,
+            base_url,
+            model,
+            max_tokens,
+            temperature,
+            timeout,
+            prompt,
+        ))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn openai_stream_impl(
+    client: reqwest::Client,
+    api_key: String,
+    base_url: String,
+    model: String,
+    max_tokens: u32,
+    temperature: f32,
+    timeout: std::time::Duration,
+    prompt: String,
+) -> impl futures::Stream<Item = Result<TokenChunk, OrchestratorError>> + Send + 'static {
+    async_stream::try_stream! {
+        let request_body = OpenAiChatStreamRequest {
+            model,
+            messages: vec![OpenAiChatMessage { role: "user".to_string(), content: prompt }],
+            max_tokens,
+            temperature,
+            stream: true,
+        };
+
+        let response = client
+            .post(format!("{}/chat/completions", base_url))
+            .header("Authorization", format!("Bearer {api_key}"))
+            .header("Content-Type", "application/json")
+            .timeout(timeout)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| OrchestratorError::Inference(format!("OpenAI stream request failed: {e}")))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_else(|_| String::new());
+            Err(OrchestratorError::Inference(format!("OpenAI API error {status}: {error_text}")))?;
+            return;
+        }
+
+        let mut byte_stream = response.bytes_stream();
+        let mut buf = String::new();
+
+        use futures::StreamExt as _;
+        while let Some(chunk) = byte_stream.next().await {
+            let chunk: bytes::Bytes = chunk.map_err(|e| OrchestratorError::Inference(format!("Stream read error: {e}")))?;
+            buf.push_str(&String::from_utf8_lossy(&chunk));
+
+            while let Some(pos) = buf.find('\n') {
+                let line = buf[..pos].trim_end_matches('\r').to_string();
+                buf.drain(..=pos);
+
+                if let Some(data) = line.strip_prefix("data: ") {
+                    if data == "[DONE]" {
+                        return;
+                    }
+                    if let Ok(event) = serde_json::from_str::<OpenAiStreamEvent>(data) {
+                        if let Some(choice) = event.choices.first() {
+                            let text = choice.delta.content.clone().unwrap_or_default();
+                            let finish_reason = choice.finish_reason.clone();
+                            let index = choice.index;
+                            let done = finish_reason.is_some();
+                            yield TokenChunk { text, finish_reason, index };
+                            if done {
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
