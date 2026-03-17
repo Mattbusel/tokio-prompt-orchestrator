@@ -775,4 +775,33 @@ enabled = true
         assert_eq!(dedup.window_s, 300);
         assert_eq!(dedup.max_entries, 10_000);
     }
+
+    #[test]
+    fn test_unknown_field_in_resilience_is_rejected() {
+        // deny_unknown_fields must fire so typos in TOML are caught at parse time
+        let bad_toml = r#"
+retry_attempts = 3
+circuit_breaker_threshold = 5
+circuit_breaker_timeout_s = 60
+circuit_breaker_success_rate = 0.8
+typo_field = "oops"
+"#;
+        let result = toml::from_str::<ResilienceConfig>(bad_toml);
+        assert!(result.is_err(), "unknown fields must be rejected");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("typo_field") || msg.contains("unknown"),
+            "error should mention the unknown field: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_unknown_field_in_deduplication_is_rejected() {
+        let bad_toml = r#"
+enabled = true
+unknwon_key = 42
+"#;
+        let result = toml::from_str::<DeduplicationConfig>(bad_toml);
+        assert!(result.is_err(), "unknown fields must be rejected");
+    }
 }
