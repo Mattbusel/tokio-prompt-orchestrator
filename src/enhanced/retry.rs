@@ -247,7 +247,11 @@ where
 /// Retry with jitter to prevent thundering herd
 pub fn with_jitter(duration: Duration) -> Duration {
     use rand::Rng;
-    let jitter = rand::thread_rng().gen_range(0..duration.as_millis() / 4);
+    let max_jitter = duration.as_millis() / 4;
+    if max_jitter == 0 {
+        return duration;
+    }
+    let jitter = rand::thread_rng().gen_range(0..max_jitter);
     duration + Duration::from_millis(jitter as u64)
 }
 
