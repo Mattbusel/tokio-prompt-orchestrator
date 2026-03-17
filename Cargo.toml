@@ -47,7 +47,7 @@ tokio-stream = { version = "0.1", optional = true }
 futures = { version = "0.3", optional = true }
 
 # Enhanced features
-async-nats = "0.35"
+async-nats = { version = "0.35", optional = true }
 notify = "6"
 schemars = "0.8"
 redis = { version = "0.24", optional = true, features = ["tokio-comp", "connection-manager"] }
@@ -84,7 +84,7 @@ self-improving = ["self-tune", "self-modify", "intelligence", "evolution"]
 tui = ["ratatui", "crossterm"]
 mcp = ["rmcp", "async-stream", "web-api"]
 dashboard = ["web-api"]
-distributed = ["redis"]
+distributed = ["redis", "async-nats"]
 
 [dev-dependencies]
 tokio-test = "0.4"

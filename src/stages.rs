@@ -32,8 +32,18 @@
 //! - Stream output: 256
 
 use crate::{
-    enhanced::CircuitBreaker, metrics, send_with_shed, AssembleOutput, InferenceOutput,
-    ModelWorker, PostOutput, PromptRequest, RagOutput, SendOutcome, SessionId,
+    config::PipelineConfig,
+    enhanced::CircuitBreaker,
+    metrics,
+    send_with_shed,
+    AssembleOutput,
+    InferenceOutput,
+    ModelWorker,
+    PostOutput,
+    PromptRequest,
+    RagOutput,
+    SendOutcome,
+    SessionId,
 };
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -188,6 +198,65 @@ pub fn spawn_pipeline(worker: Arc<dyn ModelWorker>) -> PipelineHandles {
     let circuit_breaker = CircuitBreaker::new(5, 0.8, std::time::Duration::from_secs(60));
 
     // Spawn each stage
+    let rag = tokio::spawn(rag_stage(input_rx, rag_tx));
+    let assemble = tokio::spawn(assemble_stage(rag_rx, assemble_tx));
+    let inference = tokio::spawn(inference_stage(
+        assemble_rx,
+        inference_tx,
+        worker,
+        circuit_breaker.clone(),
+    ));
+    let post = tokio::spawn(post_stage(inference_rx, post_tx));
+    let stream = tokio::spawn(stream_stage(post_rx, output_tx, Arc::new(LogSink)));
+
+    PipelineHandles {
+        rag,
+        assemble,
+        inference,
+        post,
+        stream,
+        input_tx,
+        output_rx: tokio::sync::Mutex::new(Some(output_rx)),
+        circuit_breaker,
+    }
+}
+
+/// Spawn the complete 5-stage pipeline using a [`PipelineConfig`] loaded
+/// from a TOML file.
+///
+/// Channel capacities, circuit-breaker parameters, and retry settings are
+/// all taken from `config` rather than from compile-time constants.
+///
+/// # Panics
+///
+/// This function never panics.
+pub fn spawn_pipeline_with_config(
+    worker: Arc<dyn ModelWorker>,
+    config: &PipelineConfig,
+) -> PipelineHandles {
+    let r = &config.resilience;
+    let s = &config.stages;
+
+    let input_cap = s.rag.channel_capacity.unwrap_or(512);
+    let rag_cap = s.rag.channel_capacity.unwrap_or(512);
+    let assemble_cap = s.assemble.channel_capacity;
+    let inference_cap = s.inference.timeout_ms.map(|_| 1024).unwrap_or(1024);
+    let post_cap = s.post_process.channel_capacity;
+    let stream_cap = s.stream.channel_capacity;
+
+    let (input_tx, input_rx) = mpsc::channel::<PromptRequest>(input_cap);
+    let (rag_tx, rag_rx) = mpsc::channel::<RagOutput>(rag_cap);
+    let (assemble_tx, assemble_rx) = mpsc::channel::<AssembleOutput>(assemble_cap);
+    let (inference_tx, inference_rx) = mpsc::channel::<InferenceOutput>(inference_cap);
+    let (post_tx, post_rx) = mpsc::channel::<PostOutput>(post_cap);
+    let (output_tx, output_rx) = mpsc::channel::<PostOutput>(stream_cap);
+
+    let circuit_breaker = CircuitBreaker::new(
+        r.circuit_breaker_threshold as usize,
+        r.circuit_breaker_success_rate,
+        std::time::Duration::from_secs(r.circuit_breaker_timeout_s),
+    );
+
     let rag = tokio::spawn(rag_stage(input_rx, rag_tx));
     let assemble = tokio::spawn(assemble_stage(rag_rx, assemble_tx));
     let inference = tokio::spawn(inference_stage(

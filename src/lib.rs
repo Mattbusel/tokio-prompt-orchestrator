@@ -55,7 +55,9 @@ pub mod self_improve_loop;
 pub mod tui;
 
 // Re-exports
-pub use stages::{spawn_pipeline, LogSink, OutputSink, PipelineHandles, SinkError};
+pub use stages::{
+    spawn_pipeline, spawn_pipeline_with_config, LogSink, OutputSink, PipelineHandles, SinkError,
+};
 pub use worker::{
     AnthropicWorker, EchoWorker, LlamaCppWorker, ModelWorker, OpenAiWorker, VllmWorker,
 };
@@ -131,13 +133,20 @@ pub struct PostOutput {
     pub text: String,
 }
 
-/// Session affinity sharding helper
+/// Session affinity sharding helper.
+///
+/// Uses FNV-1a 64-bit so results are identical across Rust versions,
+/// platforms, and process restarts — unlike `DefaultHasher`, which is
+/// explicitly unstable across all three.
 pub fn shard_session(session: &SessionId, shards: usize) -> usize {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    session.0.hash(&mut hasher);
-    (hasher.finish() as usize) % shards
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x00000100000001b3;
+    let mut hash = FNV_OFFSET;
+    for byte in session.0.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    (hash as usize) % shards
 }
 
 /// Initialise tracing with env-filter support. Call once at binary startup.
@@ -227,6 +236,27 @@ mod tests {
     fn test_shard_session_deterministic() {
         let s = SessionId::new("test-session-123");
         assert_eq!(shard_session(&s, 4), shard_session(&s, 4));
+    }
+
+    #[test]
+    fn test_shard_session_stable_value() {
+        // FNV-1a produces a fixed value for a known input.
+        // If this test breaks, the hash function changed and session
+        // affinity routing would silently break across deployments.
+        let s = SessionId::new("test-session-123");
+        assert_eq!(shard_session(&s, 8), shard_session(&s, 8));
+        // Verify specific shard is stable (computed from FNV-1a of "test-session-123" mod 4)
+        let expected = {
+            const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+            const FNV_PRIME: u64 = 0x00000100000001b3;
+            let mut h = FNV_OFFSET;
+            for b in b"test-session-123" {
+                h ^= *b as u64;
+                h = h.wrapping_mul(FNV_PRIME);
+            }
+            (h as usize) % 4
+        };
+        assert_eq!(shard_session(&s, 4), expected);
     }
 
     #[test]

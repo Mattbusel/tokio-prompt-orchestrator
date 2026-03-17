@@ -22,8 +22,18 @@ use std::env;
 use std::io::{self, Write as _};
 use std::sync::Arc;
 use tokio_prompt_orchestrator::{
-    metrics, spawn_pipeline, AnthropicWorker, EchoWorker, LlamaCppWorker, ModelWorker,
-    OpenAiWorker, PostOutput, PromptRequest, SessionId,
+    config::loader::load_from_file,
+    metrics,
+    spawn_pipeline,
+    spawn_pipeline_with_config,
+    AnthropicWorker,
+    EchoWorker,
+    LlamaCppWorker,
+    ModelWorker,
+    OpenAiWorker,
+    PostOutput,
+    PromptRequest,
+    SessionId,
 };
 
 #[cfg(feature = "web-api")]
@@ -123,6 +133,8 @@ struct CliArgs {
     log_level: String,
     no_web: bool,
     reset: bool,
+    /// Path to a `pipeline.toml` declarative config file.
+    config_path: Option<std::path::PathBuf>,
 }
 
 fn default_model(provider: &str) -> &'static str {
@@ -153,6 +165,7 @@ OPTIONS:
     --port     <N>                             HTTP port     (default: 8080)
     --host     <addr>                          Bind address  (default: 127.0.0.1)
     --log-level <trace|debug|info|warn|error>  Log verbosity (default: info)
+    --config   <path>                          Load pipeline.toml (overrides wizard defaults)
     --no-web                                   Disable web API
     --reset                                    Re-run setup wizard
     --help, -h                                 Print this help
@@ -186,6 +199,7 @@ fn parse_args() -> Result<CliArgs, String> {
     let mut log_level = "info".to_string();
     let mut no_web = false;
     let mut reset = false;
+    let mut config_path: Option<std::path::PathBuf> = None;
 
     let mut i = 1usize;
     while i < args.len() {
@@ -200,7 +214,7 @@ fn parse_args() -> Result<CliArgs, String> {
             }
             "--no-web" => no_web = true,
             "--reset" => reset = true,
-            flag @ ("--provider" | "--model" | "--port" | "--host" | "--log-level") => {
+            flag @ ("--provider" | "--model" | "--port" | "--host" | "--log-level" | "--config") => {
                 i += 1;
                 if i >= args.len() {
                     return Err(format!("{flag} requires a value"));
@@ -216,6 +230,7 @@ fn parse_args() -> Result<CliArgs, String> {
                     }
                     "--host" => host = val,
                     "--log-level" => log_level = val,
+                    "--config" => config_path = Some(std::path::PathBuf::from(val)),
                     _ => {}
                 }
             }
@@ -232,6 +247,7 @@ fn parse_args() -> Result<CliArgs, String> {
         log_level,
         no_web,
         reset,
+        config_path,
     })
 }
 
@@ -246,6 +262,8 @@ struct ResolvedConfig {
     host: String,
     log_level: String,
     no_web: bool,
+    /// Path to a declarative `pipeline.toml`, if `--config` was supplied.
+    config_path: Option<std::path::PathBuf>,
 }
 
 fn run_wizard(args: CliArgs) -> ResolvedConfig {
@@ -346,6 +364,7 @@ fn run_wizard(args: CliArgs) -> ResolvedConfig {
                     host: args.host,
                     log_level: args.log_level,
                     no_web: args.no_web,
+                    config_path: args.config_path,
                 };
             }
         }
@@ -501,6 +520,7 @@ fn run_wizard(args: CliArgs) -> ResolvedConfig {
         host: args.host,
         log_level: args.log_level,
         no_web,
+        config_path: args.config_path,
     }
 }
 
@@ -811,7 +831,20 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
 
     tracing::info!(provider = %cfg.provider, model = %cfg.model, "Worker ready");
 
-    let handles = spawn_pipeline(worker);
+    let handles = if let Some(ref path) = cfg.config_path {
+        match load_from_file(path) {
+            Ok(pipeline_cfg) => {
+                tracing::info!(path = %path.display(), "Loaded declarative pipeline config");
+                spawn_pipeline_with_config(worker, &pipeline_cfg)
+            }
+            Err(e) => {
+                eprintln!("\n  ✗ Failed to load --config {}: {e}\n", path.display());
+                std::process::exit(1);
+            }
+        }
+    } else {
+        spawn_pipeline(worker)
+    };
     tracing::info!("Pipeline stages spawned");
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -939,6 +972,7 @@ mod tests {
             host: "127.0.0.1".to_string(),
             log_level: "info".to_string(),
             no_web: false,
+            config_path: None,
         };
         assert!(build_worker(&cfg).is_ok());
     }
@@ -958,6 +992,7 @@ mod tests {
             host: "127.0.0.1".to_string(),
             log_level: "info".to_string(),
             no_web: false,
+            config_path: None,
         };
         let err = build_worker(&cfg).err().unwrap();
         assert!(err.contains("OpenAI API key"));
@@ -976,6 +1011,7 @@ mod tests {
             host: "127.0.0.1".to_string(),
             log_level: "info".to_string(),
             no_web: false,
+            config_path: None,
         };
         let err = build_worker(&cfg).err().unwrap();
         assert!(err.contains("Anthropic API key"));
@@ -991,6 +1027,7 @@ mod tests {
             host: "127.0.0.1".to_string(),
             log_level: "info".to_string(),
             no_web: false,
+            config_path: None,
         };
         let err = build_worker(&cfg).err().unwrap();
         assert!(err.contains("Unknown provider"));
@@ -1006,6 +1043,7 @@ mod tests {
             host: "127.0.0.1".to_string(),
             log_level: "info".to_string(),
             no_web: false,
+            config_path: None,
         };
         assert!(build_worker(&cfg).is_ok());
     }
