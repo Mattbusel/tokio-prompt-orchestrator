@@ -8,6 +8,28 @@
 //! ```text
 //! PromptRequest → RAG(512) → Assemble(512) → Inference(1024) → Post(512) → Stream(256)
 //! ```
+//!
+//! ## Feature flags
+//!
+//! | Feature | Enables |
+//! |---------|---------|
+//! | `web-api` | Axum HTTP/WebSocket/SSE API server |
+//! | `metrics-server` | Prometheus metrics HTTP endpoint |
+//! | `caching` | Redis-backed response cache |
+//! | `rate-limiting` | Token-bucket rate limiter (governor) |
+//! | `tui` | Ratatui terminal dashboard |
+//! | `mcp` | Model Context Protocol server |
+//! | `distributed` | Redis-backed distributed coordination |
+//! | `self-tune` | Adaptive parameter tuning |
+//! | `self-modify` | Runtime configuration patching (requires `self-tune`) |
+//! | `intelligence` | Heuristic routing and scoring (requires `self-tune`) |
+//! | `evolution` | Population-based optimisation (requires `intelligence`) |
+//! | `self-improving` | All self-improvement subsystems combined |
+//! | `full` | `web-api` + `metrics-server` + `caching` + `rate-limiting` |
+
+// Deny panicky shortcuts in production code; tests are exempted via per-module allows.
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 use std::collections::HashMap;
 use thiserror::Error;
@@ -16,6 +38,7 @@ pub mod config;
 pub mod coordination;
 // pub mod momentum; // module removed — C++ SIMD momentum is in crates/
 #[cfg(feature = "distributed")]
+#[cfg_attr(docsrs, doc(cfg(feature = "distributed")))]
 pub mod distributed;
 pub mod enhanced;
 pub mod metrics;
@@ -24,21 +47,27 @@ pub mod stages;
 pub mod worker;
 
 #[cfg(feature = "metrics-server")]
+#[cfg_attr(docsrs, doc(cfg(feature = "metrics-server")))]
 pub mod metrics_server;
 
 #[cfg(feature = "web-api")]
+#[cfg_attr(docsrs, doc(cfg(feature = "web-api")))]
 pub mod web_api;
 
 #[cfg(feature = "self-tune")]
+#[cfg_attr(docsrs, doc(cfg(feature = "self-tune")))]
 pub mod self_tune;
 
 #[cfg(feature = "self-modify")]
+#[cfg_attr(docsrs, doc(cfg(feature = "self-modify")))]
 pub mod self_modify;
 
 #[cfg(feature = "intelligence")]
+#[cfg_attr(docsrs, doc(cfg(feature = "intelligence")))]
 pub mod intelligence;
 
 #[cfg(feature = "evolution")]
+#[cfg_attr(docsrs, doc(cfg(feature = "evolution")))]
 pub mod evolution;
 
 #[cfg(all(
@@ -46,12 +75,15 @@ pub mod evolution;
     feature = "self-modify",
     feature = "intelligence"
 ))]
+#[cfg_attr(docsrs, doc(cfg(feature = "self-improving")))]
 pub mod self_improve;
 
 #[cfg(all(feature = "self-tune", feature = "self-modify"))]
+#[cfg_attr(docsrs, doc(cfg(feature = "self-modify")))]
 pub mod self_improve_loop;
 
 #[cfg(feature = "tui")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tui")))]
 pub mod tui;
 
 // Re-exports
@@ -73,6 +105,15 @@ pub enum OrchestratorError {
 
     #[error("configuration error: {0}")]
     ConfigError(String),
+
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+
+    #[error("HTTP client error: {0}")]
+    Http(#[from] reqwest::Error),
 
     #[error("{0}")]
     Other(String),
