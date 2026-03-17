@@ -307,6 +307,7 @@ mod tests {
                 metrics_port: Some(9090),
                 tracing_endpoint: None,
             },
+            rate_limits: RateLimitConfig::default(),
         }
     }
 

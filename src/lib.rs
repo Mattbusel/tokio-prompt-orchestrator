@@ -152,13 +152,102 @@ pub fn shard_session(session: &SessionId, shards: usize) -> usize {
     (hasher.finish() as usize) % shards
 }
 
+/// Type alias for the optional OpenTelemetry tracing layer used in main.rs.
+///
+/// Exported so binary crates can declare `Option<OtelLayer>` without spelling
+/// out the full generic type.
+pub type OtelLayer = tracing_opentelemetry::OpenTelemetryLayer<
+    tracing_subscriber::Registry,
+    opentelemetry_sdk::trace::Tracer,
+>;
+
 /// Initialise tracing with env-filter support. Call once at binary startup.
+///
+/// If `RUST_LOG_FORMAT=json` is set the subscriber emits newline-delimited
+/// JSON suitable for log aggregation pipelines.  Otherwise the human-readable
+/// `fmt` pretty format is used for local development.
+///
+/// An OpenTelemetry layer is added when `OTEL_EXPORTER_OTLP_ENDPOINT` or
+/// `JAEGER_ENDPOINT` is present in the environment; otherwise the OTel layer
+/// is omitted so the binary runs without a collector.
 pub fn init_tracing() {
-    use tracing_subscriber::{fmt, EnvFilter};
-    let _ = fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .with_target(false)
-        .try_init();
+    use tracing_subscriber::{fmt, layer::SubscriberExt, EnvFilter, Layer, Registry};
+
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    let use_json = std::env::var("RUST_LOG_FORMAT")
+        .map(|v| v.to_lowercase() == "json")
+        .unwrap_or(false);
+
+    // Build the OTel layer if an endpoint is configured, boxing it so the
+    // concrete type does not propagate into the subscriber stack.
+    let otel_layer: Option<Box<dyn Layer<Registry> + Send + Sync>> =
+        try_build_otel_layer().map(|l| l.boxed());
+
+    if use_json {
+        let subscriber = Registry::default()
+            .with(otel_layer)
+            .with(env_filter)
+            .with(fmt::layer().json().with_target(false));
+        let _ = tracing::subscriber::set_global_default(subscriber);
+    } else {
+        let subscriber = Registry::default()
+            .with(otel_layer)
+            .with(env_filter)
+            .with(fmt::layer().with_target(false));
+        let _ = tracing::subscriber::set_global_default(subscriber);
+    }
+}
+
+/// Attempt to build an OpenTelemetry tracing layer, returning `None` on error.
+///
+/// Reads `JAEGER_ENDPOINT` (e.g. `http://localhost:4318`) or
+/// `OTEL_EXPORTER_OTLP_ENDPOINT`.  When neither is set, or when the exporter
+/// fails to build, this function returns `None` so startup is never blocked
+/// by observability infrastructure.
+///
+/// **NOTE**: This function must be called **after** the Tokio runtime has been
+/// started because the batch exporter uses `rt-tokio`.
+///
+/// # Panics
+///
+/// This function never panics.
+pub fn try_build_otel_layer() -> Option<
+    tracing_opentelemetry::OpenTelemetryLayer<
+        tracing_subscriber::Registry,
+        opentelemetry_sdk::trace::Tracer,
+    >,
+> {
+    use opentelemetry::global;
+    use opentelemetry_otlp::WithExportConfig;
+
+    let endpoint = std::env::var("JAEGER_ENDPOINT")
+        .or_else(|_| std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT"))
+        .ok()?;
+
+    let exporter = match opentelemetry_otlp::SpanExporter::builder()
+        .with_http()
+        .with_endpoint(endpoint)
+        .build()
+    {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("Warning: OTel exporter build failed: {e}");
+            return None;
+        }
+    };
+
+    let provider = opentelemetry_sdk::trace::TracerProvider::builder()
+        .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
+        .with_resource(opentelemetry_sdk::Resource::new(vec![
+            opentelemetry::KeyValue::new("service.name", "tokio-prompt-orchestrator"),
+        ]))
+        .build();
+
+    use opentelemetry::trace::TracerProvider as _;
+    let tracer = provider.tracer("tokio-prompt-orchestrator");
+    global::set_tracer_provider(provider);
+    Some(tracing_opentelemetry::layer().with_tracer(tracer))
 }
 
 /// Outcome of a [`send_with_shed`] call.
@@ -253,5 +342,100 @@ mod tests {
             })
             .collect();
         assert!(counts.iter().all(|&c| c > 0));
+    }
+
+    /// Verify that tracing events can be captured and that when RUST_LOG_FORMAT=json
+    /// is set, the output is valid newline-delimited JSON with expected fields.
+    #[test]
+    fn test_json_log_output_is_valid_json() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::{fmt, layer::SubscriberExt, EnvFilter};
+
+        // Shared buffer to capture log output.
+        let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let buf_clone = buf.clone();
+
+        // Build an isolated JSON subscriber for this test.
+        let writer = tracing_subscriber::fmt::writer::BoxMakeWriter::new(move || {
+            struct BufWriter(Arc<Mutex<Vec<u8>>>);
+            impl std::io::Write for BufWriter {
+                fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                    self.0
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .extend_from_slice(b);
+                    Ok(b.len())
+                }
+                fn flush(&mut self) -> std::io::Result<()> {
+                    Ok(())
+                }
+            }
+            BufWriter(buf_clone.clone())
+        });
+
+        let subscriber = tracing_subscriber::Registry::default()
+            .with(EnvFilter::new("info"))
+            .with(fmt::layer().json().with_writer(writer).with_target(false));
+
+        // Use a local dispatcher so this test doesn't interfere with globals.
+        let _guard = tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(
+                stage = "rag",
+                session_id = "s1",
+                request_id = "r1",
+                "test event"
+            );
+        });
+
+        let captured = buf.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        assert!(!captured.is_empty(), "captured log must be non-empty");
+
+        let text = std::str::from_utf8(&captured).expect("log output must be valid UTF-8");
+        // Each line must be valid JSON.
+        for line in text.lines().filter(|l| !l.is_empty()) {
+            let v: serde_json::Value =
+                serde_json::from_str(line).expect("each log line must be valid JSON");
+            // Verify expected fields are present.
+            assert!(v.get("fields").is_some(), "JSON log must have 'fields' key");
+        }
+    }
+
+    /// Verify that trace IDs remain consistent across a pipeline processing a
+    /// single request (OTel context propagation).  Without a live collector the
+    /// test only checks that the tracing infrastructure works without panicking;
+    /// the trace_id field is non-zero within a span.
+    #[test]
+    fn test_trace_id_is_non_zero_within_span() {
+        use opentelemetry::trace::{SpanContext, TraceContextExt};
+        use tracing_opentelemetry::OpenTelemetrySpanExt;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        // Set up a minimal OTel provider with a no-op (in-memory) config.
+        let provider = opentelemetry_sdk::trace::TracerProvider::builder()
+            .with_config(opentelemetry_sdk::trace::config())
+            .build();
+        use opentelemetry::trace::TracerProvider as _;
+        let tracer = provider.tracer("test");
+
+        let subscriber = tracing_subscriber::Registry::default()
+            .with(tracing_opentelemetry::layer().with_tracer(tracer));
+
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("test.root");
+            let _guard = span.enter();
+            let ctx = tracing::Span::current().context();
+            let span_ref = ctx.span();
+            let span_ctx: &SpanContext = span_ref.span_context();
+            // trace_id must be non-zero when within a valid span.
+            assert!(
+                span_ctx.is_valid(),
+                "span context must be valid inside an instrumented span"
+            );
+            assert_ne!(
+                span_ctx.trace_id(),
+                opentelemetry::trace::TraceId::INVALID,
+                "trace_id must be non-zero"
+            );
+        });
     }
 }

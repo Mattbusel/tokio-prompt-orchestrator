@@ -98,6 +98,9 @@ pub struct PipelineConfig {
     pub stages: StagesConfig,
     /// Resilience settings: retries, circuit breaker, backpressure.
     pub resilience: ResilienceConfig,
+    /// Rate limiting settings to control request throughput.
+    #[serde(default)]
+    pub rate_limits: RateLimitConfig,
     /// Deduplication settings for request coalescing.
     pub deduplication: DeduplicationConfig,
     /// Observability: logging, metrics, tracing.
@@ -248,6 +251,54 @@ pub struct StreamStageConfig {
     /// Channel buffer capacity for this stage.
     #[serde(default = "default_channel_capacity")]
     pub channel_capacity: usize,
+}
+
+// ── Rate limiting ────────────────────────────────────────────────────────
+
+/// Default requests-per-second limit: 100.
+fn default_rps() -> u32 {
+    100
+}
+
+/// Default burst capacity: 20.
+fn default_burst() -> u32 {
+    20
+}
+
+/// Default enabled state for rate limiting: false.
+fn default_rate_limit_enabled() -> bool {
+    false
+}
+
+/// Rate limiting configuration.
+///
+/// Controls the token-bucket rate limiter that caps inbound request throughput.
+/// When enabled, requests exceeding the allowed rate are rejected with HTTP 429.
+///
+/// # Panics
+///
+/// This type never panics.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct RateLimitConfig {
+    /// Whether rate limiting is enabled.
+    #[serde(default = "default_rate_limit_enabled")]
+    pub enabled: bool,
+    /// Maximum sustained requests per second (token refill rate).
+    #[serde(default = "default_rps")]
+    pub requests_per_second: u32,
+    /// Maximum burst capacity above the sustained rate.
+    #[serde(default = "default_burst")]
+    pub burst_capacity: u32,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_rate_limit_enabled(),
+            requests_per_second: default_rps(),
+            burst_capacity: default_burst(),
+        }
+    }
 }
 
 // ── Resilience ───────────────────────────────────────────────────────────
@@ -570,6 +621,7 @@ metrics_port = 9090
                 metrics_port: Some(8080),
                 tracing_endpoint: Some("http://jaeger:14268".into()),
             },
+            rate_limits: RateLimitConfig::default(),
         };
 
         let toml_str = toml::to_string_pretty(&config).expect("test: serialize to TOML");
@@ -631,6 +683,7 @@ metrics_port = 9090
                 metrics_port: None,
                 tracing_endpoint: None,
             },
+            rate_limits: RateLimitConfig::default(),
         };
 
         let json = serde_json::to_string(&config).expect("test: serialize to JSON");
