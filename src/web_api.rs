@@ -721,7 +721,7 @@ struct StreamPromptRequest {
 
 #[cfg(feature = "web-api")]
 async fn token_stream_ws(mut socket: WebSocket, state: Arc<AppState>) {
-    use crate::worker::{StreamingModelWorker, TokenChunk};
+    use crate::worker::TokenChunk;
 
     info!("Token-stream WebSocket client connected");
 

@@ -14,8 +14,8 @@ categories = ["asynchronous", "network-programming", "web-programming"]
 exclude = [".github", "scripts", "assets", "docs", "benches"]
 
 [lints.clippy]
-unwrap_used = "warn"
-expect_used = "warn"
+unwrap_used = "deny"
+expect_used = "deny"
 
 [package.metadata.docs.rs]
 features = ["full", "tui", "mcp", "self-improving", "distributed"]
@@ -97,6 +97,7 @@ tokio-test = "0.4"
 tempfile = "3"
 wiremock = "0.6"
 tower = { version = "0.4", features = ["util"] }
+criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 
 [[example]]
 name = "rest_api"
@@ -145,3 +146,13 @@ required-features = ["self-improving"]
 [[bin]]
 name = "validate"
 path = "src/bin/validate.rs"
+
+[[bench]]
+name = "pipeline"
+path = "benches/pipeline.rs"
+harness = false
+
+[[bench]]
+name = "workers"
+path = "benches/workers.rs"
+harness = false

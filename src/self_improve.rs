@@ -184,9 +184,9 @@ impl SelfImprovingLoop {
             cfg.target_throughput_rps,
         )));
         let snapshots = Arc::new(SnapshotStore::new(cfg.max_snapshots));
-        let cost = Arc::new(CostOptimizer::new(cfg.budget.clone()).unwrap_or_else(|_| {
-            CostOptimizer::new(BudgetConfig::default()).expect("default budget is valid")
-        }));
+        let cost = Arc::new(
+            CostOptimizer::new(cfg.budget.clone()).unwrap_or_else(|_| CostOptimizer::with_defaults()),
+        );
         let anomaly = Arc::new(AnomalyDetector::new(cfg.anomaly.clone()));
         let task_gen = Arc::new(MetaTaskGenerator::new());
         let gate = Arc::new(ValidationGate::new(cfg.gate.clone()));
