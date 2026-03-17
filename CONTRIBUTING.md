@@ -19,10 +19,16 @@ Thanks for your interest. This is a research-grade system — contributions that
 ## How to contribute
 
 1. Fork and clone
-2. `cargo test --all-features` — must pass before and after your change
-3. `./scripts/ratio_check.sh` — test ratio must stay ≥1.5:1
-4. `cargo clippy --all-features -- -D warnings` — zero warnings
-5. Open a PR with a description of *why*, not just *what*
+2. Install the pre-commit gate (one-time setup):
+   ```bash
+   git config core.hooksPath .githooks
+   ```
+   This runs `scripts/pre_commit.sh` automatically before every commit —
+   covering fmt, clippy, tests, panic-scan, and ratio-check.
+3. `cargo test --all-features` — must pass before and after your change
+4. `./scripts/ratio_check.sh` — test ratio must stay ≥1.5:1
+5. `cargo clippy --all-features -- -D warnings` — zero warnings
+6. Open a PR with a description of *why*, not just *what*
 
 ## Commit format
 

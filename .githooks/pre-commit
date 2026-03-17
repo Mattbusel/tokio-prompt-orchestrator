@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# .githooks/pre-commit
+# Delegates to scripts/pre_commit.sh — the canonical pre-commit gate.
+#
+# Install: git config core.hooksPath .githooks
+# Or run:  ./scripts/pre_commit.sh  at any time manually.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec "$REPO_ROOT/scripts/pre_commit.sh"

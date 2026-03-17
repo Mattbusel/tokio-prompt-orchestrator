@@ -25,7 +25,14 @@ rustdoc-args = ["--cfg", "docsrs"]
 # Core
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-std", "signal"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "registry"] }
+tracing-futures = "0.2"
+# OpenTelemetry
+opentelemetry = { version = "0.27", features = ["trace"] }
+opentelemetry_sdk = { version = "0.27", features = ["trace", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.27", features = ["trace", "grpc-tonic", "http-proto", "reqwest-client"] }
+opentelemetry-http = "0.27"
+tracing-opentelemetry = "0.28"
 thiserror = "1.0"
 async-trait = "0.1"
 
@@ -155,4 +162,14 @@ harness = false
 [[bench]]
 name = "workers"
 path = "benches/workers.rs"
+harness = false
+
+[[bench]]
+name = "enhanced"
+path = "benches/enhanced.rs"
+harness = false
+
+[[bench]]
+name = "helix"
+path = "benches/helix.rs"
 harness = false
