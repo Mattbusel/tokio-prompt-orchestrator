@@ -74,7 +74,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!(r#"   ws.send(JSON.stringify({{prompt: "Hi!"}}));"#);
     info!("");
 
-    web_api::start_server(web_api::ServerConfig::default(), handles.input_tx).await?;
+    let (_, output_rx) = tokio::sync::mpsc::channel(1);
+    web_api::start_server(web_api::ServerConfig::default(), handles.input_tx, output_rx).await?;
 
     Ok(())
 }

@@ -45,8 +45,9 @@ async fn spawn_server() -> (String, mpsc::Receiver<PromptRequest>) {
         max_request_size: 1024 * 1024,
         timeout_seconds: 2,
     };
+    let (_, out_rx) = mpsc::channel::<tokio_prompt_orchestrator::PostOutput>(1);
     tokio::spawn(async move {
-        let _ = tokio_prompt_orchestrator::web_api::start_server(config, tx).await;
+        let _ = tokio_prompt_orchestrator::web_api::start_server(config, tx, out_rx).await;
     });
     // Give the server a moment to bind.
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -1000,8 +1001,9 @@ async fn test_infer_endpoint_pipeline_closed_returns_503() {
         max_request_size: 1024 * 1024,
         timeout_seconds: 2,
     };
+    let (_, out_rx) = mpsc::channel::<tokio_prompt_orchestrator::PostOutput>(1);
     tokio::spawn(async move {
-        let _ = tokio_prompt_orchestrator::web_api::start_server(config, tx).await;
+        let _ = tokio_prompt_orchestrator::web_api::start_server(config, tx, out_rx).await;
     });
     tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -1032,8 +1034,9 @@ async fn test_pipeline_closed_error_body_contains_error_field() {
         max_request_size: 1024 * 1024,
         timeout_seconds: 2,
     };
+    let (_, out_rx) = mpsc::channel::<tokio_prompt_orchestrator::PostOutput>(1);
     tokio::spawn(async move {
-        let _ = tokio_prompt_orchestrator::web_api::start_server(config, tx).await;
+        let _ = tokio_prompt_orchestrator::web_api::start_server(config, tx, out_rx).await;
     });
     tokio::time::sleep(Duration::from_millis(300)).await;
     drop(rx);

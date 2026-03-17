@@ -98,8 +98,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("Press Ctrl+C to stop...");
     info!("");
 
-    // Start server (blocks)
-    web_api::start_server(config, handles.input_tx).await?;
+    // Start server (blocks). No pipeline output receiver needed in this demo.
+    let (_, output_rx) = tokio::sync::mpsc::channel(1);
+    web_api::start_server(config, handles.input_tx, output_rx).await?;
 
     Ok(())
 }

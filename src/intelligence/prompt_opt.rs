@@ -31,7 +31,7 @@ pub enum OptimizationStrategy {
     SystemPromptCompression,
     InstructionReordering,
     RedundancyRemoval,
-    /// Not yet implemented — returns input unchanged.
+    /// Placeholder: returns input unchanged. TODO: implement few-shot example retrieval.
     ///
     /// This variant is a placeholder. Enabling it has no effect on the prompt.
     // TODO: implement ExampleInjection by selecting and prepending relevant

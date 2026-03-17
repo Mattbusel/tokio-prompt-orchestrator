@@ -121,6 +121,23 @@ impl CacheLayer {
         }
     }
 
+    /// Get a cached value, distinguishing cache misses from backend errors.
+    ///
+    /// Returns:
+    /// - `Ok(Some(value))` — cache hit
+    /// - `Ok(None)` — cache miss
+    /// - `Err(msg)` — backend error (treat as miss but log it)
+    pub async fn get_checked(&self, key: &str) -> Result<Option<String>, String> {
+        match &self.backend {
+            CacheBackend::Memory(_) => Ok(self.get(key).await),
+            #[cfg(feature = "caching")]
+            CacheBackend::Redis(cache) => match cache.get_redis(key).await {
+                Ok(v) => Ok(v),
+                Err(e) => Err(format!("redis error: {e:?}")),
+            },
+        }
+    }
+
     /// Set cached value with TTL in seconds
     pub async fn set(&self, key: impl Into<String>, value: impl Into<String>, ttl_secs: u64) {
         let key = key.into();
@@ -139,10 +156,10 @@ impl CacheLayer {
                 if cache.max_entries > 0 && cache.store.len() >= cache.max_entries {
                     // Collect key first to release all DashMap read-guards
                     // before calling remove (avoids shard deadlock).
-                    let evict_key = {
-                        let maybe = cache.store.iter().next().map(|e| e.key().clone());
-                        maybe
-                    };
+                    // O(n) scan — acceptable for small caches; use an LRU crate for large deployments
+                    let evict_key = cache.store.iter()
+                        .min_by_key(|e| e.value().expires_at)
+                        .map(|e| e.key().clone());
                     if let Some(key_to_evict) = evict_key {
                         cache.store.remove(&key_to_evict);
                     }

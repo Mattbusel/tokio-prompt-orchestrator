@@ -36,7 +36,7 @@ You need a key from whichever AI provider you want to use:
 
 The first time you open `orchestrator.exe` it walks you through setup:
 
-```
+```text
   ┌──────────────────────────────────────────────────┐
   │       Welcome to tokio-prompt-orchestrator        │
   │  Setup takes about 60 seconds.                    │
@@ -71,7 +71,7 @@ Your key is stored only in `orchestrator.env` on your machine — never transmit
 
 After setup the banner appears and you can type prompts straight into the terminal:
 
-```
+```text
 ╔══════════════════════════════════════════════════╗
 ║   tokio-prompt-orchestrator v0.1.0               ║
 ║  Provider : anthropic (claude-sonnet-4-6)        ║
@@ -149,7 +149,7 @@ tokio-prompt-orchestrator = { git = "https://github.com/Mattbusel/tokio-prompt-o
 tokio = { version = "1", features = ["full"] }
 ```
 
-```rust
+```rust,ignore
 use tokio_prompt_orchestrator::{Pipeline, PipelineConfig, EchoWorker, InferenceRequest};
 
 #[tokio::main]
@@ -185,7 +185,7 @@ Real-time terminal dashboard: 985 requests in, 323 actual inferences (67.2% dedu
 
 A five-stage async pipeline for LLM inference with a closed-loop self-improving control system. Bounded channels enforce backpressure end-to-end. Every request flows through:
 
-```
+```text
 RAG -> Assemble -> Inference -> Post-Process -> Stream
 ```
 
@@ -201,7 +201,7 @@ The self-improving stack runs alongside the pipeline as a live background servic
 
 **Self-Improving Loop** -- `SelfImprovementLoop` runs as a single background Tokio task:
 
-```
+```text
 TelemetryBus
     |  broadcast snapshot every 5s
     v
@@ -305,7 +305,7 @@ LOG_FORMAT="json"                     # Structured logs for Datadog/Loki
 
 ## Numbers
 
-```
+```text
 Lines of code       129,442
 Tests               1,491 passing, 0 failing
 Benchmarks          30+ criterion, all within budget

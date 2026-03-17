@@ -9,6 +9,8 @@
 //! PromptRequest → RAG(512) → Assemble(512) → Inference(1024) → Post(512) → Stream(256)
 //! ```
 
+#![doc = include_str!("../README.md")]
+
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -59,8 +61,8 @@ pub use stages::{
     spawn_pipeline, spawn_pipeline_with_config, LogSink, OutputSink, PipelineHandles, SinkError,
 };
 pub use worker::{
-    AnthropicWorker, EchoWorker, LlamaCppWorker, LoadBalancedWorker, ModelWorker, OpenAiWorker,
-    VllmWorker,
+    stream_worker, AnthropicWorker, EchoWorker, LlamaCppWorker, LoadBalancedWorker, ModelWorker,
+    OpenAiWorker, VllmWorker,
 };
 
 /// Orchestrator-specific errors
@@ -264,6 +266,34 @@ pub enum SendOutcome {
     Shed,
 }
 
+/// Pipeline stage identifier for metrics and logging.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PipelineStage {
+    Rag,
+    Assemble,
+    Inference,
+    Post,
+    Stream,
+}
+
+impl PipelineStage {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Rag => "rag",
+            Self::Assemble => "assemble",
+            Self::Inference => "inference",
+            Self::Post => "post",
+            Self::Stream => "stream",
+        }
+    }
+}
+
+impl std::fmt::Display for PipelineStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Send with graceful shedding on backpressure.
 ///
 /// # Returns
@@ -277,12 +307,12 @@ pub enum SendOutcome {
 pub async fn send_with_shed<T>(
     tx: &tokio::sync::mpsc::Sender<T>,
     item: T,
-    stage: &str,
+    stage: PipelineStage,
 ) -> Result<SendOutcome, OrchestratorError> {
     match tx.try_send(item) {
         Ok(_) => Ok(SendOutcome::Queued),
         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-            tracing::warn!(stage = stage, "queue full, shedding request");
+            tracing::warn!(stage = %stage, "queue full, shedding request");
             Ok(SendOutcome::Shed)
         }
         Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
@@ -300,10 +330,10 @@ mod tests {
         // Channel of capacity 1 — fill it, then send again to trigger shed
         let (tx, _rx) = tokio::sync::mpsc::channel::<u32>(1);
         // Fill the channel
-        let first = send_with_shed(&tx, 1u32, "test").await.unwrap();
+        let first = send_with_shed(&tx, 1u32, PipelineStage::Rag).await.unwrap();
         assert_eq!(first, SendOutcome::Queued, "first send should be Queued");
         // Channel is now full — next send must be Shed
-        let second = send_with_shed(&tx, 2u32, "test").await.unwrap();
+        let second = send_with_shed(&tx, 2u32, PipelineStage::Rag).await.unwrap();
         assert_eq!(
             second,
             SendOutcome::Shed,
@@ -314,7 +344,7 @@ mod tests {
     #[tokio::test]
     async fn test_send_with_shed_returns_queued_when_space_available() {
         let (tx, _rx) = tokio::sync::mpsc::channel::<u32>(10);
-        let outcome = send_with_shed(&tx, 42u32, "test").await.unwrap();
+        let outcome = send_with_shed(&tx, 42u32, PipelineStage::Rag).await.unwrap();
         assert_eq!(outcome, SendOutcome::Queued);
     }
 
@@ -322,7 +352,7 @@ mod tests {
     async fn test_send_with_shed_returns_error_when_channel_closed() {
         let (tx, rx) = tokio::sync::mpsc::channel::<u32>(10);
         drop(rx);
-        let result = send_with_shed(&tx, 1u32, "test").await;
+        let result = send_with_shed(&tx, 1u32, PipelineStage::Rag).await;
         assert!(matches!(result, Err(OrchestratorError::ChannelClosed)));
     }
 

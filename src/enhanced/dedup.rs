@@ -57,10 +57,30 @@ pub struct DeduplicationToken {
     /// Unique identifier for this deduplication token.
     pub id: String,
     key: String,
+    completed: Arc<std::sync::atomic::AtomicBool>,
+    requests: Arc<DashMap<String, RequestState>>,
+}
+
+impl Drop for DeduplicationToken {
+    fn drop(&mut self) {
+        // Only act if this is the last clone and complete() was never called
+        if Arc::strong_count(&self.completed) == 1
+            && !self.completed.load(std::sync::atomic::Ordering::Acquire)
+        {
+            // Remove the in-progress entry so waiters don't hang.
+            // We can't notify them with a result, but at least they unblock
+            // on their next check_and_register() call.
+            self.requests.remove(&self.key);
+            tracing::warn!(
+                key = %self.key,
+                "DeduplicationToken dropped without complete() — in-progress entry removed"
+            );
+        }
+    }
 }
 
 /// Deduplicator state
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 enum RequestState {
     InProgress {
         started_at: SystemTime,
@@ -156,6 +176,8 @@ impl Deduplicator {
         let token = DeduplicationToken {
             id: Uuid::new_v4().to_string(),
             key: key.to_string(),
+            completed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            requests: Arc::clone(&self.requests),
         };
 
         debug!(key = key, token_id = %token.id, "new request registered");
@@ -179,6 +201,7 @@ impl Deduplicator {
 
     /// Mark request as completed
     pub async fn complete(&self, token: DeduplicationToken, result: String) {
+        token.completed.store(true, std::sync::atomic::Ordering::Release);
         if let Some(mut entry) = self.requests.get_mut(&token.key) {
             if let RequestState::InProgress { waiter_tx, .. } = entry.value() {
                 let _ = waiter_tx.send(result.clone());
@@ -403,6 +426,32 @@ mod tests {
         // Check waiter got result
         let result = wait_task.await.unwrap();
         assert_eq!(result, Some("result".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_removes_expired_entries() {
+        let dedup = Deduplicator::new(Duration::from_millis(50)); // very short TTL
+
+        // Register and complete a request
+        let result = dedup.check_and_register("test-key").await;
+        if let DeduplicationResult::New(token) = result {
+            dedup.complete(token, "done".to_string()).await;
+        }
+
+        // Verify it's cached
+        match dedup.check_and_register("test-key").await {
+            DeduplicationResult::Cached(_) => {} // expected
+            other => panic!("expected Cached, got {:?}", other),
+        }
+
+        // Wait for TTL to expire
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Now it should be treated as new
+        match dedup.check_and_register("test-key").await {
+            DeduplicationResult::New(_) => {} // expected
+            other => panic!("expected New after expiry, got {:?}", other),
+        }
     }
 
     #[test]

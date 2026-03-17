@@ -429,8 +429,10 @@ fn run_wizard(args: CliArgs) -> ResolvedConfig {
                 if !key.is_empty() {
                     // Safety: called before the Tokio runtime starts (single-threaded)
                     env::set_var("ANTHROPIC_API_KEY", &key);
+                    // Security note: API keys are stored in plaintext in orchestrator.env.
+                    // For production use, consider using the OS keychain or a secrets manager.
                     save_env_value("ANTHROPIC_API_KEY", &key);
-                    println!("  ✓ Key saved.");
+                    println!("  ✓ Key saved to orchestrator.env (plaintext — keep this file private).");
                 }
             } else if is_interactive {
                 println!("  ✓ Anthropic key already saved — skipping.");
@@ -450,8 +452,10 @@ fn run_wizard(args: CliArgs) -> ResolvedConfig {
                 if !key.is_empty() {
                     // Safety: called before the Tokio runtime starts (single-threaded)
                     env::set_var("OPENAI_API_KEY", &key);
+                    // Security note: API keys are stored in plaintext in orchestrator.env.
+                    // For production use, consider using the OS keychain or a secrets manager.
                     save_env_value("OPENAI_API_KEY", &key);
-                    println!("  ✓ Key saved.");
+                    println!("  ✓ Key saved to orchestrator.env (plaintext — keep this file private).");
                 }
             } else if is_interactive {
                 println!("  ✓ OpenAI key already saved — skipping.");
@@ -861,13 +865,18 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
         }
     });
 
+    // Extract the pipeline output receiver.  In web mode the collector task inside
+    // start_server owns it; in no-web mode the REPL gets it directly.
+    let output_rx_raw = handles.output_rx.lock().await.take();
+
     let repl_tx = handles.input_tx.clone();
-    let repl_output_rx = handles.output_rx;
-    let repl_handle = tokio::spawn(async move {
-        run_repl(repl_tx, repl_output_rx).await;
-    });
 
     if cfg.no_web {
+        let repl_output_rx =
+            tokio::sync::Mutex::new(output_rx_raw);
+        let repl_handle = tokio::spawn(async move {
+            run_repl(repl_tx, repl_output_rx).await;
+        });
         tokio::select! {
             _ = repl_handle => {}
             _ = shutdown_rx => {
@@ -877,7 +886,17 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
     } else {
         #[cfg(feature = "web-api")]
         {
+            // REPL runs without output_rx — it will print the disabled message
+            // and return immediately, which is fine since the web API is the
+            // primary interface.
+            let repl_output_rx =
+                tokio::sync::Mutex::new(None::<tokio::sync::mpsc::Receiver<PostOutput>>);
+            let repl_handle = tokio::spawn(async move {
+                run_repl(repl_tx, repl_output_rx).await;
+            });
+
             let pipeline_tx = handles.input_tx.clone();
+            let output_rx = output_rx_raw.expect("output_rx must be present");
             let config = ServerConfig {
                 host: cfg.host.clone(),
                 port: cfg.port,
@@ -885,7 +904,7 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
             };
             tracing::info!(addr = %format!("{}:{}", cfg.host, cfg.port), "Starting web API");
             tokio::select! {
-                result = start_server(config, pipeline_tx) => {
+                result = start_server(config, pipeline_tx, output_rx) => {
                     if let Err(e) = result {
                         tracing::error!(error = %e, "Web API server error");
                         std::process::exit(1);
@@ -904,6 +923,11 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
                 "Warning: built without 'web-api' feature — web server disabled.\n\
                  Rebuild with: cargo build --features web-api"
             );
+            let repl_output_rx =
+                tokio::sync::Mutex::new(output_rx_raw);
+            let repl_handle = tokio::spawn(async move {
+                run_repl(repl_tx, repl_output_rx).await;
+            });
             tokio::select! {
                 _ = repl_handle => {}
                 _ = shutdown_rx => {

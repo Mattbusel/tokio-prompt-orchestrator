@@ -249,6 +249,29 @@ impl CircuitBreaker {
         successes as f64 / state.recent_results.len() as f64
     }
 
+    /// Returns `true` if the circuit is currently closed (normal operation).
+    ///
+    /// This is a best-effort synchronous read — use `status()` for authoritative state.
+    pub fn is_closed_sync(&self) -> bool {
+        self.state.try_read()
+            .map(|s| matches!(s.status, CircuitStatus::Closed))
+            .unwrap_or(false)
+    }
+
+    /// Returns `true` if the circuit is currently open (rejecting requests).
+    pub fn is_open_sync(&self) -> bool {
+        self.state.try_read()
+            .map(|s| matches!(s.status, CircuitStatus::Open))
+            .unwrap_or(false)
+    }
+
+    /// Returns `true` if the circuit is in half-open state (testing recovery).
+    pub fn is_half_open_sync(&self) -> bool {
+        self.state.try_read()
+            .map(|s| matches!(s.status, CircuitStatus::HalfOpen))
+            .unwrap_or(false)
+    }
+
     /// Get current circuit status
     pub async fn status(&self) -> CircuitStatus {
         self.state.read().await.status.clone()
@@ -401,6 +424,25 @@ mod tests {
                 state.recent_results
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_circuit_breaker_half_open_failure_reopens() {
+        let cb = CircuitBreaker::new(1, 0.8, Duration::from_millis(10));
+
+        // Trip the circuit
+        let _ = cb.call(|| async { Err::<(), &str>("fail") }).await;
+
+        // Wait for timeout
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // Should be half-open now — a failure here should re-open
+        let result = cb.call(|| async { Err::<(), &str>("fail again") }).await;
+        assert!(result.is_err());
+
+        // Should be open again
+        let result = cb.call(|| async { Ok::<(), &str>(()) }).await;
+        assert!(matches!(result, Err(CircuitBreakerError::Open)));
     }
 
     #[tokio::test]

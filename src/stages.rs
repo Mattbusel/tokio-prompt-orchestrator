@@ -32,8 +32,19 @@
 //! - Stream output: 256
 
 use crate::{
-    config::PipelineConfig, enhanced::CircuitBreaker, metrics, send_with_shed, AssembleOutput,
-    InferenceOutput, ModelWorker, PostOutput, PromptRequest, RagOutput, SendOutcome, SessionId,
+    config::PipelineConfig,
+    enhanced::CircuitBreaker,
+    metrics,
+    send_with_shed,
+    AssembleOutput,
+    InferenceOutput,
+    ModelWorker,
+    PipelineStage,
+    PostOutput,
+    PromptRequest,
+    RagOutput,
+    SendOutcome,
+    SessionId,
 };
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -327,7 +338,7 @@ async fn rag_stage(mut rx: mpsc::Receiver<PromptRequest>, tx: mpsc::Sender<RagOu
         Span::current().record("duration_ms", elapsed.as_millis() as u64);
         Span::current().record("outcome", "ok");
 
-        match send_with_shed(&tx, output, "rag").await {
+        match send_with_shed(&tx, output, PipelineStage::Rag).await {
             Ok(SendOutcome::Queued) => {}
             Ok(SendOutcome::Shed) => {
                 tracing::trace!(
@@ -402,7 +413,7 @@ async fn assemble_stage(mut rx: mpsc::Receiver<RagOutput>, tx: mpsc::Sender<Asse
         Span::current().record("duration_ms", elapsed.as_millis() as u64);
         Span::current().record("outcome", "ok");
 
-        match send_with_shed(&tx, output, "assemble").await {
+        match send_with_shed(&tx, output, PipelineStage::Assemble).await {
             Ok(SendOutcome::Queued) => {}
             Ok(SendOutcome::Shed) => {
                 tracing::trace!(
@@ -488,7 +499,7 @@ async fn inference_stage(
                     tokens,
                 };
 
-                match send_with_shed(&tx, output, "inference").await {
+                match send_with_shed(&tx, output, PipelineStage::Inference).await {
                     Ok(SendOutcome::Queued) => {}
                     Ok(SendOutcome::Shed) => {
                         tracing::trace!(
@@ -594,7 +605,7 @@ async fn post_stage(mut rx: mpsc::Receiver<InferenceOutput>, tx: mpsc::Sender<Po
         Span::current().record("duration_ms", elapsed.as_millis() as u64);
         Span::current().record("outcome", "ok");
 
-        match send_with_shed(&tx, output, "post").await {
+        match send_with_shed(&tx, output, PipelineStage::Post).await {
             Ok(SendOutcome::Queued) => {}
             Ok(SendOutcome::Shed) => {
                 tracing::trace!(
@@ -820,7 +831,7 @@ async fn rag_stage_tracked(
         Span::current().record("duration_ms", elapsed.as_millis() as u64);
         Span::current().record("outcome", "ok");
 
-        match send_with_shed(&tx, output, "rag").await {
+        match send_with_shed(&tx, output, PipelineStage::Rag).await {
             Ok(SendOutcome::Queued) => {}
             Ok(SendOutcome::Shed) => {
                 tracing::trace!(
@@ -915,7 +926,7 @@ async fn inference_stage_with_intelligence(
                     tokens,
                 };
 
-                match send_with_shed(&tx, output, "inference").await {
+                match send_with_shed(&tx, output, PipelineStage::Inference).await {
                     Ok(SendOutcome::Queued) => {}
                     Ok(SendOutcome::Shed) => {
                         tracing::trace!(

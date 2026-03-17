@@ -214,6 +214,7 @@ const WS_RATE_LIMIT_PER_MIN: u32 = 60;
 pub async fn start_server(
     config: ServerConfig,
     pipeline_tx: mpsc::Sender<PromptRequest>,
+    mut output_rx: mpsc::Receiver<crate::PostOutput>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr = format!("{}:{}", config.host, config.port);
 
@@ -241,7 +242,7 @@ pub async fn start_server(
             CorsLayer::new().allow_origin(AllowOrigin::list(allowed_vec))
         }
         _ => {
-            debug!("ALLOWED_ORIGINS not set — CORS wildcard enabled (fine for local use)");
+            warn!("ALLOWED_ORIGINS not set — CORS is open to all origins. Set ALLOWED_ORIGINS=http://localhost:PORT for production.");
             CorsLayer::new().allow_origin(AllowOrigin::any())
         }
     };
@@ -255,6 +256,17 @@ pub async fn start_server(
         tracker,
         config: config.clone(),
         api_key,
+    });
+
+    // Collector task: receives pipeline output and writes results into the tracker.
+    let collector_state = state.clone();
+    tokio::spawn(async move {
+        while let Some(output) = output_rx.recv().await {
+            if let Some(mut tracked) = collector_state.tracker.status.get_mut(&output.request_id) {
+                tracked.status = RequestStatus::Completed;
+                tracked.result = Some(output.text);
+            }
+        }
     });
 
     let app = Router::new()
@@ -383,7 +395,15 @@ async fn auth_middleware(
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|token| token == expected_key)
+        .map(|token| {
+            // Constant-time comparison to prevent timing attacks
+            let token_bytes = token.as_bytes();
+            let expected_bytes = expected_key.as_bytes();
+            if token_bytes.len() != expected_bytes.len() {
+                return false;
+            }
+            token_bytes.iter().zip(expected_bytes.iter()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
+        })
         .unwrap_or(false);
 
     if token_valid {
@@ -550,6 +570,19 @@ async fn sse_stream_handler(
         .await
         .map_err(|_| AppError::PipelineClosed)?;
 
+    // Register request in tracker so collector can write the result.
+    state.tracker.status.insert(
+        request_id.clone(),
+        TrackedRequest {
+            status: RequestStatus::Processing,
+            result: None,
+            error: None,
+        },
+    );
+
+    let tracker = state.tracker.clone();
+    let timeout_secs = state.config.timeout_seconds;
+    let request_id_for_done = request_id.clone();
     let token_stream = stream::once(async move {
         Ok::<_, std::convert::Infallible>(
             Event::default()
@@ -557,12 +590,35 @@ async fn sse_stream_handler(
                 .data(serde_json::json!({"request_id": request_id}).to_string()),
         )
     })
-    .chain(stream::iter(vec![
-        Ok(Event::default().event("token").data("Response")),
-        Ok(Event::default().event("token").data(" from")),
-        Ok(Event::default().event("token").data(" pipeline")),
-        Ok(Event::default().event("done").data("[DONE]")),
-    ]));
+    .chain(stream::once(async move {
+        let request_id = request_id_for_done;
+        let sse_timeout = Duration::from_secs(timeout_secs);
+        let sse_start = std::time::Instant::now();
+        let result_text = loop {
+            if let Some(tracked) = tracker.status.get(&request_id) {
+                match tracked.status {
+                    RequestStatus::Completed => {
+                        break tracked.result.clone().unwrap_or_default();
+                    }
+                    RequestStatus::Failed => {
+                        break format!(
+                            "[error] {}",
+                            tracked.error.clone().unwrap_or_else(|| "unknown error".to_string())
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            if sse_start.elapsed() > sse_timeout {
+                break "[error] Request timed out".to_string();
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+
+        Ok::<_, std::convert::Infallible>(
+            Event::default().event("done").data(result_text),
+        )
+    }));
 
     Ok(Sse::new(token_stream).keep_alive(KeepAlive::default()))
 }
@@ -626,6 +682,14 @@ async fn websocket_stream(mut socket: WebSocket, state: Arc<AppState>) {
                         };
 
                         let request_id = Uuid::new_v4().to_string();
+                        state.tracker.status.insert(
+                            request_id.clone(),
+                            TrackedRequest {
+                                status: RequestStatus::Processing,
+                                result: None,
+                                error: None,
+                            },
+                        );
                         let processing_msg = serde_json::json!({
                             "request_id": &request_id,
                             "status": "processing"
@@ -645,12 +709,32 @@ async fn websocket_stream(mut socket: WebSocket, state: Arc<AppState>) {
                         };
 
                         if state.pipeline_tx.send(prompt_req).await.is_ok() {
-                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            // Poll tracker until Completed/Failed or timeout.
+                            let ws_timeout = Duration::from_secs(state.config.timeout_seconds);
+                            let ws_start = std::time::Instant::now();
+                            let (ws_status, ws_result, ws_error) = loop {
+                                if let Some(tracked) = state.tracker.status.get(&request_id) {
+                                    match tracked.status {
+                                        RequestStatus::Completed => {
+                                            break ("completed", tracked.result.clone(), None);
+                                        }
+                                        RequestStatus::Failed => {
+                                            break ("failed", None, tracked.error.clone());
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                if ws_start.elapsed() > ws_timeout {
+                                    break ("timeout", None, Some("Request timed out".to_string()));
+                                }
+                                tokio::time::sleep(Duration::from_millis(100)).await;
+                            };
 
                             let result_msg = serde_json::json!({
                                 "request_id": &request_id,
-                                "status": "completed",
-                                "result": "Response from pipeline"
+                                "status": ws_status,
+                                "result": ws_result,
+                                "error": ws_error,
                             }).to_string();
 
                             if socket.send(Message::Text(result_msg)).await.is_err() {
@@ -721,8 +805,15 @@ struct StreamPromptRequest {
 }
 
 #[cfg(feature = "web-api")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct TokenChunk {
+    pub text: String,
+    pub finish_reason: Option<String>,
+    pub index: usize,
+}
+
+#[cfg(feature = "web-api")]
 async fn token_stream_ws(mut socket: WebSocket, state: Arc<AppState>) {
-    use crate::worker::TokenChunk;
 
     info!("Token-stream WebSocket client connected");
 
@@ -1072,6 +1163,7 @@ impl Default for ServerConfig {
 pub async fn start_server(
     _config: ServerConfig,
     _pipeline_tx: tokio::sync::mpsc::Sender<crate::PromptRequest>,
+    _output_rx: tokio::sync::mpsc::Receiver<crate::PostOutput>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Err("Web API requires 'web-api' feature".into())
 }

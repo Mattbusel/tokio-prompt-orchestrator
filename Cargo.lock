@@ -3633,6 +3633,7 @@ dependencies = [
  "dashmap",
  "futures",
  "governor",
+ "lazy_static",
  "nonzero_ext",
  "notify",
  "opentelemetry",

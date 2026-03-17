@@ -145,6 +145,7 @@ impl SemanticDedup {
     }
 
     pub fn lookup(&self, prompt: &str) -> Result<Option<SimilarityMatch>, SemanticDedupError> {
+        // NOTE: Uses lexical substring matching, NOT semantic embeddings. Results are approximate.
         let embedding = Self::embed(prompt, self.config.embedding_dim);
         let guard = self
             .index

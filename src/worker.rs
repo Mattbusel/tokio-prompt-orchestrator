@@ -60,7 +60,10 @@ fn warn_if_low_remaining(headers: &reqwest::header::HeaderMap, provider: &str) {
 pub trait ModelWorker: Send + Sync {
     /// Perform inference on the given prompt.
     ///
-    /// Returns the complete response split into word-level tokens.
+    /// Returns tokens as a vector of strings.
+    /// For streaming implementations, this should be the final token set.
+    ///
+    /// An empty token vector is valid but callers should treat it as an empty response.
     async fn infer(&self, prompt: &str) -> Result<Vec<String>, OrchestratorError>;
 
     /// Stream inference tokens as they arrive from the provider.
@@ -73,6 +76,51 @@ pub trait ModelWorker: Send + Sync {
         let stream = futures::stream::iter(tokens.into_iter().map(Ok));
         Ok(Box::pin(stream))
     }
+}
+
+/// Stream tokens from any [`ModelWorker`].
+///
+/// Spawns inference in a background task and returns a [`tokio::sync::mpsc::Receiver`].
+/// Tokens arrive one at a time; the channel closes when inference completes or errors.
+///
+/// The default channel capacity is 64. For workers that return many tokens you may
+/// want a larger buffer, but 64 is sufficient for typical LLM token-by-token delivery.
+///
+/// # Example
+/// ```no_run
+/// # use std::sync::Arc;
+/// # use tokio_prompt_orchestrator::{worker::{EchoWorker, ModelWorker}, worker::stream_worker};
+/// # tokio_test::block_on(async {
+/// let worker: Arc<dyn ModelWorker> = Arc::new(EchoWorker::new());
+/// let mut rx = stream_worker(worker, "hello world".to_string());
+/// while let Some(result) = rx.recv().await {
+///     match result {
+///         Ok(token) => print!("{token}"),
+///         Err(e) => eprintln!("error: {e}"),
+///     }
+/// }
+/// # });
+/// ```
+pub fn stream_worker(
+    worker: Arc<dyn ModelWorker>,
+    prompt: String,
+) -> tokio::sync::mpsc::Receiver<Result<String, OrchestratorError>> {
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    tokio::spawn(async move {
+        match worker.infer(&prompt).await {
+            Ok(tokens) => {
+                for token in tokens {
+                    if tx.send(Ok(token)).await.is_err() {
+                        break;
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = tx.send(Err(e)).await;
+            }
+        }
+    });
+    rx
 }
 
 // ============================================================================
@@ -113,7 +161,7 @@ impl ModelWorker for EchoWorker {
         tokio::time::sleep(tokio::time::Duration::from_millis(self.delay_ms)).await;
 
         // Echo back the prompt as tokens
-        let tokens: Vec<String> = prompt.split_whitespace().map(|s| s.to_string()).collect();
+        let tokens: Vec<String> = prompt.split_whitespace().map(str::to_string).collect();
 
         Ok(tokens)
     }
@@ -926,14 +974,11 @@ impl ModelWorker for VllmWorker {
             OrchestratorError::Inference(format!("Failed to parse response: {}", e))
         })?;
 
-        if api_response.text.is_empty() {
-            return Err(OrchestratorError::Inference(
-                "Empty response from vLLM".to_string(),
-            ));
-        }
-
         // Split response into tokens
-        let tokens: Vec<String> = api_response.text[0]
+        let tokens: Vec<String> = api_response
+            .text
+            .get(0)
+            .ok_or_else(|| OrchestratorError::Inference("Empty response from vLLM".to_string()))?
             .split_whitespace()
             .map(|s| s.to_string())
             .collect();
