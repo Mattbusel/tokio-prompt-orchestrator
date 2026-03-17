@@ -486,19 +486,17 @@ impl AnthropicWorker {
 #[async_trait]
 impl ModelWorker for AnthropicWorker {
     async fn infer(&self, prompt: &str) -> Result<Vec<String>, OrchestratorError> {
-        // Format prompt with Claude's expected format
-        let formatted_prompt = format!("\n\nHuman: {}\n\nAssistant:", prompt);
-
-        let request = AnthropicRequest {
-            model: self.model.clone(),
-            prompt: formatted_prompt,
-            max_tokens_to_sample: self.max_tokens,
-            temperature: self.temperature,
-        };
+        // Use the Messages API (same as infer_stream)
+        let request = serde_json::json!({
+            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
+            "messages": [{"role": "user", "content": prompt}]
+        });
 
         let response = self
             .client
-            .post(format!("{}/complete", self.base_url))
+            .post(format!("{}/messages", self.base_url))
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("Content-Type", "application/json")
@@ -529,13 +527,34 @@ impl ModelWorker for AnthropicWorker {
             )));
         }
 
-        let api_response: AnthropicResponse = response.json().await.map_err(|e| {
+        // Parse Messages API response: {"content": [{"type": "text", "text": "..."}]}
+        #[derive(Deserialize)]
+        struct MessagesResponse {
+            content: Vec<ContentBlock>,
+        }
+        #[derive(Deserialize)]
+        struct ContentBlock {
+            #[serde(rename = "type")]
+            block_type: String,
+            #[serde(default)]
+            text: String,
+        }
+
+        let api_response: MessagesResponse = response.json().await.map_err(|e| {
             OrchestratorError::Inference(format!("Failed to parse response: {}", e))
         })?;
 
+        // Collect text from all text content blocks
+        let full_text: String = api_response
+            .content
+            .into_iter()
+            .filter(|b| b.block_type == "text")
+            .map(|b| b.text)
+            .collect::<Vec<_>>()
+            .join("");
+
         // Split response into tokens
-        let tokens: Vec<String> = api_response
-            .completion
+        let tokens: Vec<String> = full_text
             .split_whitespace()
             .map(|s| s.to_string())
             .collect();
