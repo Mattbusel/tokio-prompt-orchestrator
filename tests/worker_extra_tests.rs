@@ -838,14 +838,12 @@ async fn test_anthropic_infer_whitespace_only_response_returns_empty_tokens() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/messages"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({
-                "id": "msg_01", "type": "message", "role": "assistant",
-                "content": [{"type": "text", "text": "   \t  \n  "}],
-                "model": "claude-instant-1-2", "stop_reason": "end_turn",
-                "usage": {"input_tokens": 5, "output_tokens": 1}
-            })),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "msg_01", "type": "message", "role": "assistant",
+            "content": [{"type": "text", "text": "   \t  \n  "}],
+            "model": "claude-instant-1-2", "stop_reason": "end_turn",
+            "usage": {"input_tokens": 5, "output_tokens": 1}
+        })))
         .mount(&server)
         .await;
 

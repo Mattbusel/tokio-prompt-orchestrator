@@ -204,7 +204,8 @@ fn parse_args() -> Result<CliArgs, String> {
             }
             "--no-web" => no_web = true,
             "--reset" => reset = true,
-            flag @ ("--provider" | "--model" | "--port" | "--host" | "--log-level" | "--max-spend") => {
+            flag @ ("--provider" | "--model" | "--port" | "--host" | "--log-level"
+            | "--max-spend") => {
                 i += 1;
                 if i >= args.len() {
                     return Err(format!("{flag} requires a value"));
@@ -221,10 +222,10 @@ fn parse_args() -> Result<CliArgs, String> {
                     "--host" => host = val,
                     "--log-level" => log_level = val,
                     "--max-spend" => {
-                        max_spend = Some(
-                            val.parse::<f64>()
-                                .map_err(|_| format!("--max-spend must be a number, got: {val}"))?,
-                        );
+                        max_spend =
+                            Some(val.parse::<f64>().map_err(|_| {
+                                format!("--max-spend must be a number, got: {val}")
+                            })?);
                     }
                     _ => {}
                 }
