@@ -394,4 +394,38 @@ log_format = "pretty"
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ConfigError::Parse { .. }));
     }
+
+    /// Smoke-test that `pipeline.example.toml` (the file shown in the README
+    /// and QUICKSTART) parses and validates without error.
+    ///
+    /// If this test fails it means either the example drifted from the schema
+    /// or `deny_unknown_fields` caught a typo in the example.
+    #[test]
+    fn test_pipeline_example_toml_is_valid() {
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
+        let path = std::path::Path::new(&manifest_dir).join("pipeline.example.toml");
+        if !path.exists() {
+            // Skip in environments where the example isn't present (e.g. published crate)
+            return;
+        }
+        let result = load_from_file(&path);
+        assert!(
+            result.is_ok(),
+            "pipeline.example.toml must parse and validate cleanly: {:?}",
+            result.unwrap_err()
+        );
+        let config = result.unwrap();
+        assert_eq!(config.pipeline.name, "production");
+        assert_eq!(config.stages.inference.worker, crate::config::WorkerKind::OpenAi);
+    }
+
+    /// Round-trip: serialise a parsed config back to TOML, then re-parse it.
+    /// Ensures `Serialize` + `Deserialize` are consistent with each other.
+    #[test]
+    fn test_config_serialise_deserialise_roundtrip() {
+        let config = load_from_str(VALID_TOML, "roundtrip").expect("test: initial parse");
+        let serialised = toml::to_string(&config).expect("test: serialise");
+        let config2 = load_from_str(&serialised, "roundtrip-2").expect("test: re-parse");
+        assert_eq!(config, config2, "round-trip must be lossless");
+    }
 }
