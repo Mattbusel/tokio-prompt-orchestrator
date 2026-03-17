@@ -55,13 +55,13 @@ fn openai_success_body() -> serde_json::Value {
 
 fn anthropic_success_body() -> serde_json::Value {
     json!({
-        "id": "msg_01test",
+        "id": "msg_01",
         "type": "message",
         "role": "assistant",
         "content": [{"type": "text", "text": "hello world response"}],
         "model": "claude-instant-1-2",
         "stop_reason": "end_turn",
-        "usage": {"input_tokens": 10, "output_tokens": 3}
+        "usage": {"input_tokens": 5, "output_tokens": 3}
     })
 }
 
@@ -220,7 +220,7 @@ async fn test_openai_infer_multiple_sequential_requests_succeed() {
 async fn test_anthropic_infer_http_429_returns_inference_error() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/complete"))
+        .and(path("/messages"))
         .respond_with(
             ResponseTemplate::new(429)
                 .set_body_json(json!({"error": {"type": "rate_limit_error"}})),
@@ -248,7 +248,7 @@ async fn test_anthropic_infer_http_429_returns_inference_error() {
 async fn test_anthropic_infer_timeout_returns_inference_error() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/complete"))
+        .and(path("/messages"))
         .respond_with(
             ResponseTemplate::new(200)
                 .set_body_json(anthropic_success_body())
@@ -287,7 +287,7 @@ async fn test_anthropic_infer_timeout_returns_inference_error() {
 async fn test_anthropic_infer_http_401_returns_inference_error() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/complete"))
+        .and(path("/messages"))
         .respond_with(
             ResponseTemplate::new(401)
                 .set_body_json(json!({"error": {"message": "Invalid x-api-key"}})),
@@ -333,7 +333,7 @@ fn test_anthropic_worker_empty_api_key_succeeds_construction() {
 async fn test_anthropic_infer_multiple_sequential_requests_succeed() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/complete"))
+        .and(path("/messages"))
         .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_success_body()))
         .expect(3)
         .mount(&server)
@@ -736,7 +736,7 @@ async fn test_openai_infer_http_503_returns_inference_error() {
 async fn test_anthropic_infer_http_503_returns_inference_error() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/complete"))
+        .and(path("/messages"))
         .respond_with(ResponseTemplate::new(503).set_body_string("service temporarily unavailable"))
         .mount(&server)
         .await;
@@ -837,9 +837,14 @@ async fn test_openai_infer_whitespace_only_response_returns_empty_tokens() {
 async fn test_anthropic_infer_whitespace_only_response_returns_empty_tokens() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/complete"))
+        .and(path("/messages"))
         .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"completion": "   \t  \n  "})),
+            ResponseTemplate::new(200).set_body_json(json!({
+                "id": "msg_01", "type": "message", "role": "assistant",
+                "content": [{"type": "text", "text": "   \t  \n  "}],
+                "model": "claude-instant-1-2", "stop_reason": "end_turn",
+                "usage": {"input_tokens": 5, "output_tokens": 1}
+            })),
         )
         .mount(&server)
         .await;
