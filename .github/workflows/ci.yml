@@ -51,6 +51,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build
 
+  publish-dry-run:
+    name: Publish dry-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo publish --dry-run
+        run: cargo publish --dry-run
+
   bench:
     name: Benchmark Regression
     runs-on: ubuntu-latest
