@@ -387,21 +387,6 @@ impl ModelWorker for OpenAiWorker {
 // Anthropic Worker
 // ============================================================================
 
-/// Anthropic API request payload
-#[derive(Debug, Serialize)]
-struct AnthropicRequest {
-    model: String,
-    prompt: String,
-    max_tokens_to_sample: u32,
-    temperature: f32,
-}
-
-/// Anthropic API response
-#[derive(Debug, Deserialize)]
-struct AnthropicResponse {
-    completion: String,
-}
-
 /// Anthropic Claude API worker
 ///
 /// Requires ANTHROPIC_API_KEY environment variable.
@@ -1113,7 +1098,16 @@ mod tests {
     }
 
     fn anthropic_success_body() -> serde_json::Value {
-        serde_json::json!({"completion": "hello world response"})
+        // Messages API format: {"content": [{"type": "text", "text": "..."}]}
+        serde_json::json!({
+            "id": "msg_test",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "hello world response"}],
+            "model": "claude-3-5-sonnet-20241022",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 3}
+        })
     }
 
     fn llamacpp_success_body() -> serde_json::Value {
@@ -1439,7 +1433,7 @@ mod tests {
     async fn test_anthropic_infer_success_returns_tokens() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/complete"))
+            .and(path("/messages"))
             .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_success_body()))
             .mount(&server)
             .await;
@@ -1456,7 +1450,7 @@ mod tests {
     async fn test_anthropic_infer_http_500_returns_inference_error() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/complete"))
+            .and(path("/messages"))
             .respond_with(ResponseTemplate::new(500).set_body_string("error"))
             .mount(&server)
             .await;
@@ -1479,7 +1473,7 @@ mod tests {
     async fn test_anthropic_infer_invalid_json_returns_inference_error() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/complete"))
+            .and(path("/messages"))
             .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
             .mount(&server)
             .await;
@@ -1495,7 +1489,7 @@ mod tests {
     async fn test_anthropic_infer_sends_api_key_header() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/complete"))
+            .and(path("/messages"))
             .and(header("x-api-key", "test-key-anthropic"))
             .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_success_body()))
             .mount(&server)
@@ -1516,7 +1510,7 @@ mod tests {
     async fn test_anthropic_infer_sends_version_header() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/complete"))
+            .and(path("/messages"))
             .and(header("anthropic-version", "2023-06-01"))
             .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_success_body()))
             .mount(&server)
@@ -1537,7 +1531,7 @@ mod tests {
     async fn test_anthropic_infer_sends_correct_model_in_request_body() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/complete"))
+            .and(path("/messages"))
             .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_success_body()))
             .mount(&server)
             .await;
@@ -1558,7 +1552,7 @@ mod tests {
     async fn test_anthropic_with_max_tokens_sends_correct_value() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/complete"))
+            .and(path("/messages"))
             .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_success_body()))
             .mount(&server)
             .await;
@@ -1584,7 +1578,7 @@ mod tests {
     async fn test_anthropic_infer_formats_prompt_with_human_and_assistant_prefix() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/complete"))
+            .and(path("/messages"))
             .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_success_body()))
             .mount(&server)
             .await;
