@@ -22,18 +22,8 @@ use std::env;
 use std::io::{self, Write as _};
 use std::sync::Arc;
 use tokio_prompt_orchestrator::{
-    config::loader::load_from_file,
-    metrics,
-    spawn_pipeline,
-    spawn_pipeline_with_config,
-    AnthropicWorker,
-    EchoWorker,
-    LlamaCppWorker,
-    ModelWorker,
-    OpenAiWorker,
-    PostOutput,
-    PromptRequest,
-    SessionId,
+    metrics, spawn_pipeline, AnthropicWorker, EchoWorker, LlamaCppWorker, ModelWorker,
+    OpenAiWorker, PostOutput, PromptRequest, SessionId,
 };
 
 #[cfg(feature = "web-api")]
@@ -131,10 +121,10 @@ struct CliArgs {
     port: u16,
     host: String,
     log_level: String,
+    /// Maximum USD spend before the session is terminated. `None` = unlimited.
+    max_spend: Option<f64>,
     no_web: bool,
     reset: bool,
-    /// Path to a `pipeline.toml` declarative config file.
-    config_path: Option<std::path::PathBuf>,
 }
 
 fn default_model(provider: &str) -> &'static str {
@@ -165,7 +155,7 @@ OPTIONS:
     --port     <N>                             HTTP port     (default: 8080)
     --host     <addr>                          Bind address  (default: 127.0.0.1)
     --log-level <trace|debug|info|warn|error>  Log verbosity (default: info)
-    --config   <path>                          Load pipeline.toml (overrides wizard defaults)
+    --max-spend <dollars>                      Kill session when spend reaches this USD cap
     --no-web                                   Disable web API
     --reset                                    Re-run setup wizard
     --help, -h                                 Print this help
@@ -197,9 +187,9 @@ fn parse_args() -> Result<CliArgs, String> {
     let mut port: u16 = 8080;
     let mut host = "127.0.0.1".to_string();
     let mut log_level = "info".to_string();
+    let mut max_spend: Option<f64> = None;
     let mut no_web = false;
     let mut reset = false;
-    let mut config_path: Option<std::path::PathBuf> = None;
 
     let mut i = 1usize;
     while i < args.len() {
@@ -214,7 +204,7 @@ fn parse_args() -> Result<CliArgs, String> {
             }
             "--no-web" => no_web = true,
             "--reset" => reset = true,
-            flag @ ("--provider" | "--model" | "--port" | "--host" | "--log-level" | "--config") => {
+            flag @ ("--provider" | "--model" | "--port" | "--host" | "--log-level" | "--max-spend") => {
                 i += 1;
                 if i >= args.len() {
                     return Err(format!("{flag} requires a value"));
@@ -230,7 +220,12 @@ fn parse_args() -> Result<CliArgs, String> {
                     }
                     "--host" => host = val,
                     "--log-level" => log_level = val,
-                    "--config" => config_path = Some(std::path::PathBuf::from(val)),
+                    "--max-spend" => {
+                        max_spend = Some(
+                            val.parse::<f64>()
+                                .map_err(|_| format!("--max-spend must be a number, got: {val}"))?,
+                        );
+                    }
                     _ => {}
                 }
             }
@@ -245,9 +240,9 @@ fn parse_args() -> Result<CliArgs, String> {
         port,
         host,
         log_level,
+        max_spend,
         no_web,
         reset,
-        config_path,
     })
 }
 
@@ -261,9 +256,9 @@ struct ResolvedConfig {
     port: u16,
     host: String,
     log_level: String,
+    /// Optional USD spending cap for this session.
+    max_spend: Option<f64>,
     no_web: bool,
-    /// Path to a declarative `pipeline.toml`, if `--config` was supplied.
-    config_path: Option<std::path::PathBuf>,
 }
 
 fn run_wizard(args: CliArgs) -> ResolvedConfig {
@@ -363,8 +358,8 @@ fn run_wizard(args: CliArgs) -> ResolvedConfig {
                     port: args.port,
                     host: args.host,
                     log_level: args.log_level,
+                    max_spend: args.max_spend,
                     no_web: args.no_web,
-                    config_path: args.config_path,
                 };
             }
         }
@@ -519,8 +514,8 @@ fn run_wizard(args: CliArgs) -> ResolvedConfig {
         port,
         host: args.host,
         log_level: args.log_level,
+        max_spend: args.max_spend,
         no_web,
-        config_path: args.config_path,
     }
 }
 
@@ -555,6 +550,9 @@ fn print_banner(cfg: &ResolvedConfig) {
     println!("║  Web API  : {:<38}║", web_status);
     println!("║  Auth     : {:<38}║", auth_status);
     println!("║  Log level: {:<38}║", cfg.log_level);
+    if let Some(cap) = cfg.max_spend {
+        println!("║  Budget cap: ${:<37}║", format!("{cap:.2}"));
+    }
 
     if !cfg.no_web {
         let base = format!("http://{}:{}", cfg.host, cfg.port);
@@ -831,21 +829,27 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
 
     tracing::info!(provider = %cfg.provider, model = %cfg.model, "Worker ready");
 
-    let handles = if let Some(ref path) = cfg.config_path {
-        match load_from_file(path) {
-            Ok(pipeline_cfg) => {
-                tracing::info!(path = %path.display(), "Loaded declarative pipeline config");
-                spawn_pipeline_with_config(worker, &pipeline_cfg)
-            }
-            Err(e) => {
-                eprintln!("\n  ✗ Failed to load --config {}: {e}\n", path.display());
-                std::process::exit(1);
-            }
-        }
-    } else {
-        spawn_pipeline(worker)
-    };
+    let handles = spawn_pipeline(worker);
     tracing::info!("Pipeline stages spawned");
+
+    // ── Budget enforcement task ─────────────────────────────────────────────
+    // If `--max-spend` was given, poll the Prometheus `inference_cost_total`
+    // counter every 10 seconds and exit when the cap is reached.
+    if let Some(cap) = cfg.max_spend {
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                let spent = crate::metrics::total_inference_cost_usd();
+                if spent >= cap {
+                    eprintln!(
+                        "\n  ✗ Budget cap of ${cap:.2} reached (spent ${spent:.4}). Shutting down.\n"
+                    );
+                    std::process::exit(2);
+                }
+                tracing::debug!(spent = spent, cap = cap, "budget check ok");
+            }
+        });
+    }
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
@@ -971,8 +975,8 @@ mod tests {
             port: 8080,
             host: "127.0.0.1".to_string(),
             log_level: "info".to_string(),
+            max_spend: None,
             no_web: false,
-            config_path: None,
         };
         assert!(build_worker(&cfg).is_ok());
     }
@@ -991,8 +995,8 @@ mod tests {
             port: 8080,
             host: "127.0.0.1".to_string(),
             log_level: "info".to_string(),
+            max_spend: None,
             no_web: false,
-            config_path: None,
         };
         let err = build_worker(&cfg).err().unwrap();
         assert!(err.contains("OpenAI API key"));
@@ -1010,8 +1014,8 @@ mod tests {
             port: 8080,
             host: "127.0.0.1".to_string(),
             log_level: "info".to_string(),
+            max_spend: None,
             no_web: false,
-            config_path: None,
         };
         let err = build_worker(&cfg).err().unwrap();
         assert!(err.contains("Anthropic API key"));
@@ -1026,8 +1030,8 @@ mod tests {
             port: 8080,
             host: "127.0.0.1".to_string(),
             log_level: "info".to_string(),
+            max_spend: None,
             no_web: false,
-            config_path: None,
         };
         let err = build_worker(&cfg).err().unwrap();
         assert!(err.contains("Unknown provider"));
@@ -1042,8 +1046,8 @@ mod tests {
             port: 8080,
             host: "127.0.0.1".to_string(),
             log_level: "info".to_string(),
+            max_spend: None,
             no_web: false,
-            config_path: None,
         };
         assert!(build_worker(&cfg).is_ok());
     }

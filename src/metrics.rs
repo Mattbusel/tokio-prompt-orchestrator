@@ -19,8 +19,8 @@
 
 use crate::OrchestratorError;
 use prometheus::{
-    core::Collector, CounterVec, Encoder, HistogramOpts, HistogramVec, IntGaugeVec, Opts, Registry,
-    TextEncoder,
+    core::Collector, Counter, CounterVec, Encoder, HistogramOpts, HistogramVec, IntGaugeVec, Opts,
+    Registry, TextEncoder,
 };
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -43,6 +43,8 @@ pub struct Metrics {
     pub stage_duration: HistogramVec,
     /// Current queue depth per stage.
     pub queue_depth: IntGaugeVec,
+    /// Cumulative USD cost of all inference calls.
+    pub inference_cost_usd: prometheus::Counter,
 }
 
 static METRICS: OnceLock<Metrics> = OnceLock::new();
@@ -120,6 +122,15 @@ pub fn init_metrics() -> Result<(), OrchestratorError> {
         .register(Box::new(queue_depth.clone()))
         .map_err(|e| OrchestratorError::Other(format!("metrics registration failed: {e}")))?;
 
+    let inference_cost_usd = Counter::with_opts(Opts::new(
+        "orchestrator_inference_cost_usd_total",
+        "Cumulative USD cost of all inference calls",
+    ))
+    .map_err(|e| OrchestratorError::Other(format!("metrics init failed: {e}")))?;
+    registry
+        .register(Box::new(inference_cost_usd.clone()))
+        .map_err(|e| OrchestratorError::Other(format!("metrics registration failed: {e}")))?;
+
     // If another thread raced us, the first one wins  -  both initializations
     // produce identical metric descriptors, so neither outcome is incorrect.
     let _ = METRICS.set(Metrics {
@@ -129,6 +140,7 @@ pub fn init_metrics() -> Result<(), OrchestratorError> {
         errors_total,
         stage_duration,
         queue_depth,
+        inference_cost_usd,
     });
 
     Ok(())
@@ -227,6 +239,30 @@ pub fn set_queue_depth(stage: &str, depth: i64) {
 /// # Panics
 ///
 /// This function never panics.
+/// Record USD cost for an inference call.
+///
+/// No-op if metrics have not been initialised.
+///
+/// # Panics
+///
+/// This function never panics.
+pub fn record_inference_cost(usd: f64) {
+    if let Some(m) = metrics() {
+        m.inference_cost_usd.inc_by(usd);
+    }
+}
+
+/// Return the total USD spent on inference calls this session.
+///
+/// Returns `0.0` if metrics have not been initialised.
+///
+/// # Panics
+///
+/// This function never panics.
+pub fn total_inference_cost_usd() -> f64 {
+    metrics().map_or(0.0, |m| m.inference_cost_usd.get())
+}
+
 pub fn gather() -> Vec<prometheus::proto::MetricFamily> {
     metrics().map_or_else(Vec::new, |m| m.registry.gather())
 }
@@ -373,6 +409,13 @@ mod tests {
             .register(Box::new(queue_depth.clone()))
             .expect("register must succeed in tests");
 
+        let inference_cost_usd =
+            Counter::with_opts(Opts::new("orchestrator_inference_cost_usd_total", "test"))
+                .expect("Counter construction must succeed in tests");
+        registry
+            .register(Box::new(inference_cost_usd.clone()))
+            .expect("register must succeed in tests");
+
         Metrics {
             registry,
             requests_total,
@@ -380,6 +423,7 @@ mod tests {
             errors_total,
             stage_duration,
             queue_depth,
+            inference_cost_usd,
         }
     }
 

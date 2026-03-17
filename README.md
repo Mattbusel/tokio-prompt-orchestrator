@@ -8,7 +8,7 @@
 
 Multi-core, Tokio-native orchestration for LLM inference pipelines. Built with backpressure, circuit breakers, deduplication, and an autonomous self-improving control loop.
 
-We ran 24 Claude Code agents simultaneously on a single RTX 4070. They wrote this codebase in one night (58,000+ lines of Rust, 1,491 tests, zero panics) while the orchestrator they were building managed their own inference traffic. The dedup layer collapsed redundant context across agents into single inference calls, cutting total API consumption to 26% of expected usage across all 24 agents over 90 minutes.
+We ran 24 Claude Code agents simultaneously on a single RTX 4070. They wrote this codebase in one night (129,000+ lines of Rust, 1,491 tests, zero panics) while the orchestrator they were building managed their own inference traffic. The dedup layer collapsed redundant context across agents into single inference calls, cutting total API consumption to 26% of expected usage across all 24 agents over 90 minutes.
 
 Anthropic's documented ceiling is 16 concurrent agents. We hit 24. The bottleneck was the API rate limit, not the orchestrator.
 
@@ -18,7 +18,7 @@ Anthropic's documented ceiling is 16 concurrent agents. We hit 24. The bottlenec
 
 ## Windows .exe — No Install Required
 
-Download **[orchestrator.exe](https://github.com/Mattbusel/tokio-prompt-orchestrator/releases/tag/v0.1.0)** from the releases page and double-click it. No Rust, no dependencies, nothing to install.
+Download **[orchestrator.exe](https://github.com/Mattbusel/tokio-prompt-orchestrator/releases/tag/v0.1.0)** from the releases page and double-click it. No Rust, no dependencies, nothing to install. The binary is **7.6 MB** — the entire orchestrator, all features included. It runs on any Windows machine, including low-end hardware, VMs, and air-gapped environments.
 
 ### Step 1 — Get an API key (one-time, ~2 minutes)
 
@@ -305,7 +305,7 @@ LOG_FORMAT="json"                     # Structured logs for Datadog/Loki
 ## Numbers
 
 ```
-Lines of code       165,000+
+Lines of code       129,442
 Tests               1,491 passing, 0 failing
 Benchmarks          30+ criterion, all within budget
 Dedup savings       66.7% collapse rate in live demo
@@ -330,7 +330,7 @@ Channel send        <1us p99
 | Dedup collapse | 67% in production | Not built-in | Not built-in |
 | Self-improving loop | Live, autonomous | Not built-in | Not built-in |
 | Concurrency | Tokio async, zero-copy | Python GIL | Python GIL |
-| Binary size | 7.6 MB (LTO) | 100s of MB deps | 100s of MB deps |
+| Binary size | **7.6 MB** (single .exe, no runtime) | 100s of MB deps | 100s of MB deps |
 
 Use LangChain if you need to prototype quickly in Python. Use this if you need predictable latency, zero panics, and autonomous optimization at scale.
 

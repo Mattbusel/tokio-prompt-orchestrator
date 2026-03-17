@@ -16,9 +16,41 @@
 
 use crate::OrchestratorError;
 use async_trait::async_trait;
-use futures::stream::BoxStream;
+use futures::Stream;
 use serde::{Deserialize, Serialize};
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
+
+/// Boxed streaming token iterator returned by `infer_stream`.
+pub type TokenStream =
+    Pin<Box<dyn Stream<Item = Result<String, OrchestratorError>> + Send + 'static>>;
+
+/// Parse a `Retry-After` header value (seconds integer or HTTP-date) into
+/// a `Duration`.  Returns `None` if the header is absent or unparseable.
+fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let value = headers.get("retry-after")?.to_str().ok()?;
+    // Prefer integer seconds; fall back to a fixed 60 s if it's an HTTP-date.
+    let secs: u64 = value.trim().parse().unwrap_or(60);
+    Some(Duration::from_secs(secs))
+}
+
+/// Read `x-ratelimit-remaining-requests` and log a warning when low.
+fn warn_if_low_remaining(headers: &reqwest::header::HeaderMap, provider: &str) {
+    if let Some(val) = headers
+        .get("x-ratelimit-remaining-requests")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        if val < 10 {
+            tracing::warn!(
+                provider = provider,
+                remaining_requests = val,
+                "approaching provider rate limit"
+            );
+        }
+    }
+}
 
 /// Trait for model inference workers
 ///
@@ -26,41 +58,20 @@ use std::time::Duration;
 /// The trait is object-safe to allow dynamic dispatch via Arc<dyn ModelWorker>.
 #[async_trait]
 pub trait ModelWorker: Send + Sync {
-    /// Perform inference on the given prompt
+    /// Perform inference on the given prompt.
     ///
-    /// Returns tokens as a vector of strings.
+    /// Returns the complete response split into word-level tokens.
     async fn infer(&self, prompt: &str) -> Result<Vec<String>, OrchestratorError>;
-}
 
-// ============================================================================
-// Streaming Worker Trait
-// ============================================================================
-
-/// A single token chunk from a streaming inference response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TokenChunk {
-    /// The text content of this chunk.
-    pub text: String,
-    /// Reason the stream finished, if applicable (e.g. `"stop"`, `"length"`).
-    pub finish_reason: Option<String>,
-    /// Zero-based index of the choice/stream this chunk belongs to.
-    pub index: usize,
-}
-
-/// Trait for model workers that support token-level streaming.
-///
-/// Implementations stream `TokenChunk` values via an SSE or chunked-transfer
-/// HTTP response from the provider.
-pub trait StreamingModelWorker: Send + Sync {
-    /// Start a streaming inference request and return a live token stream.
-    fn infer_stream(
-        &self,
-        prompt: String,
-    ) -> BoxStream<'static, Result<TokenChunk, OrchestratorError>>;
-
-    /// Returns `true` if this worker supports streaming (default: `true`).
-    fn supports_streaming(&self) -> bool {
-        true
+    /// Stream inference tokens as they arrive from the provider.
+    ///
+    /// The default implementation calls `infer` and yields each token in order,
+    /// so workers that don't override this still work with streaming consumers.
+    /// Override for true SSE/chunked streaming from the provider.
+    async fn infer_stream(&self, prompt: &str) -> Result<TokenStream, OrchestratorError> {
+        let tokens = self.infer(prompt).await?;
+        let stream = futures::stream::iter(tokens.into_iter().map(Ok));
+        Ok(Box::pin(stream))
     }
 }
 
@@ -249,6 +260,16 @@ impl ModelWorker for OpenAiWorker {
             .await
             .map_err(|e| OrchestratorError::Inference(format!("OpenAI request failed: {}", e)))?;
 
+        warn_if_low_remaining(response.headers(), "openai");
+
+        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry_after_secs =
+                parse_retry_after(response.headers()).unwrap_or(Duration::from_secs(60));
+            return Err(OrchestratorError::RateLimited {
+                retry_after_secs: retry_after_secs.as_secs(),
+            });
+        }
+
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_else(|_| String::new());
@@ -282,6 +303,83 @@ impl ModelWorker for OpenAiWorker {
             .collect();
 
         Ok(tokens)
+    }
+
+    async fn infer_stream(&self, prompt: &str) -> Result<TokenStream, OrchestratorError> {
+        use futures::StreamExt;
+
+        // OpenAI SSE streaming: POST with stream=true, parse `data: {...}` chunks.
+        #[derive(Deserialize)]
+        struct StreamChunk {
+            choices: Vec<StreamChoice>,
+        }
+        #[derive(Deserialize)]
+        struct StreamChoice {
+            delta: StreamDelta,
+        }
+        #[derive(Deserialize)]
+        struct StreamDelta {
+            #[serde(default)]
+            content: Option<String>,
+        }
+
+        let request = serde_json::json!({
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
+            "stream": true
+        });
+
+        let response = self
+            .client
+            .post(format!("{}/chat/completions", self.base_url))
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .timeout(self.timeout)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| OrchestratorError::Inference(format!("OpenAI stream request failed: {e}")))?;
+
+        warn_if_low_remaining(response.headers(), "openai");
+
+        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry_after_secs =
+                parse_retry_after(response.headers()).unwrap_or(Duration::from_secs(60));
+            return Err(OrchestratorError::RateLimited { retry_after_secs: retry_after_secs.as_secs() });
+        }
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(OrchestratorError::Inference(format!("OpenAI stream error {status}: {body}")));
+        }
+
+        // Convert the raw byte stream into SSE token chunks.
+        let byte_stream = response.bytes_stream();
+        let token_stream = byte_stream.filter_map(|chunk| async move {
+            let bytes = chunk.ok()?;
+            let text = std::str::from_utf8(&bytes).ok()?;
+            // SSE lines look like: `data: {...}` or `data: [DONE]`
+            let mut tokens = Vec::new();
+            for line in text.lines() {
+                let Some(json_str) = line.strip_prefix("data: ") else { continue };
+                if json_str.trim() == "[DONE]" { break; }
+                if let Ok(chunk) = serde_json::from_str::<StreamChunk>(json_str) {
+                    for choice in chunk.choices {
+                        if let Some(content) = choice.delta.content {
+                            if !content.is_empty() {
+                                tokens.push(content);
+                            }
+                        }
+                    }
+                }
+            }
+            if tokens.is_empty() { None } else { Some(Ok(tokens.join(""))) }
+        });
+
+        Ok(Box::pin(token_stream))
     }
 }
 
@@ -412,6 +510,16 @@ impl ModelWorker for AnthropicWorker {
                 OrchestratorError::Inference(format!("Anthropic request failed: {}", e))
             })?;
 
+        warn_if_low_remaining(response.headers(), "anthropic");
+
+        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry_after_secs =
+                parse_retry_after(response.headers()).unwrap_or(Duration::from_secs(60));
+            return Err(OrchestratorError::RateLimited {
+                retry_after_secs: retry_after_secs.as_secs(),
+            });
+        }
+
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_else(|_| String::new());
@@ -433,6 +541,98 @@ impl ModelWorker for AnthropicWorker {
             .collect();
 
         Ok(tokens)
+    }
+
+    async fn infer_stream(&self, prompt: &str) -> Result<TokenStream, OrchestratorError> {
+        use futures::StreamExt;
+
+        // Anthropic Messages API with stream=true emits SSE events.
+        // We parse `content_block_delta` events to extract text deltas.
+        #[derive(Deserialize)]
+        struct StreamEvent {
+            #[serde(rename = "type")]
+            event_type: String,
+            delta: Option<StreamDelta>,
+        }
+        #[derive(Deserialize)]
+        struct StreamDelta {
+            #[serde(rename = "type")]
+            delta_type: String,
+            #[serde(default)]
+            text: String,
+        }
+
+        let request = serde_json::json!({
+            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
+            "stream": true,
+            "messages": [{"role": "user", "content": prompt}]
+        });
+
+        let response = self
+            .client
+            .post(format!("{}/messages", self.base_url))
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("Content-Type", "application/json")
+            .timeout(self.timeout)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| {
+                OrchestratorError::Inference(format!("Anthropic stream request failed: {e}"))
+            })?;
+
+        warn_if_low_remaining(response.headers(), "anthropic");
+
+        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry_after_secs =
+                parse_retry_after(response.headers()).unwrap_or(Duration::from_secs(60));
+            return Err(OrchestratorError::RateLimited {
+                retry_after_secs: retry_after_secs.as_secs(),
+            });
+        }
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(OrchestratorError::Inference(format!(
+                "Anthropic stream error {status}: {body}"
+            )));
+        }
+
+        let byte_stream = response.bytes_stream();
+        let token_stream = byte_stream.filter_map(|chunk| async move {
+            let bytes = chunk.ok()?;
+            let text = std::str::from_utf8(&bytes).ok()?;
+            let mut out = String::new();
+            for line in text.lines() {
+                // SSE data lines: `data: {...}`
+                let Some(json_str) = line.strip_prefix("data: ") else {
+                    continue;
+                };
+                if json_str.trim() == "[DONE]" {
+                    break;
+                }
+                if let Ok(event) = serde_json::from_str::<StreamEvent>(json_str) {
+                    if event.event_type == "content_block_delta" {
+                        if let Some(delta) = event.delta {
+                            if delta.delta_type == "text_delta" && !delta.text.is_empty() {
+                                out.push_str(&delta.text);
+                            }
+                        }
+                    }
+                }
+            }
+            if out.is_empty() {
+                None
+            } else {
+                Some(Ok(out))
+            }
+        });
+
+        Ok(Box::pin(token_stream))
     }
 }
 
@@ -725,273 +925,133 @@ impl ModelWorker for VllmWorker {
 }
 
 // ============================================================================
-// StreamingModelWorker implementations
+// Load-Balanced Worker
 // ============================================================================
 
-/// SSE delta event from the Anthropic streaming API.
-#[derive(Debug, Deserialize)]
-struct AnthropicSseDelta {
-    #[serde(rename = "type")]
-    delta_type: String,
-    text: Option<String>,
+/// Strategy for distributing requests across a pool of workers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadBalanceStrategy {
+    /// Rotate through workers in order.
+    RoundRobin,
+    /// Pick the worker with the lowest running request count.
+    LeastLoaded,
 }
 
-/// SSE event from the Anthropic streaming API.
-#[derive(Debug, Deserialize)]
-struct AnthropicSseEvent {
-    #[serde(rename = "type")]
-    event_type: String,
-    delta: Option<AnthropicSseDelta>,
-    #[serde(default)]
-    index: usize,
+/// A worker pool that distributes inference requests across multiple backends.
+///
+/// Wraps any number of `Arc<dyn ModelWorker>` instances and routes requests
+/// using a configurable [`LoadBalanceStrategy`].  All strategies are
+/// thread-safe; the pool is safe to share across Tokio tasks via `Arc`.
+///
+/// ## Example
+///
+/// ```no_run
+/// # use tokio_prompt_orchestrator::{AnthropicWorker, OpenAiWorker, OrchestratorError};
+/// use tokio_prompt_orchestrator::LoadBalancedWorker;
+/// use std::sync::Arc;
+///
+/// # fn example() -> Result<(), OrchestratorError> {
+/// let pool = LoadBalancedWorker::round_robin(vec![
+///     Arc::new(AnthropicWorker::new("claude-sonnet-4-6")?) as Arc<dyn tokio_prompt_orchestrator::ModelWorker>,
+///     Arc::new(OpenAiWorker::new("gpt-4o")?) as Arc<dyn tokio_prompt_orchestrator::ModelWorker>,
+/// ]);
+/// # Ok(()) }
+/// ```
+pub struct LoadBalancedWorker {
+    workers: Vec<Arc<dyn ModelWorker>>,
+    strategy: LoadBalanceStrategy,
+    /// Round-robin cursor (strategy = RoundRobin).
+    rr_counter: std::sync::atomic::AtomicUsize,
+    /// Per-worker in-flight request counts (strategy = LeastLoaded).
+    in_flight: Vec<std::sync::atomic::AtomicUsize>,
 }
 
-/// Anthropic Messages API request (streaming variant).
-#[derive(Debug, Serialize)]
-struct AnthropicStreamRequest {
-    model: String,
-    messages: Vec<AnthropicMessage>,
-    max_tokens: u32,
-    temperature: f32,
-    stream: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct AnthropicMessage {
-    role: String,
-    content: String,
-}
-
-impl StreamingModelWorker for AnthropicWorker {
-    fn infer_stream(
-        &self,
-        prompt: String,
-    ) -> BoxStream<'static, Result<TokenChunk, OrchestratorError>> {
-        Box::pin(anthropic_stream_impl(
-            self.client.clone(),
-            self.api_key.clone(),
-            self.base_url.clone(),
-            self.model.clone(),
-            self.max_tokens,
-            self.temperature,
-            self.timeout,
-            prompt,
-        ))
-    }
-}
-
-/// Build an Anthropic SSE token stream.
-#[allow(clippy::too_many_arguments)]
-fn anthropic_stream_impl(
-    client: reqwest::Client,
-    api_key: String,
-    base_url: String,
-    model: String,
-    max_tokens: u32,
-    temperature: f32,
-    timeout: std::time::Duration,
-    prompt: String,
-) -> impl futures::Stream<Item = Result<TokenChunk, OrchestratorError>> + Send + 'static {
-    async_stream::try_stream! {
-        let request_body = AnthropicStreamRequest {
-            model,
-            messages: vec![AnthropicMessage { role: "user".to_string(), content: prompt }],
-            max_tokens,
-            temperature,
-            stream: true,
-        };
-
-        let response = client
-            .post(format!("{}/messages", base_url))
-            .header("x-api-key", &api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("Content-Type", "application/json")
-            .timeout(timeout)
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| OrchestratorError::Inference(format!("Anthropic stream request failed: {e}")))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response.text().await.unwrap_or_else(|_| String::new());
-            Err(OrchestratorError::Inference(format!("Anthropic API error {status}: {error_text}")))?;
-            return;
+impl LoadBalancedWorker {
+    /// Create a round-robin pool.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `workers` is empty.
+    pub fn round_robin(workers: Vec<Arc<dyn ModelWorker>>) -> Self {
+        assert!(!workers.is_empty(), "worker pool must not be empty");
+        let n = workers.len();
+        Self {
+            workers,
+            strategy: LoadBalanceStrategy::RoundRobin,
+            rr_counter: std::sync::atomic::AtomicUsize::new(0),
+            in_flight: (0..n)
+                .map(|_| std::sync::atomic::AtomicUsize::new(0))
+                .collect(),
         }
+    }
 
-        let mut byte_stream = response.bytes_stream();
-        let mut buf = String::new();
-        let mut index: usize = 0;
+    /// Create a least-loaded pool.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `workers` is empty.
+    pub fn least_loaded(workers: Vec<Arc<dyn ModelWorker>>) -> Self {
+        assert!(!workers.is_empty(), "worker pool must not be empty");
+        let n = workers.len();
+        Self {
+            workers,
+            strategy: LoadBalanceStrategy::LeastLoaded,
+            rr_counter: std::sync::atomic::AtomicUsize::new(0),
+            in_flight: (0..n)
+                .map(|_| std::sync::atomic::AtomicUsize::new(0))
+                .collect(),
+        }
+    }
 
-        use futures::StreamExt as _;
-        while let Some(chunk) = byte_stream.next().await {
-            let chunk: bytes::Bytes = chunk.map_err(|e| OrchestratorError::Inference(format!("Stream read error: {e}")))?;
-            buf.push_str(&String::from_utf8_lossy(&chunk));
+    /// Return the number of workers in the pool.
+    pub fn len(&self) -> usize {
+        self.workers.len()
+    }
 
-            // Process complete SSE lines
-            while let Some(pos) = buf.find('\n') {
-                let line = buf[..pos].trim_end_matches('\r').to_string();
-                buf.drain(..=pos);
+    /// Return true if the pool is empty (should never be true after construction).
+    pub fn is_empty(&self) -> bool {
+        self.workers.is_empty()
+    }
 
-                if let Some(data) = line.strip_prefix("data: ") {
-                    if data == "[DONE]" {
-                        return;
-                    }
-                    if let Ok(event) = serde_json::from_str::<AnthropicSseEvent>(data) {
-                        if event.event_type == "content_block_delta" {
-                            if let Some(delta) = event.delta {
-                                if delta.delta_type == "text_delta" {
-                                    let text = delta.text.unwrap_or_default();
-                                    let finish_reason = None;
-                                    yield TokenChunk { text, finish_reason, index: event.index };
-                                    index += 1;
-                                }
-                            }
-                        } else if event.event_type == "message_stop" {
-                            yield TokenChunk {
-                                text: String::new(),
-                                finish_reason: Some("stop".to_string()),
-                                index,
-                            };
-                            return;
-                        }
-                    }
-                }
+    /// Pick the index of the worker to use for the next request.
+    fn pick(&self) -> usize {
+        match self.strategy {
+            LoadBalanceStrategy::RoundRobin => {
+                self.rr_counter
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    % self.workers.len()
             }
+            LoadBalanceStrategy::LeastLoaded => self
+                .in_flight
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, c)| c.load(std::sync::atomic::Ordering::Relaxed))
+                .map(|(i, _)| i)
+                .unwrap_or(0),
         }
     }
 }
 
-/// OpenAI SSE choice delta.
-#[derive(Debug, Deserialize)]
-struct OpenAiStreamDelta {
-    content: Option<String>,
-}
-
-/// OpenAI SSE choice.
-#[derive(Debug, Deserialize)]
-struct OpenAiStreamChoice {
-    delta: OpenAiStreamDelta,
-    finish_reason: Option<String>,
-    index: usize,
-}
-
-/// OpenAI SSE event.
-#[derive(Debug, Deserialize)]
-struct OpenAiStreamEvent {
-    choices: Vec<OpenAiStreamChoice>,
-}
-
-/// OpenAI Chat completions streaming request.
-#[derive(Debug, Serialize)]
-struct OpenAiChatStreamRequest {
-    model: String,
-    messages: Vec<OpenAiChatMessage>,
-    max_tokens: u32,
-    temperature: f32,
-    stream: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct OpenAiChatMessage {
-    role: String,
-    content: String,
-}
-
-impl StreamingModelWorker for OpenAiWorker {
-    fn infer_stream(
-        &self,
-        prompt: String,
-    ) -> BoxStream<'static, Result<TokenChunk, OrchestratorError>> {
-        let client = self.client.clone();
-        let api_key = self.api_key.clone();
-        let base_url = self.base_url.clone();
-        let model = self.model.clone();
-        let max_tokens = self.max_tokens;
-        let temperature = self.temperature;
-        let timeout = self.timeout;
-
-        Box::pin(openai_stream_impl(
-            client,
-            api_key,
-            base_url,
-            model,
-            max_tokens,
-            temperature,
-            timeout,
-            prompt,
-        ))
+#[async_trait]
+impl ModelWorker for LoadBalancedWorker {
+    async fn infer(&self, prompt: &str) -> Result<Vec<String>, OrchestratorError> {
+        let idx = self.pick();
+        self.in_flight[idx].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let result = self.workers[idx].infer(prompt).await;
+        self.in_flight[idx].fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        result
     }
-}
 
-#[allow(clippy::too_many_arguments)]
-fn openai_stream_impl(
-    client: reqwest::Client,
-    api_key: String,
-    base_url: String,
-    model: String,
-    max_tokens: u32,
-    temperature: f32,
-    timeout: std::time::Duration,
-    prompt: String,
-) -> impl futures::Stream<Item = Result<TokenChunk, OrchestratorError>> + Send + 'static {
-    async_stream::try_stream! {
-        let request_body = OpenAiChatStreamRequest {
-            model,
-            messages: vec![OpenAiChatMessage { role: "user".to_string(), content: prompt }],
-            max_tokens,
-            temperature,
-            stream: true,
-        };
-
-        let response = client
-            .post(format!("{}/chat/completions", base_url))
-            .header("Authorization", format!("Bearer {api_key}"))
-            .header("Content-Type", "application/json")
-            .timeout(timeout)
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| OrchestratorError::Inference(format!("OpenAI stream request failed: {e}")))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response.text().await.unwrap_or_else(|_| String::new());
-            Err(OrchestratorError::Inference(format!("OpenAI API error {status}: {error_text}")))?;
-            return;
-        }
-
-        let mut byte_stream = response.bytes_stream();
-        let mut buf = String::new();
-
-        use futures::StreamExt as _;
-        while let Some(chunk) = byte_stream.next().await {
-            let chunk: bytes::Bytes = chunk.map_err(|e| OrchestratorError::Inference(format!("Stream read error: {e}")))?;
-            buf.push_str(&String::from_utf8_lossy(&chunk));
-
-            while let Some(pos) = buf.find('\n') {
-                let line = buf[..pos].trim_end_matches('\r').to_string();
-                buf.drain(..=pos);
-
-                if let Some(data) = line.strip_prefix("data: ") {
-                    if data == "[DONE]" {
-                        return;
-                    }
-                    if let Ok(event) = serde_json::from_str::<OpenAiStreamEvent>(data) {
-                        if let Some(choice) = event.choices.first() {
-                            let text = choice.delta.content.clone().unwrap_or_default();
-                            let finish_reason = choice.finish_reason.clone();
-                            let index = choice.index;
-                            let done = finish_reason.is_some();
-                            yield TokenChunk { text, finish_reason, index };
-                            if done {
-                                return;
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    async fn infer_stream(&self, prompt: &str) -> Result<TokenStream, OrchestratorError> {
+        let idx = self.pick();
+        self.in_flight[idx].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let result = self.workers[idx].infer_stream(prompt).await;
+        // Note: we decrement after obtaining the stream handle.
+        // The stream itself runs outside the critical section intentionally —
+        // counting only the dispatch decision avoids holding a counter across
+        // the full streaming duration, which would bias LeastLoaded unfairly.
+        self.in_flight[idx].fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        result
     }
 }
 

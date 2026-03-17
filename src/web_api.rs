@@ -265,6 +265,7 @@ pub async fn start_server(
         .route("/api/v1/ws", get(websocket_handler))
         .route("/v1/stream", get(token_stream_ws_handler))
         .route("/api/v1/schema", get(schema_handler))
+        .route("/api/v1/pipeline/status", get(pipeline_status_handler))
         .route("/health", get(health_handler))
         .route("/metrics", get(metrics_handler))
         .layer(middleware::from_fn_with_state(
@@ -804,6 +805,44 @@ async fn token_stream_ws(mut socket: WebSocket, state: Arc<AppState>) {
 // ============================================================================
 // Utility Handlers
 // ============================================================================
+
+/// `GET /api/v1/pipeline/status`  -  Pipeline health and queue statistics.
+///
+/// Returns real-time metrics about the orchestrator:
+/// - `pending_requests`: requests currently tracked (queued or processing)
+/// - `pipeline_queue_capacity`: remaining capacity in the inbound pipeline channel
+/// - `version`: crate version
+/// - `status`: always `"ok"` while the server is up
+///
+/// # Panics
+///
+/// This function never panics.
+#[cfg(feature = "web-api")]
+async fn pipeline_status_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let pending = state
+        .tracker
+        .status
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.value().status,
+                RequestStatus::Pending | RequestStatus::Processing
+            )
+        })
+        .count();
+
+    let queue_capacity = state.pipeline_tx.capacity();
+    let queue_len = state.pipeline_tx.max_capacity() - queue_capacity;
+
+    Json(serde_json::json!({
+        "status": "ok",
+        "version": env!("CARGO_PKG_VERSION"),
+        "pending_requests": pending,
+        "pipeline_queue_len": queue_len,
+        "pipeline_queue_capacity": queue_capacity,
+        "pipeline_queue_max": state.pipeline_tx.max_capacity(),
+    }))
+}
 
 /// `GET /health`  -  Health check endpoint.
 ///

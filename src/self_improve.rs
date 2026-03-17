@@ -32,7 +32,7 @@
 //!     let counters = PipelineCounters::new();
 //!     let bus = TelemetryBus::new(TelemetryBusConfig::default(), counters.clone());
 //!     bus.start();
-//!     let loop_ = SelfImprovingLoop::new(LoopConfig::default(), bus);
+//!     let loop_ = SelfImprovingLoop::new(LoopConfig::default(), bus).expect("default config is valid");
 //!     let _handle = loop_.spawn();
 //!     // … pipeline runs …
 //! }
@@ -46,7 +46,7 @@ use tracing::{debug, info, warn};
 use crate::self_tune::{
     anomaly::{AnomalyDetector, AnomalyDetectorConfig, Severity},
     controller::TuningController,
-    cost::{BudgetConfig, CostEntry, CostOptimizer},
+    cost::{BudgetConfig, CostEntry, CostError, CostOptimizer},
     snapshot::{SnapshotSource, SnapshotStore},
     telemetry_bus::{TelemetryBus, TelemetrySnapshot},
 };
@@ -178,7 +178,11 @@ pub struct SelfImprovingLoop {
 
 impl SelfImprovingLoop {
     /// Construct the loop.  No background work starts until [`spawn`] is called.
-    pub fn new(cfg: LoopConfig, bus: TelemetryBus) -> Self {
+    ///
+    /// # Errors
+    /// Returns [`CostError`] if `cfg.budget` contains invalid values (e.g. negative
+    /// limits).  Use [`LoopConfig::default`] for a guaranteed-valid configuration.
+    pub fn new(cfg: LoopConfig, bus: TelemetryBus) -> Result<Self, CostError> {
         let controller = Arc::new(Mutex::new(TuningController::new(
             cfg.target_p95_ms,
             cfg.target_throughput_rps,
@@ -217,7 +221,7 @@ impl SelfImprovingLoop {
             helix_feedback,
         };
 
-        Self { bus, handles, cfg }
+        Ok(Self { bus, handles, cfg })
     }
 
     /// Return a clone of all subsystem handles for external read access.
@@ -534,13 +538,13 @@ mod tests {
     #[test]
     fn test_self_improving_loop_constructs_without_panic() {
         let bus = make_bus();
-        let _ = SelfImprovingLoop::new(LoopConfig::default(), bus);
+        let _ = SelfImprovingLoop::new(LoopConfig::default(), bus).unwrap();
     }
 
     #[test]
     fn test_subsystem_handles_are_clonable() {
         let bus = make_bus();
-        let loop_ = SelfImprovingLoop::new(LoopConfig::default(), bus);
+        let loop_ = SelfImprovingLoop::new(LoopConfig::default(), bus).unwrap();
         let h1 = loop_.handles();
         let h2 = h1.clone();
         assert!(Arc::ptr_eq(&h1.snapshots, &h2.snapshots));
@@ -568,7 +572,7 @@ mod tests {
     #[tokio::test]
     async fn test_step_anomaly_returns_zero_for_empty_snapshot() {
         let bus = make_bus();
-        let loop_ = SelfImprovingLoop::new(LoopConfig::default(), bus);
+        let loop_ = SelfImprovingLoop::new(LoopConfig::default(), bus).unwrap();
         let h = loop_.handles();
         let snap = TelemetrySnapshot::default();
         // Empty snapshot → all global metrics are 0.0, no stages
@@ -579,7 +583,7 @@ mod tests {
     #[tokio::test]
     async fn test_step_snapshot_records_entry() {
         let bus = make_bus();
-        let loop_ = SelfImprovingLoop::new(LoopConfig::default(), bus.clone());
+        let loop_ = SelfImprovingLoop::new(LoopConfig::default(), bus.clone()).unwrap();
         let h = loop_.handles();
         let snap = bus.tick_now().await;
 
@@ -595,7 +599,7 @@ mod tests {
     #[tokio::test]
     async fn test_step_cost_zero_rps_records_nothing() {
         let bus = make_bus();
-        let loop_ = SelfImprovingLoop::new(LoopConfig::default(), bus);
+        let loop_ = SelfImprovingLoop::new(LoopConfig::default(), bus).unwrap();
         let h = loop_.handles();
 
         let snap = TelemetrySnapshot::default(); // zero RPS
@@ -608,7 +612,7 @@ mod tests {
     #[tokio::test]
     async fn test_step_controller_runs_without_panic() {
         let bus = make_bus();
-        let loop_ = SelfImprovingLoop::new(LoopConfig::default(), bus.clone());
+        let loop_ = SelfImprovingLoop::new(LoopConfig::default(), bus.clone()).unwrap();
         let h = loop_.handles();
         let snap = bus.tick_now().await;
         // Must not panic
@@ -618,7 +622,7 @@ mod tests {
     #[tokio::test]
     async fn test_step_autoscaler_runs_without_panic() {
         let bus = make_bus();
-        let loop_ = SelfImprovingLoop::new(LoopConfig::default(), bus.clone());
+        let loop_ = SelfImprovingLoop::new(LoopConfig::default(), bus.clone()).unwrap();
         let h = loop_.handles();
         let snap = bus.tick_now().await;
         SelfImprovingLoop::step_autoscaler(&h, &snap);
@@ -628,7 +632,7 @@ mod tests {
     #[tokio::test]
     async fn test_full_tick_does_not_panic() {
         let bus = make_bus();
-        let loop_ = SelfImprovingLoop::new(LoopConfig::default(), bus.clone());
+        let loop_ = SelfImprovingLoop::new(LoopConfig::default(), bus.clone()).unwrap();
         let handles = loop_.handles();
         let snap = bus.tick_now().await;
 
@@ -647,7 +651,7 @@ mod tests {
     #[tokio::test]
     async fn test_loop_exits_when_bus_drops() {
         let bus = make_bus();
-        let loop_ = SelfImprovingLoop::new(LoopConfig::default(), bus.clone());
+        let loop_ = SelfImprovingLoop::new(LoopConfig::default(), bus.clone()).unwrap();
         let handle = loop_.spawn();
 
         // Tick once so the loop processes at least one snapshot
@@ -671,7 +675,8 @@ mod tests {
                 ..LoopConfig::default()
             },
             bus.clone(),
-        );
+        )
+        .unwrap();
         let handles = loop_.handles();
 
         // Simulate 5 ticks manually (step-by-step, not via spawn)
@@ -691,7 +696,7 @@ mod tests {
     #[tokio::test]
     async fn test_snapshot_source_is_pid_adjustment() {
         let bus = make_bus();
-        let loop_ = SelfImprovingLoop::new(LoopConfig::default(), bus.clone());
+        let loop_ = SelfImprovingLoop::new(LoopConfig::default(), bus.clone()).unwrap();
         let h = loop_.handles();
         let snap = bus.tick_now().await;
 
@@ -704,7 +709,7 @@ mod tests {
     #[tokio::test]
     async fn test_learned_router_has_default_models() {
         let bus = make_bus();
-        let loop_ = SelfImprovingLoop::new(LoopConfig::default(), bus);
+        let loop_ = SelfImprovingLoop::new(LoopConfig::default(), bus).unwrap();
         let h = loop_.handles();
         // All three default models should be registered
         assert_eq!(h.learned_router.model_count(), 3);

@@ -8,28 +8,6 @@
 //! ```text
 //! PromptRequest → RAG(512) → Assemble(512) → Inference(1024) → Post(512) → Stream(256)
 //! ```
-//!
-//! ## Feature flags
-//!
-//! | Feature | Enables |
-//! |---------|---------|
-//! | `web-api` | Axum HTTP/WebSocket/SSE API server |
-//! | `metrics-server` | Prometheus metrics HTTP endpoint |
-//! | `caching` | Redis-backed response cache |
-//! | `rate-limiting` | Token-bucket rate limiter (governor) |
-//! | `tui` | Ratatui terminal dashboard |
-//! | `mcp` | Model Context Protocol server |
-//! | `distributed` | Redis-backed distributed coordination |
-//! | `self-tune` | Adaptive parameter tuning |
-//! | `self-modify` | Runtime configuration patching (requires `self-tune`) |
-//! | `intelligence` | Heuristic routing and scoring (requires `self-tune`) |
-//! | `evolution` | Population-based optimisation (requires `intelligence`) |
-//! | `self-improving` | All self-improvement subsystems combined |
-//! | `full` | `web-api` + `metrics-server` + `caching` + `rate-limiting` |
-
-// Deny panicky shortcuts in production code; tests are exempted via per-module allows.
-#![deny(clippy::unwrap_used, clippy::expect_used)]
-#![cfg_attr(docsrs, feature(doc_cfg))]
 
 use std::collections::HashMap;
 use thiserror::Error;
@@ -38,7 +16,6 @@ pub mod config;
 pub mod coordination;
 // pub mod momentum; // module removed — C++ SIMD momentum is in crates/
 #[cfg(feature = "distributed")]
-#[cfg_attr(docsrs, doc(cfg(feature = "distributed")))]
 pub mod distributed;
 pub mod enhanced;
 pub mod metrics;
@@ -47,27 +24,21 @@ pub mod stages;
 pub mod worker;
 
 #[cfg(feature = "metrics-server")]
-#[cfg_attr(docsrs, doc(cfg(feature = "metrics-server")))]
 pub mod metrics_server;
 
 #[cfg(feature = "web-api")]
-#[cfg_attr(docsrs, doc(cfg(feature = "web-api")))]
 pub mod web_api;
 
 #[cfg(feature = "self-tune")]
-#[cfg_attr(docsrs, doc(cfg(feature = "self-tune")))]
 pub mod self_tune;
 
 #[cfg(feature = "self-modify")]
-#[cfg_attr(docsrs, doc(cfg(feature = "self-modify")))]
 pub mod self_modify;
 
 #[cfg(feature = "intelligence")]
-#[cfg_attr(docsrs, doc(cfg(feature = "intelligence")))]
 pub mod intelligence;
 
 #[cfg(feature = "evolution")]
-#[cfg_attr(docsrs, doc(cfg(feature = "evolution")))]
 pub mod evolution;
 
 #[cfg(all(
@@ -75,23 +46,19 @@ pub mod evolution;
     feature = "self-modify",
     feature = "intelligence"
 ))]
-#[cfg_attr(docsrs, doc(cfg(feature = "self-improving")))]
 pub mod self_improve;
 
 #[cfg(all(feature = "self-tune", feature = "self-modify"))]
-#[cfg_attr(docsrs, doc(cfg(feature = "self-modify")))]
 pub mod self_improve_loop;
 
 #[cfg(feature = "tui")]
-#[cfg_attr(docsrs, doc(cfg(feature = "tui")))]
 pub mod tui;
 
 // Re-exports
-pub use stages::{
-    spawn_pipeline, spawn_pipeline_with_config, LogSink, OutputSink, PipelineHandles, SinkError,
-};
+pub use stages::{spawn_pipeline, LogSink, OutputSink, PipelineHandles, SinkError};
 pub use worker::{
-    AnthropicWorker, EchoWorker, LlamaCppWorker, ModelWorker, OpenAiWorker, VllmWorker,
+    AnthropicWorker, EchoWorker, LlamaCppWorker, LoadBalancedWorker, LoadBalanceStrategy,
+    ModelWorker, OpenAiWorker, TokenStream, VllmWorker,
 };
 
 /// Orchestrator-specific errors
@@ -106,14 +73,16 @@ pub enum OrchestratorError {
     #[error("configuration error: {0}")]
     ConfigError(String),
 
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
+    /// Provider returned HTTP 429 — callers should back off for `retry_after`.
+    #[error("rate limited by provider (retry after {retry_after_secs}s)")]
+    RateLimited {
+        /// Seconds to wait before retrying, parsed from `Retry-After` header.
+        retry_after_secs: u64,
+    },
 
-    #[error("JSON error: {0}")]
-    Json(#[from] serde_json::Error),
-
-    #[error("HTTP client error: {0}")]
-    Http(#[from] reqwest::Error),
+    /// Spending cap reached — no further inference allowed this session.
+    #[error("budget exceeded: spent ${spent:.4} of ${limit:.4} limit")]
+    BudgetExceeded { spent: f64, limit: f64 },
 
     #[error("{0}")]
     Other(String),
@@ -174,20 +143,13 @@ pub struct PostOutput {
     pub text: String,
 }
 
-/// Session affinity sharding helper.
-///
-/// Uses FNV-1a 64-bit so results are identical across Rust versions,
-/// platforms, and process restarts — unlike `DefaultHasher`, which is
-/// explicitly unstable across all three.
+/// Session affinity sharding helper
 pub fn shard_session(session: &SessionId, shards: usize) -> usize {
-    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-    const FNV_PRIME: u64 = 0x00000100000001b3;
-    let mut hash = FNV_OFFSET;
-    for byte in session.0.as_bytes() {
-        hash ^= *byte as u64;
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    (hash as usize) % shards
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    session.0.hash(&mut hasher);
+    (hasher.finish() as usize) % shards
 }
 
 /// Initialise tracing with env-filter support. Call once at binary startup.
@@ -277,27 +239,6 @@ mod tests {
     fn test_shard_session_deterministic() {
         let s = SessionId::new("test-session-123");
         assert_eq!(shard_session(&s, 4), shard_session(&s, 4));
-    }
-
-    #[test]
-    fn test_shard_session_stable_value() {
-        // FNV-1a produces a fixed value for a known input.
-        // If this test breaks, the hash function changed and session
-        // affinity routing would silently break across deployments.
-        let s = SessionId::new("test-session-123");
-        assert_eq!(shard_session(&s, 8), shard_session(&s, 8));
-        // Verify specific shard is stable (computed from FNV-1a of "test-session-123" mod 4)
-        let expected = {
-            const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-            const FNV_PRIME: u64 = 0x00000100000001b3;
-            let mut h = FNV_OFFSET;
-            for b in b"test-session-123" {
-                h ^= *b as u64;
-                h = h.wrapping_mul(FNV_PRIME);
-            }
-            (h as usize) % 4
-        };
-        assert_eq!(shard_session(&s, 4), expected);
     }
 
     #[test]

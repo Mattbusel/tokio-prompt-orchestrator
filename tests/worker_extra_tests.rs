@@ -54,7 +54,15 @@ fn openai_success_body() -> serde_json::Value {
 }
 
 fn anthropic_success_body() -> serde_json::Value {
-    json!({"completion": "hello world response"})
+    json!({
+        "id": "msg_01test",
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "text", "text": "hello world response"}],
+        "model": "claude-instant-1-2",
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 10, "output_tokens": 3}
+    })
 }
 
 fn llamacpp_success_body() -> serde_json::Value {
@@ -87,13 +95,8 @@ async fn test_openai_infer_http_429_returns_inference_error() {
     let result = worker.infer("test").await;
     assert!(result.is_err(), "429 should return Err");
     match result.unwrap_err() {
-        OrchestratorError::Inference(msg) => {
-            assert!(
-                msg.contains("429"),
-                "Error should include status code 429, got: {msg}"
-            );
-        }
-        other => panic!("Expected Inference error, got: {other:?}"),
+        OrchestratorError::RateLimited { .. } => {}
+        other => panic!("Expected RateLimited error, got: {other:?}"),
     }
 }
 
@@ -232,13 +235,8 @@ async fn test_anthropic_infer_http_429_returns_inference_error() {
     let result = worker.infer("test").await;
     assert!(result.is_err(), "429 should return Err");
     match result.unwrap_err() {
-        OrchestratorError::Inference(msg) => {
-            assert!(
-                msg.contains("429"),
-                "Error should include status code 429, got: {msg}"
-            );
-        }
-        other => panic!("Expected Inference error, got: {other:?}"),
+        OrchestratorError::RateLimited { .. } => {}
+        other => panic!("Expected RateLimited error, got: {other:?}"),
     }
 }
 

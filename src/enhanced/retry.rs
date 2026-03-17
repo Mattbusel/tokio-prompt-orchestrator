@@ -23,6 +23,7 @@
 //! # }
 //! ```
 
+use crate::OrchestratorError;
 use std::time::Duration;
 use tracing::{debug, warn};
 
@@ -248,6 +249,71 @@ pub fn with_jitter(duration: Duration) -> Duration {
     use rand::Rng;
     let jitter = rand::thread_rng().gen_range(0..duration.as_millis() / 4);
     duration + Duration::from_millis(jitter as u64)
+}
+
+/// Execute an inference operation with retries, honouring `RateLimited` back-off.
+///
+/// Unlike `RetryPolicy::retry`, this variant:
+/// - Sleeps for exactly `retry_after_secs` when the provider says to back off.
+/// - Stops retrying on `BudgetExceeded` (non-transient).
+/// - Falls back to exponential backoff for all other errors.
+///
+/// ```no_run
+/// use std::time::Duration;
+/// use tokio_prompt_orchestrator::enhanced::retry::retry_inference;
+/// use tokio_prompt_orchestrator::{OrchestratorError, OpenAiWorker, ModelWorker};
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), OrchestratorError> {
+/// # let worker = OpenAiWorker::new("gpt-4o")?;
+/// let tokens = retry_inference(3, Duration::from_millis(200), || async {
+///     worker.infer("hello").await
+/// }).await?;
+/// # Ok(()) }
+/// ```
+pub async fn retry_inference<F, Fut>(
+    max_attempts: usize,
+    base_delay: Duration,
+    mut f: F,
+) -> Result<Vec<String>, OrchestratorError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<String>, OrchestratorError>>,
+{
+    let mut attempt = 0;
+
+    loop {
+        attempt += 1;
+        match f().await {
+            Ok(v) => return Ok(v),
+            Err(OrchestratorError::BudgetExceeded { spent, limit }) => {
+                // Non-transient — propagate immediately.
+                return Err(OrchestratorError::BudgetExceeded { spent, limit });
+            }
+            Err(OrchestratorError::RateLimited { retry_after_secs }) => {
+                if attempt >= max_attempts {
+                    return Err(OrchestratorError::RateLimited { retry_after_secs });
+                }
+                let wait = Duration::from_secs(retry_after_secs);
+                warn!(
+                    attempt,
+                    wait_secs = retry_after_secs,
+                    "rate limited — sleeping for Retry-After duration"
+                );
+                tokio::time::sleep(wait).await;
+            }
+            Err(e) => {
+                if attempt >= max_attempts {
+                    return Err(e);
+                }
+                // Exponential backoff for all other transient errors.
+                let delay_ms = (base_delay.as_millis() as f64 * 2_f64.powi(attempt as i32 - 1))
+                    .min(60_000.0) as u64;
+                let delay = with_jitter(Duration::from_millis(delay_ms));
+                warn!(attempt, delay_ms = delay.as_millis(), error = %e, "transient error — retrying");
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
 }
 
 #[cfg(test)]

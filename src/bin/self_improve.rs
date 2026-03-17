@@ -41,7 +41,8 @@ async fn main() {
         ..LoopConfig::default()
     };
 
-    let self_loop = SelfImprovingLoop::new(loop_cfg, bus.clone());
+    let self_loop = SelfImprovingLoop::new(loop_cfg, bus.clone())
+        .expect("LoopConfig is valid");
     let handles = self_loop.handles();
     let _loop_handle = self_loop.spawn();
 

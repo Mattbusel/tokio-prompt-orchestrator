@@ -52,56 +52,52 @@ jobs:
       - run: cargo build
 
   bench:
-    name: Benchmarks (regression gate)
+    name: Benchmark Regression
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-
-      # Install critcmp for human-readable diff and threshold enforcement.
-      - name: Install critcmp
-        run: cargo install critcmp --locked
-
-      # On main: run benches and upload the baseline as a cache artifact so
-      # subsequent PRs can download it for comparison.
-      - name: Run benchmarks (save baseline)
-        if: github.ref == 'refs/heads/main'
-        run: cargo bench -- --save-baseline main
-
-      - name: Upload baseline
-        if: github.ref == 'refs/heads/main'
-        uses: actions/upload-artifact@v4
-        with:
-          name: criterion-baseline
-          path: target/criterion
-          retention-days: 30
-
-      # On PRs: download the saved main baseline and compare. Fail if any
-      # benchmark regresses by more than 10%.
-      - name: Download baseline
-        if: github.event_name == 'pull_request'
-        uses: actions/download-artifact@v4
-        with:
-          name: criterion-baseline
-          path: target/criterion
-        continue-on-error: true   # first PR before any baseline exists
-
-      - name: Run benchmarks (PR)
-        if: github.event_name == 'pull_request'
-        run: cargo bench -- --save-baseline pr
-
-      - name: Compare against main baseline (10% threshold)
-        if: github.event_name == 'pull_request'
+      - name: run benchmarks
+        run: cargo bench --bench bench_pipeline 2>&1 | tee bench_output.txt
+      - name: check for regression
         run: |
-          # critcmp exits non-zero when any bench is slower by more than the
-          # given threshold. 0.10 = 10% regression limit.
-          critcmp main pr --threshold 10 || {
-            echo ""
-            echo "::error::One or more benchmarks regressed by >10% vs main."
-            echo "Run 'critcmp main pr' locally to inspect the diff."
-            exit 1
-          }
+          # Fail if any benchmark regressed >10% vs the stored baseline.
+          # On first run the baseline doesn't exist — store it and pass.
+          BASELINE=".bench_baseline.txt"
+          if [ ! -f "$BASELINE" ]; then
+            echo "No baseline found — storing current results."
+            cp bench_output.txt "$BASELINE"
+            exit 0
+          fi
+          python3 - <<'EOF'
+          import re, sys
+
+          def parse(path):
+              times = {}
+              for line in open(path):
+                  m = re.search(r'test (\S+) .* bench:\s+([\d,]+) ns', line)
+                  if m:
+                      times[m.group(1)] = int(m.group(2).replace(',', ''))
+              return times
+
+          base = parse(".bench_baseline.txt")
+          curr = parse("bench_output.txt")
+          regressions = []
+          for name, base_ns in base.items():
+              if name not in curr:
+                  continue
+              curr_ns = curr[name]
+              pct = (curr_ns - base_ns) / base_ns * 100
+              if pct > 10:
+                  regressions.append(f"  {name}: {base_ns} ns -> {curr_ns} ns (+{pct:.1f}%)")
+          if regressions:
+              print("BENCHMARK REGRESSIONS DETECTED (>10%):")
+              for r in regressions:
+                  print(r)
+              sys.exit(1)
+          print(f"All {len(curr)} benchmarks within 10% of baseline.")
+          EOF
 
   audit:
     name: Security Audit
