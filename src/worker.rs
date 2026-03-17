@@ -1571,7 +1571,8 @@ mod tests {
 
         let reqs = server.received_requests().await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
-        assert_eq!(body["max_tokens_to_sample"], 2048);
+        // Messages API uses `max_tokens` (not `max_tokens_to_sample` from the legacy Complete API)
+        assert_eq!(body["max_tokens"], 2048);
     }
 
     #[tokio::test]
@@ -1591,17 +1592,12 @@ mod tests {
 
         let reqs = server.received_requests().await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
-        let prompt = body["prompt"].as_str().unwrap();
+        // Messages API: prompt is in body["messages"][0]["content"]
+        let messages = body["messages"].as_array().unwrap();
+        assert!(!messages.is_empty(), "Messages array must not be empty");
+        let content = messages[0]["content"].as_str().unwrap();
         assert!(
-            prompt.contains("Human:"),
-            "Prompt should contain 'Human:' prefix"
-        );
-        assert!(
-            prompt.contains("Assistant:"),
-            "Prompt should contain 'Assistant:' marker"
-        );
-        assert!(
-            prompt.contains("my question"),
+            content.contains("my question"),
             "Prompt should include the original input"
         );
     }
