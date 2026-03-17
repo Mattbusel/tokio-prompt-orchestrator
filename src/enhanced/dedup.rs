@@ -435,7 +435,10 @@ mod tests {
         // Same prompt, different sessions → different keys.
         let k_alice = dedup_key("hello", &empty, Some("session-alice"));
         let k_bob = dedup_key("hello", &empty, Some("session-bob"));
-        assert_ne!(k_alice, k_bob, "different sessions must not share a dedup key");
+        assert_ne!(
+            k_alice, k_bob,
+            "different sessions must not share a dedup key"
+        );
 
         // Same prompt, same session → same key (deterministic).
         let k_alice2 = dedup_key("hello", &empty, Some("session-alice"));

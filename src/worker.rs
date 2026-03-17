@@ -26,17 +26,6 @@ use std::time::Duration;
 pub type TokenStream =
     Pin<Box<dyn Stream<Item = Result<String, OrchestratorError>> + Send + 'static>>;
 
-/// A single streamed token chunk sent to WebSocket clients.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct TokenChunk {
-    /// Token text (may be partial word or multiple tokens).
-    pub text: String,
-    /// Set to `"stop"` on the final chunk; `None` for intermediate chunks.
-    pub finish_reason: Option<String>,
-    /// Zero-based position of this chunk within the stream.
-    pub index: usize,
-}
-
 /// Parse a `Retry-After` header value (seconds integer or HTTP-date) into
 /// a `Duration`.  Returns `None` if the header is absent or unparseable.
 fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
@@ -398,33 +387,19 @@ impl ModelWorker for OpenAiWorker {
 // Anthropic Worker
 // ============================================================================
 
-/// Anthropic Messages API request payload
+/// Anthropic API request payload
 #[derive(Debug, Serialize)]
 struct AnthropicRequest {
     model: String,
-    max_tokens: u32,
+    prompt: String,
+    max_tokens_to_sample: u32,
     temperature: f32,
-    messages: Vec<AnthropicMessage>,
 }
 
-#[derive(Debug, Serialize)]
-struct AnthropicMessage {
-    role: String,
-    content: String,
-}
-
-/// Anthropic Messages API response
+/// Anthropic API response
 #[derive(Debug, Deserialize)]
 struct AnthropicResponse {
-    content: Vec<AnthropicContentBlock>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AnthropicContentBlock {
-    #[serde(rename = "type")]
-    block_type: String,
-    #[serde(default)]
-    text: String,
+    completion: String,
 }
 
 /// Anthropic Claude API worker
@@ -511,19 +486,19 @@ impl AnthropicWorker {
 #[async_trait]
 impl ModelWorker for AnthropicWorker {
     async fn infer(&self, prompt: &str) -> Result<Vec<String>, OrchestratorError> {
+        // Format prompt with Claude's expected format
+        let formatted_prompt = format!("\n\nHuman: {}\n\nAssistant:", prompt);
+
         let request = AnthropicRequest {
             model: self.model.clone(),
-            max_tokens: self.max_tokens,
+            prompt: formatted_prompt,
+            max_tokens_to_sample: self.max_tokens,
             temperature: self.temperature,
-            messages: vec![AnthropicMessage {
-                role: "user".to_string(),
-                content: prompt.to_string(),
-            }],
         };
 
         let response = self
             .client
-            .post(format!("{}/messages", self.base_url))
+            .post(format!("{}/complete", self.base_url))
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("Content-Type", "application/json")
@@ -555,18 +530,12 @@ impl ModelWorker for AnthropicWorker {
         }
 
         let api_response: AnthropicResponse = response.json().await.map_err(|e| {
-            OrchestratorError::Inference(format!("Failed to parse Anthropic response: {}", e))
+            OrchestratorError::Inference(format!("Failed to parse response: {}", e))
         })?;
 
-        // Extract text from the first text content block
-        let text = api_response
-            .content
-            .into_iter()
-            .find(|b| b.block_type == "text")
-            .map(|b| b.text)
-            .unwrap_or_default();
-
-        let tokens: Vec<String> = text
+        // Split response into tokens
+        let tokens: Vec<String> = api_response
+            .completion
             .split_whitespace()
             .map(|s| s.to_string())
             .collect();
@@ -1125,15 +1094,7 @@ mod tests {
     }
 
     fn anthropic_success_body() -> serde_json::Value {
-        serde_json::json!({
-            "id": "msg_01test",
-            "type": "message",
-            "role": "assistant",
-            "content": [{"type": "text", "text": "hello world response"}],
-            "model": "claude-instant-1-2",
-            "stop_reason": "end_turn",
-            "usage": {"input_tokens": 10, "output_tokens": 3}
-        })
+        serde_json::json!({"completion": "hello world response"})
     }
 
     fn llamacpp_success_body() -> serde_json::Value {
@@ -1459,7 +1420,7 @@ mod tests {
     async fn test_anthropic_infer_success_returns_tokens() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/messages"))
+            .and(path("/complete"))
             .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_success_body()))
             .mount(&server)
             .await;
@@ -1476,7 +1437,7 @@ mod tests {
     async fn test_anthropic_infer_http_500_returns_inference_error() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/messages"))
+            .and(path("/complete"))
             .respond_with(ResponseTemplate::new(500).set_body_string("error"))
             .mount(&server)
             .await;
@@ -1499,7 +1460,7 @@ mod tests {
     async fn test_anthropic_infer_invalid_json_returns_inference_error() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/messages"))
+            .and(path("/complete"))
             .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
             .mount(&server)
             .await;
@@ -1515,7 +1476,7 @@ mod tests {
     async fn test_anthropic_infer_sends_api_key_header() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/messages"))
+            .and(path("/complete"))
             .and(header("x-api-key", "test-key-anthropic"))
             .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_success_body()))
             .mount(&server)
@@ -1536,7 +1497,7 @@ mod tests {
     async fn test_anthropic_infer_sends_version_header() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/messages"))
+            .and(path("/complete"))
             .and(header("anthropic-version", "2023-06-01"))
             .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_success_body()))
             .mount(&server)
@@ -1557,7 +1518,7 @@ mod tests {
     async fn test_anthropic_infer_sends_correct_model_in_request_body() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/messages"))
+            .and(path("/complete"))
             .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_success_body()))
             .mount(&server)
             .await;
@@ -1578,7 +1539,7 @@ mod tests {
     async fn test_anthropic_with_max_tokens_sends_correct_value() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/messages"))
+            .and(path("/complete"))
             .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_success_body()))
             .mount(&server)
             .await;
@@ -1597,14 +1558,14 @@ mod tests {
 
         let reqs = server.received_requests().await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
-        assert_eq!(body["max_tokens"], 2048);
+        assert_eq!(body["max_tokens_to_sample"], 2048);
     }
 
     #[tokio::test]
     async fn test_anthropic_infer_formats_prompt_with_human_and_assistant_prefix() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/messages"))
+            .and(path("/complete"))
             .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_success_body()))
             .mount(&server)
             .await;
@@ -1617,14 +1578,18 @@ mod tests {
 
         let reqs = server.received_requests().await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
-        let messages = body["messages"].as_array().unwrap();
-        assert_eq!(messages.len(), 1, "Should have one message");
-        let user_msg = &messages[0];
-        assert_eq!(user_msg["role"].as_str().unwrap(), "user");
-        assert_eq!(
-            user_msg["content"].as_str().unwrap(),
-            "my question",
-            "Message content should be the original input"
+        let prompt = body["prompt"].as_str().unwrap();
+        assert!(
+            prompt.contains("Human:"),
+            "Prompt should contain 'Human:' prefix"
+        );
+        assert!(
+            prompt.contains("Assistant:"),
+            "Prompt should contain 'Assistant:' marker"
+        );
+        assert!(
+            prompt.contains("my question"),
+            "Prompt should include the original input"
         );
     }
 

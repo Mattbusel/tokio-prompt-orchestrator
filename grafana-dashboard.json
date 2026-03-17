@@ -579,6 +579,105 @@
       ],
       "title": "Total Tokens Generated",
       "type": "stat"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2,
+            "showPoints": "never", "spanNulls": true
+          },
+          "unit": "percentunit",
+          "min": 0, "max": 1
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 50 },
+      "id": 20,
+      "options": {
+        "legend": { "calcs": ["mean", "lastNotNull"], "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "orchestrator_dedup_hit_rate",
+          "legendFormat": "{{worker}} dedup hit rate",
+          "refId": "A"
+        }
+      ],
+      "title": "Dedup Hit Rate (per worker)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [
+            { "options": { "0": { "text": "Closed", "color": "green" }, "1": { "text": "Half-Open", "color": "yellow" }, "2": { "text": "Open", "color": "red" } }, "type": "value" }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 2 }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 50 },
+      "id": 21,
+      "options": {
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showThresholdLabels": true,
+        "showThresholdMarkers": true
+      },
+      "targets": [
+        {
+          "expr": "orchestrator_circuit_breaker_state",
+          "legendFormat": "{{stage}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Circuit Breaker State (0=Closed, 1=HalfOpen, 2=Open)",
+      "type": "gauge"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line", "fillOpacity": 20, "lineWidth": 2,
+            "showPoints": "never", "spanNulls": true
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 58 },
+      "id": 22,
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, rate(orchestrator_retry_count_bucket[5m]))",
+          "legendFormat": "{{worker}} p50 retries",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, rate(orchestrator_retry_count_bucket[5m]))",
+          "legendFormat": "{{worker}} p95 retries",
+          "refId": "B"
+        }
+      ],
+      "title": "Retry Count per Worker (p50 / p95)",
+      "type": "timeseries"
     }
   ],
   "schemaVersion": 27,

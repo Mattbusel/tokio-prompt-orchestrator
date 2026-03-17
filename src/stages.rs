@@ -32,18 +32,8 @@
 //! - Stream output: 256
 
 use crate::{
-    config::PipelineConfig,
-    enhanced::CircuitBreaker,
-    metrics,
-    send_with_shed,
-    AssembleOutput,
-    InferenceOutput,
-    ModelWorker,
-    PostOutput,
-    PromptRequest,
-    RagOutput,
-    SendOutcome,
-    SessionId,
+    config::PipelineConfig, enhanced::CircuitBreaker, metrics, send_with_shed, AssembleOutput,
+    InferenceOutput, ModelWorker, PostOutput, PromptRequest, RagOutput, SendOutcome, SessionId,
 };
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -240,7 +230,10 @@ pub fn spawn_pipeline_with_config(
     let input_cap = s.rag.channel_capacity.unwrap_or(512);
     let rag_cap = s.rag.channel_capacity.unwrap_or(512);
     let assemble_cap = s.assemble.channel_capacity;
-    let inference_cap = s.inference.timeout_ms.map(|_| 1024).unwrap_or(1024);
+    // InferenceStageConfig has no channel_capacity field; use a fixed default.
+    // Previously derived from timeout_ms (a duration field) which is unrelated
+    // to channel capacity — both branches produced 1024 anyway.
+    let inference_cap = 1024_usize;
     let post_cap = s.post_process.channel_capacity;
     let stream_cap = s.stream.channel_capacity;
 

@@ -55,10 +55,11 @@ pub mod self_improve_loop;
 pub mod tui;
 
 // Re-exports
-pub use stages::{spawn_pipeline, LogSink, OutputSink, PipelineHandles, SinkError};
+pub use stages::{
+    spawn_pipeline, spawn_pipeline_with_config, LogSink, OutputSink, PipelineHandles, SinkError,
+};
 pub use worker::{
-    AnthropicWorker, EchoWorker, LlamaCppWorker, LoadBalancedWorker, LoadBalanceStrategy,
-    ModelWorker, OpenAiWorker, TokenStream, VllmWorker,
+    AnthropicWorker, EchoWorker, LlamaCppWorker, ModelWorker, OpenAiWorker, VllmWorker,
 };
 
 /// Orchestrator-specific errors

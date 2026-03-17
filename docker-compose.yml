@@ -75,6 +75,24 @@ services:
       timeout: 10s
       retries: 3
 
+  # Jaeger — distributed tracing backend (receives OTLP over HTTP on 4318)
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "14268:14268"  # Jaeger HTTP collector (legacy Thrift)
+      - "4318:4318"    # OTLP HTTP receiver
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    networks:
+      - monitoring
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--tries=1", "--spider", "http://localhost:14269/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
   # Alert Manager (optional)
   alertmanager:
     image: prom/alertmanager:latest
