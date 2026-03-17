@@ -340,20 +340,26 @@ impl ModelWorker for OpenAiWorker {
             .json(&request)
             .send()
             .await
-            .map_err(|e| OrchestratorError::Inference(format!("OpenAI stream request failed: {e}")))?;
+            .map_err(|e| {
+                OrchestratorError::Inference(format!("OpenAI stream request failed: {e}"))
+            })?;
 
         warn_if_low_remaining(response.headers(), "openai");
 
         if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
             let retry_after_secs =
                 parse_retry_after(response.headers()).unwrap_or(Duration::from_secs(60));
-            return Err(OrchestratorError::RateLimited { retry_after_secs: retry_after_secs.as_secs() });
+            return Err(OrchestratorError::RateLimited {
+                retry_after_secs: retry_after_secs.as_secs(),
+            });
         }
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(OrchestratorError::Inference(format!("OpenAI stream error {status}: {body}")));
+            return Err(OrchestratorError::Inference(format!(
+                "OpenAI stream error {status}: {body}"
+            )));
         }
 
         // Convert the raw byte stream into SSE token chunks.
@@ -364,8 +370,12 @@ impl ModelWorker for OpenAiWorker {
             // SSE lines look like: `data: {...}` or `data: [DONE]`
             let mut tokens = Vec::new();
             for line in text.lines() {
-                let Some(json_str) = line.strip_prefix("data: ") else { continue };
-                if json_str.trim() == "[DONE]" { break; }
+                let Some(json_str) = line.strip_prefix("data: ") else {
+                    continue;
+                };
+                if json_str.trim() == "[DONE]" {
+                    break;
+                }
                 if let Ok(chunk) = serde_json::from_str::<StreamChunk>(json_str) {
                     for choice in chunk.choices {
                         if let Some(content) = choice.delta.content {
@@ -376,7 +386,11 @@ impl ModelWorker for OpenAiWorker {
                     }
                 }
             }
-            if tokens.is_empty() { None } else { Some(Ok(tokens.join(""))) }
+            if tokens.is_empty() {
+                None
+            } else {
+                Some(Ok(tokens.join("")))
+            }
         });
 
         Ok(Box::pin(token_stream))
@@ -951,7 +965,7 @@ pub enum LoadBalanceStrategy {
 ///
 /// ```no_run
 /// # use tokio_prompt_orchestrator::{AnthropicWorker, OpenAiWorker, OrchestratorError};
-/// use tokio_prompt_orchestrator::LoadBalancedWorker;
+/// # use tokio_prompt_orchestrator::worker::LoadBalancedWorker;
 /// use std::sync::Arc;
 ///
 /// # fn example() -> Result<(), OrchestratorError> {

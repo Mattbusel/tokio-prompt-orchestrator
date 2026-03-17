@@ -91,6 +91,7 @@ fn default_true() -> bool {
 ///
 /// This type never panics during construction or access.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct PipelineConfig {
     /// Pipeline identity and version metadata.
     pub pipeline: PipelineSection,
@@ -115,6 +116,7 @@ pub struct PipelineConfig {
 ///
 /// This type never panics.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct PipelineSection {
     /// Human-readable pipeline name (e.g., "production", "staging").
     pub name: String,
@@ -132,6 +134,7 @@ pub struct PipelineSection {
 ///
 /// This type never panics.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct StagesConfig {
     /// RAG (retrieval-augmented generation) stage settings.
     pub rag: RagStageConfig,
@@ -153,6 +156,7 @@ pub struct StagesConfig {
 ///
 /// This type never panics.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct RagStageConfig {
     /// Whether the RAG stage is enabled. Disabled stages pass-through.
     #[serde(default = "default_true")]
@@ -173,6 +177,7 @@ pub struct RagStageConfig {
 ///
 /// This type never panics.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct AssembleStageConfig {
     /// Whether the assembly stage is enabled.
     #[serde(default = "default_true")]
@@ -190,6 +195,7 @@ pub struct AssembleStageConfig {
 ///
 /// This type never panics.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct InferenceStageConfig {
     /// Which model worker backend to use.
     pub worker: WorkerKind,
@@ -209,6 +215,7 @@ pub struct InferenceStageConfig {
 ///
 /// This type never panics.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerKind {
     /// OpenAI-compatible API (GPT-4, GPT-3.5, etc.).
@@ -229,6 +236,7 @@ pub enum WorkerKind {
 ///
 /// This type never panics.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct PostProcessStageConfig {
     /// Whether post-processing is enabled.
     #[serde(default = "default_true")]
@@ -244,6 +252,7 @@ pub struct PostProcessStageConfig {
 ///
 /// This type never panics.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct StreamStageConfig {
     /// Whether output streaming is enabled.
     #[serde(default = "default_true")]
@@ -279,6 +288,7 @@ fn default_rate_limit_enabled() -> bool {
 ///
 /// This type never panics.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct RateLimitConfig {
     /// Whether rate limiting is enabled.
     #[serde(default = "default_rate_limit_enabled")]
@@ -309,6 +319,7 @@ impl Default for RateLimitConfig {
 ///
 /// This type never panics.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct ResilienceConfig {
     /// Maximum number of retry attempts before failing a request.
     pub retry_attempts: u32,
@@ -334,6 +345,7 @@ pub struct ResilienceConfig {
 ///
 /// This type never panics.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct DeduplicationConfig {
     /// Whether deduplication is enabled.
     pub enabled: bool,
@@ -353,6 +365,7 @@ pub struct DeduplicationConfig {
 ///
 /// This type never panics.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct ObservabilityConfig {
     /// Log output format.
     pub log_format: LogFormat,
@@ -368,6 +381,7 @@ pub struct ObservabilityConfig {
 ///
 /// This type never panics.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub enum LogFormat {
     /// Human-readable, colorized log output.

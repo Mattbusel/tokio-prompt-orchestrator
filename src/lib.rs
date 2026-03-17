@@ -59,7 +59,8 @@ pub use stages::{
     spawn_pipeline, spawn_pipeline_with_config, LogSink, OutputSink, PipelineHandles, SinkError,
 };
 pub use worker::{
-    AnthropicWorker, EchoWorker, LlamaCppWorker, ModelWorker, OpenAiWorker, VllmWorker,
+    AnthropicWorker, EchoWorker, LlamaCppWorker, LoadBalancedWorker, ModelWorker, OpenAiWorker,
+    VllmWorker,
 };
 
 /// Orchestrator-specific errors
@@ -411,10 +412,8 @@ mod tests {
         use tracing_opentelemetry::OpenTelemetrySpanExt;
         use tracing_subscriber::layer::SubscriberExt;
 
-        // Set up a minimal OTel provider with a no-op (in-memory) config.
-        let provider = opentelemetry_sdk::trace::TracerProvider::builder()
-            .with_config(opentelemetry_sdk::trace::config())
-            .build();
+        // Set up a minimal OTel provider with default config (no exporter).
+        let provider = opentelemetry_sdk::trace::TracerProvider::builder().build();
         use opentelemetry::trace::TracerProvider as _;
         let tracer = provider.tracer("test");
 
