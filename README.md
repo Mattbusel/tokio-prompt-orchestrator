@@ -18,7 +18,7 @@ Each stage runs as an independent Tokio task. Backpressure propagates upstream
 when a downstream channel fills, and excess requests are shed gracefully to a
 dead-letter queue rather than blocking the pipeline.
 
-```
+```text
 [Prompt Submissions] -> [Dedup Stage] -> [Circuit Breaker] -> [Rate Limiter]
                                                                      |
                                                            [Worker Pool (Tokio)]
@@ -31,7 +31,7 @@ dead-letter queue rather than blocking the pipeline.
                        [Web API (HTTP/WS)]
 ```
 
-```
+```text
                         +------------------+
   PromptRequest ------> |  RAG Stage       | cap: 512
                         | (context fetch)  |
@@ -99,7 +99,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 Minimal async example using the echo worker (no API key required):
 
-```rust
+```rust,no_run
 use std::collections::HashMap;
 use tokio_prompt_orchestrator::{
     spawn_pipeline, EchoWorker, PromptRequest, SessionId,
@@ -111,11 +111,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Spawn the five-stage pipeline with the echo worker.
     // Swap EchoWorker for OpenAiWorker, AnthropicWorker, LlamaCppWorker, or VllmWorker.
     let worker: Arc<dyn tokio_prompt_orchestrator::ModelWorker> = Arc::new(EchoWorker::new());
-    let handles = spawn_pipeline(worker).await?;
+    let handles = spawn_pipeline(worker);
 
     // Send a prompt into the pipeline.
     handles
-        .rag_tx
+        .input_tx
         .send(PromptRequest {
             session: SessionId::new("demo"),
             request_id: "req-1".to_string(),
@@ -126,8 +126,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     // Collect output from the stream stage.
-    if let Some(output) = handles.output_rx.lock().await.recv().await {
-        println!("Response: {}", output.text);
+    let mut guard = handles.output_rx.lock().await;
+    if let Some(rx) = guard.as_mut() {
+        if let Some(output) = rx.recv().await {
+            println!("Response: {}", output.text);
+        }
     }
 
     Ok(())
@@ -388,7 +391,7 @@ The default channel sizes are optimised for a typical cloud LLM with 1-10 second
 inference latency. For local models (< 100ms), reduce all buffers by 50% to
 save memory. For very slow models (> 30s), double the Inference-to-Post buffer:
 
-```rust
+```rust,ignore
 spawn_pipeline_with_config(worker, PipelineConfig {
     rag_channel_capacity: 512,
     assemble_channel_capacity: 512,
@@ -396,7 +399,7 @@ spawn_pipeline_with_config(worker, PipelineConfig {
     post_channel_capacity: 512,
     stream_channel_capacity: 256,
     ..Default::default()
-}).await?
+})
 ```
 
 ---

@@ -29,9 +29,9 @@
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let worker: Arc<dyn ModelWorker> = Arc::new(EchoWorker::new());
-//!     let handles = spawn_pipeline(worker).await?;
+//!     let handles = spawn_pipeline(worker);
 //!
-//!     handles.rag_tx.send(PromptRequest {
+//!     handles.input_tx.send(PromptRequest {
 //!         session: SessionId::new("demo"),
 //!         request_id: "req-1".to_string(),
 //!         input: "Hello, pipeline!".to_string(),
@@ -39,8 +39,11 @@
 //!         deadline: None,
 //!     }).await?;
 //!
-//!     if let Some(output) = handles.output_rx.lock().await.recv().await {
-//!         println!("{}", output.text);
+//!     let mut guard = handles.output_rx.lock().await;
+//!     if let Some(rx) = guard.as_mut() {
+//!         if let Some(output) = rx.recv().await {
+//!             println!("{}", output.text);
+//!         }
 //!     }
 //!     Ok(())
 //! }
