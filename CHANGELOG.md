@@ -21,6 +21,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `Deduplicator::check_and_register` now uses DashMap's atomic `entry()` API
+  to eliminate the TOCTOU race condition that caused multiple concurrent callers
+  to each receive `DeduplicationResult::New` for the same key. Under high
+  concurrency (50 goroutines hitting the same key simultaneously), only one
+  caller now receives `New`; all others correctly receive `InProgress`.
+- Added `atomic_register_new` helper used after an expired entry is removed, so
+  re-registration is also race-free.
+- `test_concurrent_duplicate_requests_dedup_stress` in `tests/chaos_tests.rs`
+  now reliably passes with the corrected deduplicator (was asserting `== 1` but
+  getting 7 due to the pre-existing race).
 - `LlamaCppWorker::infer` now returns an empty `Vec` for empty content instead
   of `vec![""]`, aligning with the test contract documented in `worker_extra_tests.rs`.
 - `OpenAiWorker::infer` and `AnthropicWorker::infer` now return an empty `Vec`

@@ -130,9 +130,17 @@ impl Deduplicator {
         dedup
     }
 
-    /// Check if request is duplicate and register if new
+    /// Check if request is duplicate and register if new.
+    ///
+    /// Uses DashMap's atomic `entry()` API to eliminate the TOCTOU race that
+    /// would otherwise let multiple concurrent callers each see `New` for the
+    /// same key.  Only one caller will ever receive `New(token)` for a given
+    /// key while that key is `InProgress`.
     pub async fn check_and_register(&self, key: &str) -> DeduplicationResult {
-        // Check if request exists
+        use dashmap::mapref::entry::Entry;
+
+        // First, handle the already-present cases through a read-side fast path.
+        // We still need the atomic entry() below for the insert path.
         if let Some(state) = self.requests.get(key) {
             return match state.value() {
                 RequestState::InProgress { .. } => {
@@ -149,41 +157,84 @@ impl Deduplicator {
                         crate::metrics::inc_dedup_hit();
                         DeduplicationResult::Cached(result.clone())
                     } else {
-                        // Expired, treat as new.
-                        // Note: any task waiting on the old broadcast channel will receive
-                        // a RecvError when the sender is dropped here. Callers of
-                        // wait_for_result() must handle RecvError as a "request cancelled,
-                        // retry" signal.
+                        // Expired — fall through to the atomic entry path below.
                         drop(state);
-                        self.register_new(key).await
+                        // Remove the expired entry so the entry() call below sees it as absent.
+                        self.requests.remove(key);
+                        // Fall through to atomic insert.
+                        return self.atomic_register_new(key);
                     }
                 }
             };
         }
 
-        self.register_new(key).await
+        // Key is absent — use entry() for an atomic check-and-insert so that
+        // concurrent callers cannot both see "absent" and both get New.
+        match self.requests.entry(key.to_string()) {
+            Entry::Occupied(occ) => {
+                // Another task raced us and inserted first.
+                match occ.get() {
+                    RequestState::InProgress { .. } => {
+                        info!(key = key, "duplicate request detected (in progress, raced)");
+                        crate::metrics::inc_dedup_hit();
+                        DeduplicationResult::InProgress
+                    }
+                    RequestState::Completed { result, .. } => {
+                        info!(key = key, "duplicate request detected (cached, raced)");
+                        crate::metrics::inc_dedup_hit();
+                        DeduplicationResult::Cached(result.clone())
+                    }
+                }
+            }
+            Entry::Vacant(vac) => {
+                let (tx, _) = broadcast::channel(16);
+                vac.insert(RequestState::InProgress {
+                    started_at: SystemTime::now(),
+                    waiter_tx: tx,
+                });
+                let token = DeduplicationToken {
+                    id: Uuid::new_v4().to_string(),
+                    key: key.to_string(),
+                    completed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    requests: Arc::clone(&self.requests),
+                };
+                debug!(key = key, token_id = %token.id, "new request registered");
+                DeduplicationResult::New(token)
+            }
+        }
     }
 
-    async fn register_new(&self, key: &str) -> DeduplicationResult {
-        let (tx, _) = broadcast::channel(16);
-
-        self.requests.insert(
-            key.to_string(),
-            RequestState::InProgress {
-                started_at: SystemTime::now(),
-                waiter_tx: tx,
+    /// Atomically insert a new `InProgress` entry.  Called only when we have
+    /// already removed an expired entry and need a fresh registration.
+    fn atomic_register_new(&self, key: &str) -> DeduplicationResult {
+        use dashmap::mapref::entry::Entry;
+        match self.requests.entry(key.to_string()) {
+            Entry::Occupied(occ) => match occ.get() {
+                RequestState::InProgress { .. } => {
+                    crate::metrics::inc_dedup_hit();
+                    DeduplicationResult::InProgress
+                }
+                RequestState::Completed { result, .. } => {
+                    crate::metrics::inc_dedup_hit();
+                    DeduplicationResult::Cached(result.clone())
+                }
             },
-        );
-
-        let token = DeduplicationToken {
-            id: Uuid::new_v4().to_string(),
-            key: key.to_string(),
-            completed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            requests: Arc::clone(&self.requests),
-        };
-
-        debug!(key = key, token_id = %token.id, "new request registered");
-        DeduplicationResult::New(token)
+            Entry::Vacant(vac) => {
+                let (tx, _) = broadcast::channel(16);
+                vac.insert(RequestState::InProgress {
+                    started_at: SystemTime::now(),
+                    waiter_tx: tx,
+                });
+                let token = DeduplicationToken {
+                    id: Uuid::new_v4().to_string(),
+                    key: key.to_string(),
+                    completed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    requests: Arc::clone(&self.requests),
+                };
+                debug!(key = key, "new request registered (after expiry)");
+                DeduplicationResult::New(token)
+            }
+        }
     }
 
     /// Wait for in-progress request to complete
