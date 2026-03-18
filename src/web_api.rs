@@ -466,7 +466,7 @@ async fn auth_middleware(
             let mut e = vec![0u8; max_len];
             t[..token_bytes.len()].copy_from_slice(token_bytes);
             e[..expected_bytes.len()].copy_from_slice(expected_bytes);
-            t.ct_eq(&e).into()
+            t.as_slice().ct_eq(e.as_slice()).into()
         })
         .unwrap_or(false);
 
@@ -1383,13 +1383,12 @@ async fn batch_handler(
     Json(req): Json<BatchRequest>,
 ) -> Result<Json<BatchResponse>, AppError> {
     let batch_id = Uuid::new_v4().to_string();
-    let _span = tracing::info_span!(
-        "batch_handler",
+    tracing::info!(
         batch_id = %batch_id,
         endpoint = "POST /api/v1/batch",
         prompt_count = req.prompts.len(),
-    )
-    .entered();
+        "batch request received",
+    );
 
     const MAX_PROMPTS: usize = 100;
     const MAX_CONCURRENCY: usize = 16;
@@ -1406,10 +1405,11 @@ async fn batch_handler(
     }
     let concurrency = req.max_concurrency.unwrap_or(4).clamp(1, MAX_CONCURRENCY);
     let item_timeout = Duration::from_secs(state.config.timeout_seconds.min(BATCH_TIMEOUT_SECS));
+    let session_prefix = req.session_id.clone();
 
     let futures_iter = req.prompts.into_iter().enumerate().map(|(i, prompt)| {
         let state = Arc::clone(&state);
-        let session_prefix = req.session_id.clone();
+        let session_prefix = session_prefix.clone();
         let item_timeout = item_timeout;
         async move {
             let request_id = Uuid::new_v4().to_string();
