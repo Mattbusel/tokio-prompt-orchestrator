@@ -100,11 +100,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
       - run: cargo install cargo-tarpaulin --locked
       - run: cargo tarpaulin --out Xml --engine llvm --all-features --timeout 180
       - uses: codecov/codecov-action@v4
         with:
           fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
 
   bench:
     name: Benchmark Smoke Test
