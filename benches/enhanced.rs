@@ -66,6 +66,7 @@ fn bench_dedup_key_generation(c: &mut Criterion) {
             black_box(dedup_key(
                 black_box("benchmark prompt for dedup key hash"),
                 black_box(&meta),
+                None,
             ));
         })
     });
@@ -203,6 +204,7 @@ fn make_request(id: &str) -> PromptRequest {
         request_id: format!("req-{id}"),
         input: format!("prompt {id}"),
         meta: HashMap::new(),
+        deadline: None,
     }
 }
 
