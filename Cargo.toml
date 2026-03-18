@@ -235,7 +235,3 @@ name = "enhanced"
 path = "benches/enhanced.rs"
 harness = false
 
-[[bench]]
-name = "helix"
-path = "benches/helix.rs"
-harness = false
