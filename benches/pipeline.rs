@@ -14,7 +14,8 @@ use std::sync::Arc;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use tokio_prompt_orchestrator::{
-    send_with_shed, shard_session, EchoWorker, ModelWorker, PromptRequest, SessionId,
+    send_with_shed, shard_session, EchoWorker, ModelWorker, PipelineStage, PromptRequest,
+    SessionId,
 };
 
 // ---------------------------------------------------------------------------
@@ -27,6 +28,7 @@ fn make_request(id: &str) -> PromptRequest {
         request_id: format!("req-{id}"),
         input: format!("Benchmark prompt number {id}"),
         meta: HashMap::new(),
+        deadline: None,
     }
 }
 
@@ -132,7 +134,7 @@ fn bench_send_with_shed(c: &mut Criterion) {
     c.bench_function("send_with_shed_normal", |b| {
         b.to_async(&rt).iter(|| async {
             let (tx, _rx) = mpsc::channel::<u32>(512);
-            let result = send_with_shed(&tx, black_box(42), "bench-stage").await;
+            let result = send_with_shed(&tx, black_box(42u32), PipelineStage::Rag).await;
             black_box(result)
         })
     });
