@@ -19,6 +19,7 @@ fn make_request(id: &str) -> PromptRequest {
         request_id: format!("req-{id}"),
         input: format!("Benchmark inference prompt {id}"),
         meta: HashMap::new(),
+        deadline: None,
     }
 }
 
