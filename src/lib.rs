@@ -1,13 +1,73 @@
 //! # tokio-prompt-orchestrator
 //!
-//! A production-grade orchestrator for multi-stage LLM pipelines over Tokio.
+//! A production-grade orchestrator for multi-stage LLM inference pipelines over Tokio.
+//!
+//! Provides a five-stage directed pipeline with bounded MPSC channels, backpressure,
+//! request deduplication, circuit breakers, retry logic, rate limiting, Prometheus
+//! metrics, OpenTelemetry tracing, and an optional autonomous self-improving control
+//! loop.
 //!
 //! ## Architecture
 //!
 //! Five-stage pipeline with bounded channels and backpressure:
+//!
 //! ```text
-//! PromptRequest → RAG(512) → Assemble(512) → Inference(1024) → Post(512) → Stream(256)
+//! PromptRequest -> RAG(512) -> Assemble(512) -> Inference(1024) -> Post(512) -> Stream(256)
 //! ```
+//!
+//! Each stage runs as an independent [`tokio::task`]. When a downstream channel
+//! fills, [`send_with_shed`] drops the incoming item and records it in the
+//! [`DeadLetterQueue`] rather than blocking the upstream stage.
+//!
+//! ## Quick Start
+//!
+//! ```no_run
+//! use std::collections::HashMap;
+//! use std::sync::Arc;
+//! use tokio_prompt_orchestrator::{spawn_pipeline, EchoWorker, PromptRequest, SessionId, ModelWorker};
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let worker: Arc<dyn ModelWorker> = Arc::new(EchoWorker::new());
+//!     let handles = spawn_pipeline(worker).await?;
+//!
+//!     handles.rag_tx.send(PromptRequest {
+//!         session: SessionId::new("demo"),
+//!         request_id: "req-1".to_string(),
+//!         input: "Hello, pipeline!".to_string(),
+//!         meta: HashMap::new(),
+//!         deadline: None,
+//!     }).await?;
+//!
+//!     if let Some(output) = handles.output_rx.lock().await.recv().await {
+//!         println!("{}", output.text);
+//!     }
+//!     Ok(())
+//! }
+//! ```
+//!
+//! ## Module Organisation
+//!
+//! | Module | Description |
+//! |--------|-------------|
+//! | [`stages`] | Five pipeline stage implementations and channel wiring |
+//! | [`worker`] | [`ModelWorker`] trait and five production implementations |
+//! | [`enhanced`] | Resilience primitives: circuit breaker, dedup, retry, cache, rate limiter |
+//! | [`metrics`] | Prometheus metrics initialisation and helper functions |
+//! | [`config`] | TOML-deserialisable [`PipelineConfig`] with hot-reload support |
+//! | [`routing`] | [`ModelRouter`] for complexity-scored local/cloud routing |
+//! | [`coordination`] | Agent fleet management and task claiming |
+//! | `self_tune` | PID controllers and telemetry bus (feature: `self-tune`) |
+//! | `self_modify` | Task generation and validation gate (feature: `self-modify`) |
+//! | `intelligence` | Learned router and autoscaler (feature: `intelligence`) |
+//! | `evolution` | A/B experiments and snapshot rollback (feature: `evolution`) |
+//! | `self_improve` | Wired self-improving loop (features: `self-tune`+`self-modify`+`intelligence`) |
+//! | `web_api` | REST/SSE/WebSocket server (feature: `web-api`) |
+//! | `distributed` | Redis dedup and NATS coordination (feature: `distributed`) |
+//! | `tui` | Ratatui terminal dashboard (feature: `tui`) |
+//!
+//! [`PipelineConfig`]: config::PipelineConfig
+//! [`ModelRouter`]: routing::router::ModelRouter
 
 #![doc = include_str!("../README.md")]
 

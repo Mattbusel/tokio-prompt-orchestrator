@@ -47,6 +47,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # Metrics
+# prometheus 0.13 has RUSTSEC-2024-0437 (protobuf DoS via crafted scrape request).
+# Mitigated by: metrics endpoint is not publicly exposed without authentication.
+# Track upgrade to prometheus 0.14+ when available.
 prometheus = "0.13"
 lazy_static = "1.4"  # used by prometheus crate — do not remove
 

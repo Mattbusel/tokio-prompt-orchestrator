@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Production-readiness pass: doc comments added to all public API items in
+  `lib.rs`, `worker.rs`, `stages.rs`, `config/mod.rs`, and `enhanced.rs`.
+- CI workflow updated to run `cargo fmt --check`, `cargo clippy -- -D warnings`,
+  `cargo test`, and `cargo doc --no-deps` on `ubuntu-latest` with the stable
+  toolchain, plus cross-platform jobs on `windows-latest` and `macos-latest`.
+- CI now triggers on both `master` and `main` branch pushes and pull requests.
+- README rewritten with architecture ASCII diagram, quickstart async example,
+  API overview table, full configuration reference, feature flags table, and
+  contributing and license sections.
+
+### Fixed
+
+- `LlamaCppWorker::infer` now returns an empty `Vec` for empty content instead
+  of `vec![""]`, aligning with the test contract documented in `worker_extra_tests.rs`.
+- `OpenAiWorker::infer` and `AnthropicWorker::infer` now return an empty `Vec`
+  for whitespace-only responses instead of a single blank-string token.
+- `try_build_otel_layer` replaced `eprintln!` with `tracing::warn!` so all
+  diagnostic output goes through the structured logging layer.
+- Five test assertions in `worker.rs` corrected: `vec!["hello", "world", "response"]`
+  changed to `vec!["hello world response"]` to match the single-token return
+  contract of OpenAI, Anthropic, LlamaCpp, and vLLM workers.
+
 ## [1.0.0] - 2026-03-18
 
 ### Added
