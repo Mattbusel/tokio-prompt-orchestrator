@@ -86,23 +86,77 @@ rmcp = { version = "0.16", optional = true, features = ["server", "macros", "tra
 async-stream = "0.3"
 
 [features]
+# No features are enabled by default. The library compiles and runs without
+# any optional features, providing only the core pipeline and worker types.
 default = []
+
+# metrics-server: Prometheus-compatible /metrics HTTP scrape endpoint via axum.
+# Use with a Prometheus or VictoriaMetrics scraper. Port configurable in ServerConfig.
 metrics-server = ["axum", "tower", "tower-http"]
+
+# web-api: Full HTTP server with REST endpoints, SSE streaming, and WebSocket.
+# Required by: mcp, dashboard.
 web-api = ["axum", "tower", "tower-http", "tokio-stream"]
+
+# caching: Redis-backed TTL result cache for inference responses.
+# Reduces LLM API cost for repeated identical prompts across process restarts.
 caching = ["redis"]
+
+# rate-limiting: Token-bucket rate limiter at the pipeline entry point.
+# Configurable via RateLimitConfig in pipeline.toml.
 rate-limiting = ["governor", "nonzero_ext"]
+
+# full: Convenience flag for single-node full-featured deployments.
+# Enables web API, Prometheus metrics, Redis cache, and rate limiting.
 full = ["web-api", "metrics-server", "caching", "rate-limiting"]
-# Self-improvement tiers (additive — each includes the tier below)
+
+# Self-improvement tiers. Each tier is additive: self-modify includes self-tune,
+# evolution includes self-tune + intelligence.
+
+# self-tune: Closed-loop parameter tuning.
+# Enables: PID controllers, TelemetryBus, AnomalyDetector (Z-score + CUSUM),
+# SnapshotStore, CostOptimizer. Required by all higher self-improvement tiers.
 self-tune = []
+
+# self-modify: Autonomous config generation and validation.
+# Enables: MetaTaskGenerator, ValidationGate (cargo test + clippy sandbox),
+# AgentMemory. Requires self-tune.
 self-modify = ["self-tune"]
+
+# intelligence: Learned routing and autoscaling.
+# Enables: LearnedRouter (epsilon-greedy bandit), Autoscaler, FeedbackCollector,
+# QualityEstimator, PromptOptimizer, SemanticDedup. Requires self-tune.
 intelligence = ["self-tune"]
+
+# evolution: Evolutionary parameter search and A/B experiments.
+# Enables: A/B experiment runner, snapshot rollback, transfer learning.
+# Requires self-tune + intelligence.
 evolution = ["self-tune", "intelligence"]
-# Enable all self-improvement subsystems: self-tune + self-modify + intelligence + evolution
+
+# self-improving: Meta-feature that enables all self-improvement subsystems.
+# Equivalent to self-tune + self-modify + intelligence + evolution.
+# Used by the self-improve binary and the SelfImprovingLoop type.
 self-improving = ["self-tune", "self-modify", "intelligence", "evolution"]
+
+# tui: Ratatui terminal dashboard with live pipeline metrics.
+# Shows stage queue depths, circuit breaker state, dedup savings, sparklines.
 tui = ["ratatui", "crossterm"]
+
+# mcp: Model Context Protocol server.
+# Exposes infer, pipeline_status, batch_infer, and configure_pipeline tools
+# callable from Claude Desktop and Claude Code. Requires web-api.
 mcp = ["rmcp", "web-api"]
+
+# dashboard: Web dashboard UI. Requires web-api.
 dashboard = ["web-api"]
+
+# distributed: Multi-node coordination.
+# Enables: Redis cross-node deduplication, NATS pub/sub work queues,
+# leader election with TTL renewal, session affinity routing.
 distributed = ["redis", "async-nats"]
+
+# schema: JSON Schema export for PipelineConfig.
+# Used by the gen_schema binary to produce pipeline.schema.json for IDE validation.
 schema = ["schemars"]
 
 [dev-dependencies]
