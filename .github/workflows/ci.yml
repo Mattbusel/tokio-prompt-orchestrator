@@ -38,6 +38,9 @@ jobs:
       - name: cargo test (default features)
         run: cargo test
 
+      - name: cargo test (no default features)
+        run: cargo test --no-default-features
+
       - name: cargo test (all features)
         run: cargo test --features "full,mcp"
 

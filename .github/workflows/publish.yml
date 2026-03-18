@@ -28,7 +28,7 @@ jobs:
           fi
 
       - name: dry-run publish
-        run: cargo publish --dry-run
+        run: cargo publish --dry-run --allow-dirty
 
       - name: publish
         env:
