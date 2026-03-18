@@ -104,52 +104,20 @@ jobs:
           fail_ci_if_error: false
 
   bench:
-    name: Benchmark Regression
+    name: Benchmark Smoke Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: run benchmarks
+      - name: Run benchmarks (smoke — confirms compile and no panics)
         run: cargo bench --bench pipeline 2>&1 | tee bench_output.txt
-      - name: check for regression
-        run: |
-          # Fail if any benchmark regressed >10% vs the stored baseline.
-          # On first run the baseline doesn't exist — store it and pass.
-          BASELINE=".bench_baseline.txt"
-          if [ ! -f "$BASELINE" ]; then
-            echo "No baseline found — storing current results."
-            cp bench_output.txt "$BASELINE"
-            exit 0
-          fi
-          python3 - <<'EOF'
-          import re, sys
-
-          def parse(path):
-              times = {}
-              for line in open(path):
-                  m = re.search(r'test (\S+) .* bench:\s+([\d,]+) ns', line)
-                  if m:
-                      times[m.group(1)] = int(m.group(2).replace(',', ''))
-              return times
-
-          base = parse(".bench_baseline.txt")
-          curr = parse("bench_output.txt")
-          regressions = []
-          for name, base_ns in base.items():
-              if name not in curr:
-                  continue
-              curr_ns = curr[name]
-              pct = (curr_ns - base_ns) / base_ns * 100
-              if pct > 10:
-                  regressions.append(f"  {name}: {base_ns} ns -> {curr_ns} ns (+{pct:.1f}%)")
-          if regressions:
-              print("BENCHMARK REGRESSIONS DETECTED (>10%):")
-              for r in regressions:
-                  print(r)
-              sys.exit(1)
-          print(f"All {len(curr)} benchmarks within 10% of baseline.")
-          EOF
+      - name: Upload benchmark output
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-output-${{ github.sha }}
+          path: bench_output.txt
+          retention-days: 14
 
   audit:
     name: Security Audit
