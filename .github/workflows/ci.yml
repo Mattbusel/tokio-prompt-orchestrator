@@ -123,6 +123,18 @@ jobs:
           print(f"All {len(curr)} benchmarks within 10% of baseline.")
           EOF
 
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-tarpaulin --locked
+      - run: cargo tarpaulin --out Xml --engine llvm --all-features --timeout 180
+      - uses: codecov/codecov-action@v4
+        with:
+          fail_ci_if_error: false
+
   audit:
     name: Security Audit
     runs-on: ubuntu-latest
@@ -132,6 +144,8 @@ jobs:
       checks: write
     steps:
       - uses: actions/checkout@v4
+
+      # cargo audit: checks Cargo.lock against the RustSec advisory database.
       - uses: rustsec/audit-check@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -139,3 +153,11 @@ jobs:
           # prometheus 0.13 pins protobuf 2.x; upstream fix requires a breaking
           # API migration. Tracked for upgrade when prometheus 0.14 stabilises.
           ignore: RUSTSEC-2024-0437
+
+      # cargo deny: license compliance + duplicate-crate policy (deny.toml).
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+      - name: cargo deny check
+        run: cargo deny check

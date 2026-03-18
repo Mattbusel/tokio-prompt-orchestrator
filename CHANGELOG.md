@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2026-03-18
+
+### Added
+
+- `deny.toml` with an explicit license allow-list (MIT, Apache-2.0, ISC,
+  Unicode-DFS-2016, BSD-2-Clause, BSD-3-Clause) and `cargo-deny` integrated
+  into the CI `audit` job.
+- Doc comment on `spawn_pipeline_with_config` in `stages.rs` (was absent,
+  leaving a public API surface without documentation).
+- `# Errors` section added to `metrics::init_metrics` doc comment.
+- CI: `cargo deny check` step added to the `audit` job alongside the existing
+  `rustsec/audit-check` action.
+
+### Fixed
+
+- Misplaced doc lines in `stages.rs`: the two doc sentences that belonged to
+  `validated_channel_size` (a private helper) were incorrectly appended to the
+  preceding public function's `# Panics` block. Both items are now correctly
+  attributed.
+
+### Changed
+
+- Version bumped from `0.1.0` to `1.0.0` -- the public API is stable.
+
 ## [Unreleased]
 
 ### Added

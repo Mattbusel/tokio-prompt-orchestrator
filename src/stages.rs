@@ -244,9 +244,6 @@ pub fn spawn_pipeline(worker: Arc<dyn ModelWorker>) -> PipelineHandles {
 /// # Panics
 ///
 /// This function never panics.
-/// Validate a channel size: must be in [1, 100_000].
-///
-/// Returns the value on success. On failure logs a warning and returns `default`.
 fn validated_channel_size(value: usize, name: &str, default: usize) -> usize {
     if value < 1 || value > 100_000 {
         warn!(
@@ -261,6 +258,15 @@ fn validated_channel_size(value: usize, name: &str, default: usize) -> usize {
     }
 }
 
+/// Spawn the complete 5-stage pipeline using a [`PipelineConfig`].
+///
+/// Channel capacities, circuit-breaker thresholds, and retry settings are
+/// all driven by `config` rather than compile-time constants, enabling
+/// runtime tuning via TOML without recompiling.
+///
+/// # Panics
+///
+/// This function never panics.
 pub fn spawn_pipeline_with_config(
     worker: Arc<dyn ModelWorker>,
     config: &PipelineConfig,

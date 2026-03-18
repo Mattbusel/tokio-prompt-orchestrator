@@ -1,0 +1,42 @@
+# cargo-deny configuration
+# https://embarkstudios.github.io/cargo-deny/
+
+[licenses]
+# Require all dependencies to use one of the following licenses.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "ISC",
+    "Unicode-DFS-2016",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+]
+# Warn on unlicensed crates rather than hard-fail so CI still surfaces the issue.
+unlicensed = "deny"
+# Allow dual MIT/Apache-2.0 (the Rust ecosystem standard).
+allow-osi-fsf-free = "neither"
+# Confidence threshold for license detection from file contents.
+confidence-threshold = 0.8
+
+[bans]
+# Disallow multiple versions of the same crate only when explicitly listed.
+multiple-versions = "warn"
+wildcards = "allow"
+
+[advisories]
+# Path to the RustSec advisory database (fetched at CI time by cargo-deny).
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+vulnerability = "deny"
+unmaintained = "warn"
+yanked = "warn"
+notice = "warn"
+# RUSTSEC-2024-0437: protobuf DoS via prometheus transitive dep.
+# prometheus 0.13 pins protobuf 2.x; tracked for upgrade when prometheus 0.14
+# stabilises.
+ignore = ["RUSTSEC-2024-0437"]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

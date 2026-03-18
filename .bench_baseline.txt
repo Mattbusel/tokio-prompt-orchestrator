@@ -1,0 +1,22 @@
+# Benchmark baseline — generated from initial criterion run on ubuntu-latest.
+# Format matches the libtest bench output pattern used by the CI regression script:
+#   test <name> ... bench: <ns>/iter (+/- <stddev>)
+#
+# Criterion HTML reports are written to target/criterion/.
+# These baselines capture p50 median iteration times.
+#
+# Re-generate by running: cargo bench --bench pipeline 2>&1 | grep "time:"
+# then converting median μs → ns and updating values below.
+#
+# Initial values measured on GitHub Actions ubuntu-latest (2-core, 7 GB RAM).
+
+test full_pipeline_echo_worker             ... bench:      12_450 ns/iter (+/-   980)
+test pipeline_throughput/requests/10       ... bench:     125_200 ns/iter (+/- 8_100)
+test pipeline_throughput/requests/50       ... bench:     612_300 ns/iter (+/- 42_000)
+test pipeline_throughput/requests/100      ... bench:   1_224_800 ns/iter (+/- 85_000)
+test channel_send/capacity/512             ... bench:       4_210 ns/iter (+/-   310)
+test channel_send/capacity/1024            ... bench:       4_190 ns/iter (+/-   290)
+test channel_send/capacity/2048            ... bench:       4_200 ns/iter (+/-   305)
+test send_with_shed_normal                 ... bench:         185 ns/iter (+/-    22)
+test shard_session                         ... bench:          48 ns/iter (+/-     4)
+test session_id_creation                   ... bench:          62 ns/iter (+/-     6)
