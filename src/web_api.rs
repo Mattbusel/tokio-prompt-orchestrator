@@ -217,10 +217,7 @@ impl RequestTracker {
                 });
                 let remaining = status_clone.len() as i64;
                 crate::metrics::set_queue_depth("tracker", remaining);
-                tracing::debug!(
-                    entries = remaining,
-                    "RequestTracker cleanup sweep complete"
-                );
+                tracing::debug!(entries = remaining, "RequestTracker cleanup sweep complete");
             }
         });
         Self { status }
@@ -739,7 +736,10 @@ async fn sse_stream_handler(
                     RequestStatus::Failed => {
                         break format!(
                             "[error] {}",
-                            tracked.error.clone().unwrap_or_else(|| "unknown error".to_string())
+                            tracked
+                                .error
+                                .clone()
+                                .unwrap_or_else(|| "unknown error".to_string())
                         );
                     }
                     _ => {}
@@ -751,9 +751,7 @@ async fn sse_stream_handler(
             tokio::time::sleep(Duration::from_millis(100)).await;
         };
 
-        Ok::<_, std::convert::Infallible>(
-            Event::default().event("done").data(result_text),
-        )
+        Ok::<_, std::convert::Infallible>(Event::default().event("done").data(result_text))
     }));
 
     Ok(Sse::new(token_stream).keep_alive(KeepAlive::default()))
@@ -1004,7 +1002,6 @@ struct TokenChunk {
 
 #[cfg(feature = "web-api")]
 async fn token_stream_ws(mut socket: WebSocket, state: Arc<AppState>) {
-
     info!("Token-stream WebSocket client connected");
 
     // Step 1: receive the prompt message
@@ -1395,7 +1392,9 @@ async fn batch_handler(
     const BATCH_TIMEOUT_SECS: u64 = 300;
 
     if req.prompts.is_empty() {
-        return Err(AppError::BadRequest("prompts must not be empty".to_string()));
+        return Err(AppError::BadRequest(
+            "prompts must not be empty".to_string(),
+        ));
     }
     if req.prompts.len() > MAX_PROMPTS {
         return Err(AppError::BadRequest(format!(
@@ -1455,7 +1454,11 @@ async fn batch_handler(
                             let text = tracked.result.clone();
                             drop(tracked);
                             state.tracker.status.remove(&request_id);
-                            return BatchItemResult { request_id, text, error: None };
+                            return BatchItemResult {
+                                request_id,
+                                text,
+                                error: None,
+                            };
                         }
                         RequestStatus::Failed => {
                             let err = tracked.error.clone();
@@ -1499,7 +1502,12 @@ async fn batch_handler(
     let failed = results.len() - succeeded;
     let total = results.len();
 
-    Ok(Json(BatchResponse { results, total, succeeded, failed }))
+    Ok(Json(BatchResponse {
+        results,
+        total,
+        succeeded,
+        failed,
+    }))
 }
 
 // ============================================================================
@@ -1557,10 +1565,8 @@ impl IntoResponse for AppError {
                     })),
                 )
                     .into_response();
-                resp.headers_mut().insert(
-                    "Retry-After",
-                    axum::http::HeaderValue::from_static("5"),
-                );
+                resp.headers_mut()
+                    .insert("Retry-After", axum::http::HeaderValue::from_static("5"));
                 resp
             }
             AppError::BadRequest(msg) => (

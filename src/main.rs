@@ -432,7 +432,9 @@ fn run_wizard(args: CliArgs) -> ResolvedConfig {
                     // Security note: API keys are stored in plaintext in orchestrator.env.
                     // For production use, consider using the OS keychain or a secrets manager.
                     save_env_value("ANTHROPIC_API_KEY", &key);
-                    println!("  ✓ Key saved to orchestrator.env (plaintext — keep this file private).");
+                    println!(
+                        "  ✓ Key saved to orchestrator.env (plaintext — keep this file private)."
+                    );
                 }
             } else if is_interactive {
                 println!("  ✓ Anthropic key already saved — skipping.");
@@ -455,7 +457,9 @@ fn run_wizard(args: CliArgs) -> ResolvedConfig {
                     // Security note: API keys are stored in plaintext in orchestrator.env.
                     // For production use, consider using the OS keychain or a secrets manager.
                     save_env_value("OPENAI_API_KEY", &key);
-                    println!("  ✓ Key saved to orchestrator.env (plaintext — keep this file private).");
+                    println!(
+                        "  ✓ Key saved to orchestrator.env (plaintext — keep this file private)."
+                    );
                 }
             } else if is_interactive {
                 println!("  ✓ OpenAI key already saved — skipping.");
@@ -842,13 +846,11 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
     {
         let env_path = env_file_path();
         tokio::spawn(async move {
-            let mut last_mtime: Option<std::time::SystemTime> = std::fs::metadata(&env_path)
-                .and_then(|m| m.modified())
-                .ok();
+            let mut last_mtime: Option<std::time::SystemTime> =
+                std::fs::metadata(&env_path).and_then(|m| m.modified()).ok();
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                let current_mtime =
-                    std::fs::metadata(&env_path).and_then(|m| m.modified()).ok();
+                let current_mtime = std::fs::metadata(&env_path).and_then(|m| m.modified()).ok();
                 if current_mtime != last_mtime && current_mtime.is_some() {
                     last_mtime = current_mtime;
                     tracing::info!(
@@ -864,11 +866,16 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
                                 }
                                 if let Some((k, v)) = line.split_once('=') {
                                     let k = k.trim();
-                                    if matches!(k, "RUST_LOG" | "INFERENCE_TIMEOUT_SECS" | "MAX_CONCURRENCY") {
+                                    if matches!(
+                                        k,
+                                        "RUST_LOG" | "INFERENCE_TIMEOUT_SECS" | "MAX_CONCURRENCY"
+                                    ) {
                                         // SAFETY: only RUST_LOG/perf tuning vars — safe to update
                                         // between polling intervals. No concurrent env mutations.
                                         #[allow(unused_unsafe)]
-                                        unsafe { std::env::set_var(k, v.trim()); }
+                                        unsafe {
+                                            std::env::set_var(k, v.trim());
+                                        }
                                         tracing::info!(key = k, "hot-reloaded runtime setting");
                                     }
                                 }
@@ -923,8 +930,7 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
     let repl_tx = handles.input_tx.clone();
 
     if cfg.no_web {
-        let repl_output_rx =
-            tokio::sync::Mutex::new(output_rx_raw);
+        let repl_output_rx = tokio::sync::Mutex::new(output_rx_raw);
         let repl_handle = tokio::spawn(async move {
             run_repl(repl_tx, repl_output_rx).await;
         });
@@ -950,7 +956,9 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
             let output_rx = match output_rx_raw {
                 Some(rx) => rx,
                 None => {
-                    tracing::error!("output_rx was already taken before web API start — this is a bug");
+                    tracing::error!(
+                        "output_rx was already taken before web API start — this is a bug"
+                    );
                     std::process::exit(1);
                 }
             };
@@ -980,8 +988,7 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
                 "Warning: built without 'web-api' feature — web server disabled.\n\
                  Rebuild with: cargo build --features web-api"
             );
-            let repl_output_rx =
-                tokio::sync::Mutex::new(output_rx_raw);
+            let repl_output_rx = tokio::sync::Mutex::new(output_rx_raw);
             let repl_handle = tokio::spawn(async move {
                 run_repl(repl_tx, repl_output_rx).await;
             });

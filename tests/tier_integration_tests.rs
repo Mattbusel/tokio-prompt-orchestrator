@@ -129,7 +129,9 @@ mod intelligence_tier {
     fn test_intelligence_learned_router_register_and_count() {
         let router = LearnedRouter::new(RouterConfig::default());
         router.register_model("openai").expect("register openai");
-        router.register_model("anthropic").expect("register anthropic");
+        router
+            .register_model("anthropic")
+            .expect("register anthropic");
         assert_eq!(router.model_count(), 2);
     }
 
@@ -229,8 +231,7 @@ mod evolution_tier {
 
     #[test]
     fn test_evolution_consensus_brain_register_node() {
-        let brain = ConsensusBrain::new(ConsensusConfig::default())
-            .expect("ConsensusBrain::new");
+        let brain = ConsensusBrain::new(ConsensusConfig::default()).expect("ConsensusBrain::new");
         brain.register_node("node-1").expect("register node-1");
         assert_eq!(brain.node_count(), 1);
     }

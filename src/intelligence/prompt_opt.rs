@@ -146,7 +146,12 @@ impl PromptOptimizer {
         }
         let mut parts = vec!["### Few-shot examples".to_string()];
         for (i, (input, output)) in examples.iter().enumerate() {
-            parts.push(format!("Example {}:\nInput: {}\nOutput: {}", i + 1, input, output));
+            parts.push(format!(
+                "Example {}:\nInput: {}\nOutput: {}",
+                i + 1,
+                input,
+                output
+            ));
         }
         parts.push("### End of examples".to_string());
         parts.join("\n\n")

@@ -1003,11 +1003,10 @@ impl ModelWorker for VllmWorker {
             OrchestratorError::Inference(format!("Failed to parse response: {}", e))
         })?;
 
-        let content = api_response
-            .text
-            .into_iter()
-            .next()
-            .ok_or_else(|| OrchestratorError::Inference("Empty response from vLLM".to_string()))?;
+        let content =
+            api_response.text.into_iter().next().ok_or_else(|| {
+                OrchestratorError::Inference("Empty response from vLLM".to_string())
+            })?;
 
         Ok(vec![content])
     }

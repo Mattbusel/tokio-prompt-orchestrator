@@ -389,7 +389,7 @@ async fn test_concurrent_mix_expired_and_valid() {
                     break;
                 }
             }
-            Ok(None) => break,   // Channel closed.
+            Ok(None) => break,      // Channel closed.
             Err(_elapsed) => break, // Overall timeout reached.
         }
     }

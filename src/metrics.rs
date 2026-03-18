@@ -376,7 +376,10 @@ pub fn inc_dropped(stage: &str) {
 /// This function never panics.
 pub fn record_ttft(worker: &str, model: &str, d: Duration) {
     if let Some(m) = metrics() {
-        if let Ok(h) = m.ttft_seconds.get_metric_with_label_values(&[worker, model]) {
+        if let Ok(h) = m
+            .ttft_seconds
+            .get_metric_with_label_values(&[worker, model])
+        {
             h.observe(d.as_secs_f64());
         }
     }
@@ -747,9 +750,8 @@ mod tests {
             .register(Box::new(ttft_seconds.clone()))
             .expect("register must succeed in tests");
 
-        let dedup_hits_total =
-            Counter::with_opts(Opts::new("t_dedup_hits_total", "test counter"))
-                .expect("Counter construction must succeed in tests");
+        let dedup_hits_total = Counter::with_opts(Opts::new("t_dedup_hits_total", "test counter"))
+            .expect("Counter construction must succeed in tests");
         registry
             .register(Box::new(dedup_hits_total.clone()))
             .expect("register must succeed in tests");

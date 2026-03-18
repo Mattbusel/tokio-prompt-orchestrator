@@ -374,7 +374,11 @@ async fn concurrent_independent_keys_do_not_interfere() {
                         // Verify cached immediately.
                         match dedup.check_and_register(&key).await {
                             DeduplicationResult::Cached(r) => {
-                                assert_eq!(r, format!("result-{i}"), "wrong cached result for key {i}");
+                                assert_eq!(
+                                    r,
+                                    format!("result-{i}"),
+                                    "wrong cached result for key {i}"
+                                );
                             }
                             other => panic!("expected Cached for key {i}, got {:?}", other),
                         }
@@ -431,23 +435,23 @@ fn similar_inputs_produce_distinct_keys() {
 
     // Unicode homoglyphs.
     let k_ascii = dedup_key("café", &meta, None);
-    let k_nfc   = dedup_key("caf\u{00e9}", &meta, None); // precomposed é
-    let k_nfd   = dedup_key("cafe\u{0301}", &meta, None); // decomposed e + combining accent
-    // NFC and precomposed are the same codepoint sequence → same key.
+    let k_nfc = dedup_key("caf\u{00e9}", &meta, None); // precomposed é
+    let k_nfd = dedup_key("cafe\u{0301}", &meta, None); // decomposed e + combining accent
+                                                        // NFC and precomposed are the same codepoint sequence → same key.
     assert_eq!(k_ascii, k_nfc, "same codepoints must yield same key");
     // NFD is a different byte sequence → different hash.
     assert_ne!(k_nfc, k_nfd, "NFC vs NFD must yield different keys");
 
     // Empty vs whitespace-only.
-    let k_empty  = dedup_key("", &meta, None);
-    let k_space  = dedup_key(" ", &meta, None);
+    let k_empty = dedup_key("", &meta, None);
+    let k_space = dedup_key(" ", &meta, None);
     assert_ne!(k_empty, k_space, "empty vs space must differ");
 
     // Session prefix collision guard: a session named "g:..." must not collide
     // with a global key that shares the same hash suffix.
     let tricky_session = "g:abc";
     let k_tricky_session = dedup_key("prompt", &meta, Some(tricky_session));
-    let k_global_prompt  = dedup_key("prompt", &meta, None);
+    let k_global_prompt = dedup_key("prompt", &meta, None);
     assert_ne!(
         k_tricky_session, k_global_prompt,
         "session key must not collide with global key regardless of session name"

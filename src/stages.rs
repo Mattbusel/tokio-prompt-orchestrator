@@ -32,21 +32,9 @@
 //! - Stream output: 256
 
 use crate::{
-    config::PipelineConfig,
-    enhanced::CircuitBreaker,
-    metrics,
-    send_with_shed,
-    AssembleOutput,
-    DeadLetterQueue,
-    DroppedRequest,
-    InferenceOutput,
-    ModelWorker,
-    PipelineStage,
-    PostOutput,
-    PromptRequest,
-    RagOutput,
-    SendOutcome,
-    SessionId,
+    config::PipelineConfig, enhanced::CircuitBreaker, metrics, send_with_shed, AssembleOutput,
+    DeadLetterQueue, DroppedRequest, InferenceOutput, ModelWorker, PipelineStage, PostOutput,
+    PromptRequest, RagOutput, SendOutcome, SessionId,
 };
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -348,7 +336,11 @@ pub fn spawn_pipeline_with_config(
 /// # Panics
 ///
 /// This function never panics.
-async fn rag_stage(mut rx: mpsc::Receiver<PromptRequest>, tx: mpsc::Sender<RagOutput>, dlq: Arc<DeadLetterQueue>) {
+async fn rag_stage(
+    mut rx: mpsc::Receiver<PromptRequest>,
+    tx: mpsc::Sender<RagOutput>,
+    dlq: Arc<DeadLetterQueue>,
+) {
     info!(target: "orchestrator::pipeline", "RAG stage started");
 
     while let Some(request) = rx.recv().await {
@@ -453,7 +445,11 @@ async fn rag_stage(mut rx: mpsc::Receiver<PromptRequest>, tx: mpsc::Sender<RagOu
 /// # Panics
 ///
 /// This function never panics.
-async fn assemble_stage(mut rx: mpsc::Receiver<RagOutput>, tx: mpsc::Sender<AssembleOutput>, dlq: Arc<DeadLetterQueue>) {
+async fn assemble_stage(
+    mut rx: mpsc::Receiver<RagOutput>,
+    tx: mpsc::Sender<AssembleOutput>,
+    dlq: Arc<DeadLetterQueue>,
+) {
     info!(target: "orchestrator::pipeline", "Assemble stage started");
 
     while let Some(rag_output) = rx.recv().await {
@@ -596,32 +592,30 @@ async fn inference_stage(
         let prompt = assemble_output.prompt.clone();
         let w = Arc::clone(&worker);
         let infer_fut = breaker.call(|| async move { w.infer(&prompt).await });
-        let cb_result = match tokio::time::timeout(
-            std::time::Duration::from_secs(timeout_secs),
-            infer_fut,
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(_elapsed) => {
-                metrics::inc_inference_timeout();
-                metrics::inc_error("inference", "timeout");
-                warn!(
-                    target: "orchestrator::pipeline",
-                    session_id = %session_id,
-                    request_id = %request_id,
-                    timeout_secs = timeout_secs,
-                    "Inference timed out — dropping request into DLQ"
-                );
-                dlq.push(DroppedRequest {
-                    request_id: request_id.clone(),
-                    session_id: session_id.clone(),
-                    reason: format!("inference_timeout:{timeout_secs}s"),
-                    dropped_at: std::time::SystemTime::now(),
-                });
-                continue;
-            }
-        };
+        let cb_result =
+            match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), infer_fut)
+                .await
+            {
+                Ok(result) => result,
+                Err(_elapsed) => {
+                    metrics::inc_inference_timeout();
+                    metrics::inc_error("inference", "timeout");
+                    warn!(
+                        target: "orchestrator::pipeline",
+                        session_id = %session_id,
+                        request_id = %request_id,
+                        timeout_secs = timeout_secs,
+                        "Inference timed out — dropping request into DLQ"
+                    );
+                    dlq.push(DroppedRequest {
+                        request_id: request_id.clone(),
+                        session_id: session_id.clone(),
+                        reason: format!("inference_timeout:{timeout_secs}s"),
+                        dropped_at: std::time::SystemTime::now(),
+                    });
+                    continue;
+                }
+            };
 
         match cb_result {
             Ok(tokens) => {
@@ -726,7 +720,11 @@ async fn inference_stage(
 /// # Panics
 ///
 /// This function never panics.
-async fn post_stage(mut rx: mpsc::Receiver<InferenceOutput>, tx: mpsc::Sender<PostOutput>, dlq: Arc<DeadLetterQueue>) {
+async fn post_stage(
+    mut rx: mpsc::Receiver<InferenceOutput>,
+    tx: mpsc::Sender<PostOutput>,
+    dlq: Arc<DeadLetterQueue>,
+) {
     info!(target: "orchestrator::pipeline", "Post stage started");
 
     while let Some(inference_output) = rx.recv().await {

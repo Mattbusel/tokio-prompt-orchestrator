@@ -157,7 +157,9 @@ impl CacheLayer {
                     // Collect key first to release all DashMap read-guards
                     // before calling remove (avoids shard deadlock).
                     // O(n) scan — acceptable for small caches; use an LRU crate for large deployments
-                    let evict_key = cache.store.iter()
+                    let evict_key = cache
+                        .store
+                        .iter()
                         .min_by_key(|e| e.value().expires_at)
                         .map(|e| e.key().clone());
                     if let Some(key_to_evict) = evict_key {

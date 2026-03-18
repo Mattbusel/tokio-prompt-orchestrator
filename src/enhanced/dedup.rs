@@ -258,7 +258,9 @@ impl Deduplicator {
 
     /// Mark request as completed
     pub async fn complete(&self, token: DeduplicationToken, result: String) {
-        token.completed.store(true, std::sync::atomic::Ordering::Release);
+        token
+            .completed
+            .store(true, std::sync::atomic::Ordering::Release);
         if let Some(mut entry) = self.requests.get_mut(&token.key) {
             if let RequestState::InProgress { waiter_tx, .. } = entry.value() {
                 let _ = waiter_tx.send(result.clone());
@@ -389,7 +391,9 @@ pub struct DeduplicationStats {
 fn fnv1a(bytes: &[u8]) -> u64 {
     const PRIME: u64 = 1_099_511_628_211;
     const BASIS: u64 = 14_695_981_039_346_656_037;
-    bytes.iter().fold(BASIS, |acc, &b| acc.wrapping_mul(PRIME) ^ b as u64)
+    bytes
+        .iter()
+        .fold(BASIS, |acc, &b| acc.wrapping_mul(PRIME) ^ b as u64)
 }
 
 pub fn dedup_key(

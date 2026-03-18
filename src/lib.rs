@@ -298,7 +298,8 @@ pub struct PostOutput {
 fn fnv1a_hash(s: &str) -> u64 {
     const PRIME: u64 = 1_099_511_628_211;
     const BASIS: u64 = 14_695_981_039_346_656_037;
-    s.bytes().fold(BASIS, |acc, b| acc.wrapping_mul(PRIME) ^ b as u64)
+    s.bytes()
+        .fold(BASIS, |acc, b| acc.wrapping_mul(PRIME) ^ b as u64)
 }
 
 /// Session affinity sharding helper.
@@ -585,7 +586,9 @@ mod tests {
     #[tokio::test]
     async fn test_send_with_shed_returns_queued_when_space_available() {
         let (tx, _rx) = tokio::sync::mpsc::channel::<u32>(10);
-        let outcome = send_with_shed(&tx, 42u32, PipelineStage::Rag).await.unwrap();
+        let outcome = send_with_shed(&tx, 42u32, PipelineStage::Rag)
+            .await
+            .unwrap();
         assert_eq!(outcome, SendOutcome::Queued);
     }
 
@@ -723,7 +726,9 @@ mod tests {
         }
         .with_deadline(Duration::from_secs(10));
 
-        let deadline = req.deadline.expect("deadline must be Some after with_deadline");
+        let deadline = req
+            .deadline
+            .expect("deadline must be Some after with_deadline");
         assert!(
             deadline > std::time::Instant::now(),
             "deadline must be in the future"

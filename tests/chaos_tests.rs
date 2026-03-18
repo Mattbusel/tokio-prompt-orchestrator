@@ -173,8 +173,7 @@ async fn test_circuit_breaker_opens_after_n_failures_and_recovers() {
     );
 
     // The next call must be rejected (Open), not executed.
-    let rejected: Result<(), CircuitBreakerError<String>> =
-        breaker.call(|| async { Ok(()) }).await;
+    let rejected: Result<(), CircuitBreakerError<String>> = breaker.call(|| async { Ok(()) }).await;
     assert!(
         matches!(rejected, Err(CircuitBreakerError::Open)),
         "open circuit must reject calls immediately"
@@ -184,8 +183,7 @@ async fn test_circuit_breaker_opens_after_n_failures_and_recovers() {
     tokio::time::sleep(Duration::from_millis(250)).await;
 
     for _ in 0..10 {
-        let _: Result<(), CircuitBreakerError<String>> =
-            breaker.call(|| async { Ok(()) }).await;
+        let _: Result<(), CircuitBreakerError<String>> = breaker.call(|| async { Ok(()) }).await;
     }
 
     assert_eq!(

@@ -258,21 +258,24 @@ impl CircuitBreaker {
     ///
     /// This is a best-effort synchronous read — use `status()` for authoritative state.
     pub fn is_closed_sync(&self) -> bool {
-        self.state.try_read()
+        self.state
+            .try_read()
             .map(|s| matches!(s.status, CircuitStatus::Closed))
             .unwrap_or(false)
     }
 
     /// Returns `true` if the circuit is currently open (rejecting requests).
     pub fn is_open_sync(&self) -> bool {
-        self.state.try_read()
+        self.state
+            .try_read()
             .map(|s| matches!(s.status, CircuitStatus::Open))
             .unwrap_or(false)
     }
 
     /// Returns `true` if the circuit is in half-open state (testing recovery).
     pub fn is_half_open_sync(&self) -> bool {
-        self.state.try_read()
+        self.state
+            .try_read()
             .map(|s| matches!(s.status, CircuitStatus::HalfOpen))
             .unwrap_or(false)
     }

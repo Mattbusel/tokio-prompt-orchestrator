@@ -458,7 +458,10 @@ async fn test_partial_quorum_loss_routes_to_survivor() {
 
     let evicted = cluster.evict_stale_nodes().await;
     assert!(evicted.contains(&"n2".to_string()), "n2 should be evicted");
-    assert!(!evicted.contains(&"n1".to_string()), "n1 renewed — should survive");
+    assert!(
+        !evicted.contains(&"n1".to_string()),
+        "n1 renewed — should survive"
+    );
 
     assert_eq!(cluster.node_count().await, 1);
     assert_eq!(

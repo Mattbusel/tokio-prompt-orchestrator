@@ -416,7 +416,10 @@ log_format = "pretty"
         );
         let config = result.unwrap();
         assert_eq!(config.pipeline.name, "production");
-        assert_eq!(config.stages.inference.worker, crate::config::WorkerKind::OpenAi);
+        assert_eq!(
+            config.stages.inference.worker,
+            crate::config::WorkerKind::OpenAi
+        );
     }
 
     /// Round-trip: serialise a parsed config back to TOML, then re-parse it.

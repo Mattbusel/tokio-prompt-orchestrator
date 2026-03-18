@@ -14,8 +14,7 @@ use std::sync::Arc;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use tokio_prompt_orchestrator::{
-    send_with_shed, shard_session, EchoWorker, ModelWorker, PipelineStage, PromptRequest,
-    SessionId,
+    send_with_shed, shard_session, EchoWorker, ModelWorker, PipelineStage, PromptRequest, SessionId,
 };
 
 // ---------------------------------------------------------------------------

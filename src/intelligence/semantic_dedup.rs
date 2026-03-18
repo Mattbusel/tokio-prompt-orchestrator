@@ -185,8 +185,7 @@ impl SemanticDedup {
         }
 
         // Collect the union of all word types
-        let all_words: std::collections::HashSet<&String> =
-            fa.keys().chain(fb.keys()).collect();
+        let all_words: std::collections::HashSet<&String> = fa.keys().chain(fb.keys()).collect();
 
         let mut intersection_sum: u32 = 0;
         let mut union_sum: u32 = 0;
