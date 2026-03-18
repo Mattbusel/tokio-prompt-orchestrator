@@ -69,6 +69,31 @@ fn default_true() -> bool {
     true
 }
 
+// ── Channel sizes ────────────────────────────────────────────────────────
+
+/// Per-channel capacity overrides for the five inter-stage pipeline channels.
+///
+/// All fields are optional; when absent the stage default is used
+/// (512, 512, 1024, 512, 256 respectively).
+///
+/// # Panics
+///
+/// This type never panics.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+pub struct ChannelSizes {
+    /// Capacity of the RAG → Assemble channel (default: 512).
+    pub rag_to_assemble: Option<usize>,
+    /// Capacity of the Assemble → Inference channel (default: 512).
+    pub assemble_to_inference: Option<usize>,
+    /// Capacity of the Inference → Post channel (default: 1024).
+    pub inference_to_post: Option<usize>,
+    /// Capacity of the Post → Stream channel (default: 512).
+    pub post_to_stream: Option<usize>,
+    /// Capacity of the Stream output channel (default: 256).
+    pub stream_output: Option<usize>,
+}
+
 // ── Top-level config ─────────────────────────────────────────────────────
 
 /// Root configuration for a pipeline instance.
@@ -108,6 +133,10 @@ pub struct PipelineConfig {
     pub deduplication: DeduplicationConfig,
     /// Observability: logging, metrics, tracing.
     pub observability: ObservabilityConfig,
+    /// Optional per-channel capacity overrides.  When absent, each stage uses
+    /// its compiled-in default (512 / 512 / 1024 / 512 / 256).
+    #[serde(default)]
+    pub channel_sizes: Option<ChannelSizes>,
 }
 
 // ── Pipeline identity ────────────────────────────────────────────────────
@@ -653,6 +682,7 @@ metrics_port = 9090
                 tracing_endpoint: Some("http://jaeger:14268".into()),
             },
             rate_limits: RateLimitConfig::default(),
+            channel_sizes: None,
         };
 
         let toml_str = toml::to_string_pretty(&config).expect("test: serialize to TOML");
@@ -715,6 +745,7 @@ metrics_port = 9090
                 tracing_endpoint: None,
             },
             rate_limits: RateLimitConfig::default(),
+            channel_sizes: None,
         };
 
         let json = serde_json::to_string(&config).expect("test: serialize to JSON");

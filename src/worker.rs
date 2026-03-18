@@ -337,8 +337,9 @@ impl ModelWorker for OpenAiWorker {
             ));
         }
 
-        // Split response into tokens (simple whitespace split)
-        let tokens: Vec<String> = api_response
+        // Return the full content as a single token rather than splitting on
+        // whitespace (which loses punctuation context).
+        let content = api_response
             .choices
             .first()
             .ok_or_else(|| {
@@ -346,11 +347,9 @@ impl ModelWorker for OpenAiWorker {
             })?
             .message
             .content
-            .split_whitespace()
-            .map(|s| s.to_string())
-            .collect();
+            .clone();
 
-        Ok(tokens)
+        Ok(vec![content])
     }
 
     async fn infer_stream(&self, prompt: &str) -> Result<TokenStream, OrchestratorError> {
@@ -612,13 +611,7 @@ impl ModelWorker for AnthropicWorker {
             .collect::<Vec<_>>()
             .join("");
 
-        // Split response into tokens
-        let tokens: Vec<String> = full_text
-            .split_whitespace()
-            .map(|s| s.to_string())
-            .collect();
-
-        Ok(tokens)
+        Ok(vec![full_text])
     }
 
     async fn infer_stream(&self, prompt: &str) -> Result<TokenStream, OrchestratorError> {
@@ -854,14 +847,7 @@ impl ModelWorker for LlamaCppWorker {
             OrchestratorError::Inference(format!("Failed to parse response: {}", e))
         })?;
 
-        // Split response into tokens
-        let tokens: Vec<String> = api_response
-            .content
-            .split_whitespace()
-            .map(|s| s.to_string())
-            .collect();
-
-        Ok(tokens)
+        Ok(vec![api_response.content])
     }
 }
 
@@ -998,16 +984,13 @@ impl ModelWorker for VllmWorker {
             OrchestratorError::Inference(format!("Failed to parse response: {}", e))
         })?;
 
-        // Split response into tokens
-        let tokens: Vec<String> = api_response
+        let content = api_response
             .text
-            .get(0)
-            .ok_or_else(|| OrchestratorError::Inference("Empty response from vLLM".to_string()))?
-            .split_whitespace()
-            .map(|s| s.to_string())
-            .collect();
+            .into_iter()
+            .next()
+            .ok_or_else(|| OrchestratorError::Inference("Empty response from vLLM".to_string()))?;
 
-        Ok(tokens)
+        Ok(vec![content])
     }
 }
 

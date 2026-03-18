@@ -135,9 +135,11 @@ impl CircuitBreaker {
                             state.failures = 0;
                             state.last_state_change = Instant::now();
                             info!("circuit breaker: transitioning to half-open");
+                            crate::metrics::inc_cb_transition("half_open");
                         } else {
                             // Still open, reject
                             debug!("circuit breaker: request rejected (open)");
+                            crate::metrics::inc_cb_rejected();
                             return Err(CircuitBreakerError::Open);
                         }
                     }
@@ -189,6 +191,7 @@ impl CircuitBreaker {
                         success_rate = success_rate,
                         "circuit breaker: closing (service recovered)"
                     );
+                    crate::metrics::inc_cb_transition("closed");
                 }
             }
             CircuitStatus::Closed => {
@@ -228,6 +231,7 @@ impl CircuitBreaker {
                         threshold = self.config.failure_threshold,
                         "circuit breaker: opening (threshold exceeded)"
                     );
+                    crate::metrics::inc_cb_transition("open");
                 }
             }
             CircuitStatus::HalfOpen => {
@@ -235,6 +239,7 @@ impl CircuitBreaker {
                 state.status = CircuitStatus::Open;
                 state.last_state_change = Instant::now();
                 warn!("circuit breaker: reopening (half-open test failed)");
+                crate::metrics::inc_cb_transition("open");
             }
             _ => {}
         }

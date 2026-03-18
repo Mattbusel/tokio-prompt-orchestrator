@@ -49,7 +49,7 @@ use std::collections::HashSet;
 #[cfg(feature = "web-api")]
 use std::sync::Arc;
 #[cfg(feature = "web-api")]
-use std::time::Duration;
+use std::time::{Duration, Instant};
 #[cfg(feature = "web-api")]
 use tokio::sync::mpsc;
 #[cfg(feature = "web-api")]
@@ -58,6 +58,9 @@ use tower_http::cors::CorsLayer;
 use tracing::{debug, info, warn};
 #[cfg(feature = "web-api")]
 use uuid::Uuid;
+
+#[cfg(feature = "web-api")]
+use subtle::ConstantTimeEq;
 
 #[cfg(feature = "web-api")]
 use crate::{PromptRequest, SessionId};
@@ -115,6 +118,16 @@ pub struct InferRequest {
     /// If `true`, the client would like a streaming (WebSocket) response.
     #[serde(default)]
     pub stream: bool,
+    /// Optional request deadline in seconds from now.  When set, the pipeline
+    /// will drop the request rather than process it after the deadline elapses.
+    #[serde(default)]
+    pub deadline_secs: Option<u64>,
+    /// Per-request timeout in seconds (1–3600).  Overrides the server default
+    /// for this request only.  The server rejects values of 0 or greater than
+    /// 3600 with HTTP 400.  When absent, the server-wide `timeout_seconds`
+    /// applies.
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
 }
 
 /// JSON response body for inference endpoints.
@@ -166,6 +179,52 @@ struct TrackedRequest {
     status: RequestStatus,
     result: Option<String>,
     error: Option<String>,
+    /// Set to `Some(Instant)` when the request reaches a terminal state
+    /// (Completed or Failed).  Used by the background cleanup task to evict
+    /// entries that have been complete for more than 1 hour.
+    completed_at: Option<Instant>,
+}
+
+/// How long a completed/failed entry stays in the tracker before eviction.
+#[cfg(feature = "web-api")]
+const TRACKER_RETENTION: Duration = Duration::from_secs(60 * 60); // 1 hour
+
+/// How often the cleanup task runs.
+#[cfg(feature = "web-api")]
+const TRACKER_CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 60); // 5 minutes
+
+#[cfg(feature = "web-api")]
+impl RequestTracker {
+    /// Create a new tracker and spawn a background task that every 5 minutes
+    /// removes entries that have been in a terminal state for more than 1 hour.
+    ///
+    /// The `web_api_tracker_entries` gauge (mapped to the `"tracker"` label on
+    /// the existing `set_queue_depth` metric) is updated after each sweep.
+    fn new() -> Self {
+        let status: Arc<DashMap<String, TrackedRequest>> = Arc::new(DashMap::new());
+        let status_clone = Arc::clone(&status);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(TRACKER_CLEANUP_INTERVAL);
+            interval.tick().await; // skip the immediate first tick
+            loop {
+                interval.tick().await;
+                let now = Instant::now();
+                status_clone.retain(|_, v| {
+                    match v.completed_at {
+                        Some(completed_at) => now.duration_since(completed_at) < TRACKER_RETENTION,
+                        None => true, // still in-flight — keep
+                    }
+                });
+                let remaining = status_clone.len() as i64;
+                crate::metrics::set_queue_depth("tracker", remaining);
+                tracing::debug!(
+                    entries = remaining,
+                    "RequestTracker cleanup sweep complete"
+                );
+            }
+        });
+        Self { status }
+    }
 }
 
 /// Shared application state available to all handlers.
@@ -247,9 +306,7 @@ pub async fn start_server(
         }
     };
 
-    let tracker = RequestTracker {
-        status: Arc::new(DashMap::new()),
-    };
+    let tracker = RequestTracker::new();
 
     let state = Arc::new(AppState {
         pipeline_tx,
@@ -265,6 +322,7 @@ pub async fn start_server(
             if let Some(mut tracked) = collector_state.tracker.status.get_mut(&output.request_id) {
                 tracked.status = RequestStatus::Completed;
                 tracked.result = Some(output.text);
+                tracked.completed_at = Some(Instant::now());
             }
         }
     });
@@ -397,13 +455,18 @@ async fn auth_middleware(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(|token| {
-            // Constant-time comparison to prevent timing attacks
+            // Constant-time comparison using the `subtle` crate to prevent
+            // timing side-channels.  Tokens of different lengths are compared
+            // as equal-length byte slices (zero-padded to the longer length)
+            // so the branch on length mismatch is eliminated.
             let token_bytes = token.as_bytes();
             let expected_bytes = expected_key.as_bytes();
-            if token_bytes.len() != expected_bytes.len() {
-                return false;
-            }
-            token_bytes.iter().zip(expected_bytes.iter()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
+            let max_len = token_bytes.len().max(expected_bytes.len());
+            let mut t = vec![0u8; max_len];
+            let mut e = vec![0u8; max_len];
+            t[..token_bytes.len()].copy_from_slice(token_bytes);
+            e[..expected_bytes.len()].copy_from_slice(expected_bytes);
+            t.ct_eq(&e).into()
         })
         .unwrap_or(false);
 
@@ -439,21 +502,51 @@ async fn infer_handler(
         .session_id
         .unwrap_or_else(|| format!("web-{}", request_id));
 
+    let _span = tracing::info_span!(
+        "infer_handler",
+        request_id = %request_id,
+        session_id = %session_id,
+        endpoint = "POST /api/v1/infer",
+    )
+    .entered();
+
+    // Validate per-request timeout if provided.
+    if let Some(t) = req.timeout_seconds {
+        if t == 0 || t > 3600 {
+            return Err(AppError::BadRequest(
+                "timeout_seconds must be between 1 and 3600".to_string(),
+            ));
+        }
+    }
+
+    let deadline = req
+        .deadline_secs
+        .map(|s| std::time::Instant::now() + std::time::Duration::from_secs(s));
+
     state.tracker.status.insert(
         request_id.clone(),
         TrackedRequest {
             status: RequestStatus::Pending,
             result: None,
             error: None,
+            completed_at: None,
         },
     );
 
-    let prompt_req = PromptRequest {
-        session: SessionId::new(session_id),
-        request_id: request_id.clone(),
-        input: req.prompt,
-        meta: req.metadata,
-        deadline: None,
+    let prompt_req = {
+        let base = PromptRequest {
+            session: SessionId::new(session_id),
+            request_id: request_id.clone(),
+            input: req.prompt,
+            meta: req.metadata,
+            deadline,
+        };
+        // Apply per-request timeout (overrides the pipeline default).
+        if let Some(t) = req.timeout_seconds {
+            base.with_deadline(Duration::from_secs(t))
+        } else {
+            base
+        }
     };
 
     match state.pipeline_tx.try_send(prompt_req) {
@@ -566,12 +659,40 @@ async fn sse_stream_handler(
         .session_id
         .unwrap_or_else(|| format!("sse-{}", request_id));
 
-    let prompt_req = PromptRequest {
-        session: SessionId::new(session_id),
-        request_id: request_id.clone(),
-        input: req.prompt,
-        meta: req.metadata,
-        deadline: None,
+    let _span = tracing::info_span!(
+        "sse_stream_handler",
+        request_id = %request_id,
+        session_id = %session_id,
+        endpoint = "POST /api/v1/stream",
+    )
+    .entered();
+
+    // Validate per-request timeout if provided.
+    if let Some(t) = req.timeout_seconds {
+        if t == 0 || t > 3600 {
+            return Err(AppError::BadRequest(
+                "timeout_seconds must be between 1 and 3600".to_string(),
+            ));
+        }
+    }
+
+    let deadline = req
+        .deadline_secs
+        .map(|s| std::time::Instant::now() + std::time::Duration::from_secs(s));
+
+    let prompt_req = {
+        let base = PromptRequest {
+            session: SessionId::new(session_id),
+            request_id: request_id.clone(),
+            input: req.prompt,
+            meta: req.metadata,
+            deadline,
+        };
+        if let Some(t) = req.timeout_seconds {
+            base.with_deadline(Duration::from_secs(t))
+        } else {
+            base
+        }
     };
 
     match state.pipeline_tx.try_send(prompt_req) {
@@ -591,6 +712,7 @@ async fn sse_stream_handler(
             status: RequestStatus::Processing,
             result: None,
             error: None,
+            completed_at: None,
         },
     );
 
@@ -712,6 +834,7 @@ async fn websocket_stream(socket: WebSocket, state: Arc<AppState>) {
                                 status: RequestStatus::Processing,
                                 result: None,
                                 error: None,
+                                completed_at: None,
                             },
                         );
                         let processing_msg = serde_json::json!({
@@ -1259,6 +1382,15 @@ async fn batch_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<BatchRequest>,
 ) -> Result<Json<BatchResponse>, AppError> {
+    let batch_id = Uuid::new_v4().to_string();
+    let _span = tracing::info_span!(
+        "batch_handler",
+        batch_id = %batch_id,
+        endpoint = "POST /api/v1/batch",
+        prompt_count = req.prompts.len(),
+    )
+    .entered();
+
     const MAX_PROMPTS: usize = 100;
     const MAX_CONCURRENCY: usize = 16;
     const BATCH_TIMEOUT_SECS: u64 = 300;
@@ -1291,6 +1423,7 @@ async fn batch_handler(
                     status: RequestStatus::Pending,
                     result: None,
                     error: None,
+                    completed_at: None,
                 },
             );
 

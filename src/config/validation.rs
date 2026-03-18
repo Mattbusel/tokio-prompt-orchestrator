@@ -308,6 +308,7 @@ mod tests {
                 tracing_endpoint: None,
             },
             rate_limits: RateLimitConfig::default(),
+            channel_sizes: None,
         }
     }
 

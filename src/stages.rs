@@ -244,22 +244,54 @@ pub fn spawn_pipeline(worker: Arc<dyn ModelWorker>) -> PipelineHandles {
 /// # Panics
 ///
 /// This function never panics.
+/// Validate a channel size: must be in [1, 100_000].
+///
+/// Returns the value on success. On failure logs a warning and returns `default`.
+fn validated_channel_size(value: usize, name: &str, default: usize) -> usize {
+    if value < 1 || value > 100_000 {
+        warn!(
+            channel = name,
+            value = value,
+            default = default,
+            "channel size out of valid range [1, 100_000]; using default"
+        );
+        default
+    } else {
+        value
+    }
+}
+
 pub fn spawn_pipeline_with_config(
     worker: Arc<dyn ModelWorker>,
     config: &PipelineConfig,
 ) -> PipelineHandles {
     let r = &config.resilience;
     let s = &config.stages;
+    let cs = config.channel_sizes.as_ref();
 
-    let input_cap = s.rag.channel_capacity.unwrap_or(512);
-    let rag_cap = s.rag.channel_capacity.unwrap_or(512);
-    let assemble_cap = s.assemble.channel_capacity;
-    // InferenceStageConfig has no channel_capacity field; use a fixed default.
-    // Previously derived from timeout_ms (a duration field) which is unrelated
-    // to channel capacity — both branches produced 1024 anyway.
-    let inference_cap = 1024_usize;
-    let post_cap = s.post_process.channel_capacity;
-    let stream_cap = s.stream.channel_capacity;
+    // Resolve channel sizes: explicit channel_sizes override takes precedence,
+    // then per-stage config, then hardcoded defaults.
+    let raw_rag_cap = cs
+        .and_then(|c| c.rag_to_assemble)
+        .or(s.rag.channel_capacity)
+        .unwrap_or(512);
+    let raw_assemble_cap = cs
+        .and_then(|c| c.assemble_to_inference)
+        .unwrap_or(s.assemble.channel_capacity);
+    let raw_inference_cap = cs.and_then(|c| c.inference_to_post).unwrap_or(1024);
+    let raw_post_cap = cs
+        .and_then(|c| c.post_to_stream)
+        .unwrap_or(s.post_process.channel_capacity);
+    let raw_stream_cap = cs
+        .and_then(|c| c.stream_output)
+        .unwrap_or(s.stream.channel_capacity);
+
+    let input_cap = validated_channel_size(raw_rag_cap, "rag_to_assemble", 512);
+    let rag_cap = validated_channel_size(raw_rag_cap, "rag_to_assemble", 512);
+    let assemble_cap = validated_channel_size(raw_assemble_cap, "assemble_to_inference", 512);
+    let inference_cap = validated_channel_size(raw_inference_cap, "inference_to_post", 1024);
+    let post_cap = validated_channel_size(raw_post_cap, "post_to_stream", 512);
+    let stream_cap = validated_channel_size(raw_stream_cap, "stream_output", 256);
 
     let (input_tx, input_rx) = mpsc::channel::<PromptRequest>(input_cap);
     let (rag_tx, rag_rx) = mpsc::channel::<RagOutput>(rag_cap);
@@ -338,10 +370,25 @@ async fn rag_stage(mut rx: mpsc::Receiver<PromptRequest>, tx: mpsc::Sender<RagOu
 
         metrics::inc_request("rag");
 
+        // Drop requests whose deadline has already passed.
+        if let Some(deadline) = request.deadline {
+            if Instant::now() > deadline {
+                warn!(
+                    target: "orchestrator::pipeline",
+                    session_id = %session_id,
+                    request_id = %request_id,
+                    "RAG: request deadline expired, dropping"
+                );
+                metrics::inc_rag_expired();
+                continue;
+            }
+        }
+
         // Simulate RAG work (DB query, embedding search, etc.)
         tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
 
         let session = request.session.clone();
+        let deadline = request.deadline;
         let output = RagOutput {
             session: session.clone(),
             context: format!(
@@ -349,6 +396,7 @@ async fn rag_stage(mut rx: mpsc::Receiver<PromptRequest>, tx: mpsc::Sender<RagOu
                 request.input.chars().take(50).collect::<String>()
             ),
             original: request,
+            deadline,
         };
 
         let elapsed = start.elapsed();
@@ -929,6 +977,7 @@ async fn rag_stage_tracked(
         tokio::time::sleep(Duration::from_millis(5)).await;
 
         let session = request.session.clone();
+        let deadline = request.deadline;
         let output = RagOutput {
             session: session.clone(),
             context: format!(
@@ -936,6 +985,7 @@ async fn rag_stage_tracked(
                 request.input.chars().take(50).collect::<String>()
             ),
             original: request,
+            deadline,
         };
 
         let elapsed = start.elapsed();

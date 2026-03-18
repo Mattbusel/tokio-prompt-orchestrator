@@ -60,6 +60,16 @@ pub struct Metrics {
     pub inference_timeouts_total: Counter,
     /// Requests dropped because their deadline had already passed at dequeue time.
     pub requests_expired_total: Counter,
+    /// Incremented when a `DeadLetterQueue` mutex is recovered from a poisoned state.
+    pub dlq_lock_poisoned_total: Counter,
+    /// Incremented when a RAG-stage request is dropped because its deadline expired.
+    pub rag_requests_expired_total: Counter,
+    /// Circuit breaker state transitions, labelled by target state.
+    pub circuit_breaker_state_transitions_total: CounterVec,
+    /// Requests rejected by the circuit breaker (open state).
+    pub circuit_breaker_requests_rejected_total: Counter,
+    /// Config hot-reload attempts that failed validation or parse.
+    pub config_reload_errors_total: Counter,
 }
 
 static METRICS: OnceLock<Metrics> = OnceLock::new();
@@ -207,6 +217,54 @@ pub fn init_metrics() -> Result<(), OrchestratorError> {
         .register(Box::new(requests_expired_total.clone()))
         .map_err(|e| OrchestratorError::Other(format!("metrics registration failed: {e}")))?;
 
+    let dlq_lock_poisoned_total = Counter::with_opts(Opts::new(
+        "orchestrator_dlq_lock_poisoned_total",
+        "Number of times a DeadLetterQueue mutex was recovered from a poisoned state",
+    ))
+    .map_err(|e| OrchestratorError::Other(format!("metrics init failed: {e}")))?;
+    registry
+        .register(Box::new(dlq_lock_poisoned_total.clone()))
+        .map_err(|e| OrchestratorError::Other(format!("metrics registration failed: {e}")))?;
+
+    let rag_requests_expired_total = Counter::with_opts(Opts::new(
+        "orchestrator_rag_requests_expired_total",
+        "Requests dropped at the RAG stage because their deadline had already passed",
+    ))
+    .map_err(|e| OrchestratorError::Other(format!("metrics init failed: {e}")))?;
+    registry
+        .register(Box::new(rag_requests_expired_total.clone()))
+        .map_err(|e| OrchestratorError::Other(format!("metrics registration failed: {e}")))?;
+
+    let circuit_breaker_state_transitions_total = CounterVec::new(
+        Opts::new(
+            "orchestrator_circuit_breaker_state_transitions_total",
+            "Circuit breaker state transitions, labelled by target state",
+        ),
+        &["state"],
+    )
+    .map_err(|e| OrchestratorError::Other(format!("metrics init failed: {e}")))?;
+    registry
+        .register(Box::new(circuit_breaker_state_transitions_total.clone()))
+        .map_err(|e| OrchestratorError::Other(format!("metrics registration failed: {e}")))?;
+
+    let circuit_breaker_requests_rejected_total = Counter::with_opts(Opts::new(
+        "orchestrator_circuit_breaker_requests_rejected_total",
+        "Requests rejected by the circuit breaker because the circuit is open",
+    ))
+    .map_err(|e| OrchestratorError::Other(format!("metrics init failed: {e}")))?;
+    registry
+        .register(Box::new(circuit_breaker_requests_rejected_total.clone()))
+        .map_err(|e| OrchestratorError::Other(format!("metrics registration failed: {e}")))?;
+
+    let config_reload_errors_total = Counter::with_opts(Opts::new(
+        "orchestrator_config_reload_errors_total",
+        "Config hot-reload attempts that failed validation or parse",
+    ))
+    .map_err(|e| OrchestratorError::Other(format!("metrics init failed: {e}")))?;
+    registry
+        .register(Box::new(config_reload_errors_total.clone()))
+        .map_err(|e| OrchestratorError::Other(format!("metrics registration failed: {e}")))?;
+
     // If another thread raced us, the first one wins  -  both initializations
     // produce identical metric descriptors, so neither outcome is incorrect.
     let _ = METRICS.set(Metrics {
@@ -223,6 +281,11 @@ pub fn init_metrics() -> Result<(), OrchestratorError> {
         dedup_waiters_unblocked_total,
         inference_timeouts_total,
         requests_expired_total,
+        dlq_lock_poisoned_total,
+        rag_requests_expired_total,
+        circuit_breaker_state_transitions_total,
+        circuit_breaker_requests_rejected_total,
+        config_reload_errors_total,
     });
 
     Ok(())
@@ -432,6 +495,87 @@ pub fn inc_expired() {
     }
 }
 
+/// Increment the DLQ lock-poisoned counter.
+///
+/// Call when a `DeadLetterQueue` mutex is recovered from a poisoned state.
+///
+/// No-op if metrics have not been initialised.
+///
+/// # Panics
+///
+/// This function never panics.
+pub fn inc_dlq_lock_poisoned() {
+    if let Some(m) = metrics() {
+        m.dlq_lock_poisoned_total.inc();
+    }
+}
+
+/// Increment the RAG-stage deadline-expired counter.
+///
+/// Call when a request is dropped at the RAG stage because its deadline
+/// has already passed.
+///
+/// No-op if metrics have not been initialised.
+///
+/// # Panics
+///
+/// This function never panics.
+pub fn inc_rag_expired() {
+    if let Some(m) = metrics() {
+        m.rag_requests_expired_total.inc();
+    }
+}
+
+/// Increment the circuit-breaker state-transition counter for `state`.
+///
+/// `state` should be `"open"`, `"half_open"`, or `"closed"`.
+///
+/// No-op if metrics have not been initialised.
+///
+/// # Panics
+///
+/// This function never panics.
+pub fn inc_cb_transition(state: &str) {
+    if let Some(m) = metrics() {
+        if let Ok(c) = m
+            .circuit_breaker_state_transitions_total
+            .get_metric_with_label_values(&[state])
+        {
+            c.inc();
+        }
+    }
+}
+
+/// Increment the circuit-breaker rejected-requests counter.
+///
+/// Call when a request is rejected because the circuit breaker is open.
+///
+/// No-op if metrics have not been initialised.
+///
+/// # Panics
+///
+/// This function never panics.
+pub fn inc_cb_rejected() {
+    if let Some(m) = metrics() {
+        m.circuit_breaker_requests_rejected_total.inc();
+    }
+}
+
+/// Increment the config reload error counter.
+///
+/// Call when a config hot-reload attempt fails validation or parse.
+///
+/// No-op if metrics have not been initialised.
+///
+/// # Panics
+///
+/// This function never panics.
+pub fn inc_config_reload_error() {
+    if let Some(m) = metrics() {
+        m.config_reload_errors_total.inc();
+    }
+}
+
 pub fn gather() -> Vec<prometheus::proto::MetricFamily> {
     metrics().map_or_else(Vec::new, |m| m.registry.gather())
 }
@@ -631,6 +775,45 @@ mod tests {
             .register(Box::new(requests_expired_total.clone()))
             .expect("register must succeed in tests");
 
+        let dlq_lock_poisoned_total =
+            Counter::with_opts(Opts::new("t_dlq_lock_poisoned_total", "test counter"))
+                .expect("Counter construction must succeed in tests");
+        registry
+            .register(Box::new(dlq_lock_poisoned_total.clone()))
+            .expect("register must succeed in tests");
+
+        let rag_requests_expired_total =
+            Counter::with_opts(Opts::new("t_rag_requests_expired_total", "test counter"))
+                .expect("Counter construction must succeed in tests");
+        registry
+            .register(Box::new(rag_requests_expired_total.clone()))
+            .expect("register must succeed in tests");
+
+        let circuit_breaker_state_transitions_total = CounterVec::new(
+            Opts::new("t_circuit_breaker_state_transitions_total", "test counter"),
+            &["state"],
+        )
+        .expect("CounterVec construction must succeed in tests");
+        registry
+            .register(Box::new(circuit_breaker_state_transitions_total.clone()))
+            .expect("register must succeed in tests");
+
+        let circuit_breaker_requests_rejected_total = Counter::with_opts(Opts::new(
+            "t_circuit_breaker_requests_rejected_total",
+            "test counter",
+        ))
+        .expect("Counter construction must succeed in tests");
+        registry
+            .register(Box::new(circuit_breaker_requests_rejected_total.clone()))
+            .expect("register must succeed in tests");
+
+        let config_reload_errors_total =
+            Counter::with_opts(Opts::new("t_config_reload_errors_total", "test counter"))
+                .expect("Counter construction must succeed in tests");
+        registry
+            .register(Box::new(config_reload_errors_total.clone()))
+            .expect("register must succeed in tests");
+
         Metrics {
             registry,
             requests_total,
@@ -645,6 +828,11 @@ mod tests {
             dedup_waiters_unblocked_total,
             inference_timeouts_total,
             requests_expired_total,
+            dlq_lock_poisoned_total,
+            rag_requests_expired_total,
+            circuit_breaker_state_transitions_total,
+            circuit_breaker_requests_rejected_total,
+            config_reload_errors_total,
         }
     }
 

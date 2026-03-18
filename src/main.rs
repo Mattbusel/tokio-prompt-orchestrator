@@ -855,22 +855,32 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
                         path = %env_path.display(),
                         "orchestrator.env changed — reloading runtime-safe settings"
                     );
-                    if let Ok(contents) = std::fs::read_to_string(&env_path) {
-                        for line in contents.lines() {
-                            let line = line.trim();
-                            if line.is_empty() || line.starts_with('#') {
-                                continue;
-                            }
-                            if let Some((k, v)) = line.split_once('=') {
-                                let k = k.trim();
-                                if matches!(k, "RUST_LOG" | "INFERENCE_TIMEOUT_SECS" | "MAX_CONCURRENCY") {
-                                    // SAFETY: only RUST_LOG/perf tuning vars — safe to update
-                                    // between polling intervals. No concurrent env mutations.
-                                    #[allow(unused_unsafe)]
-                                    unsafe { std::env::set_var(k, v.trim()); }
-                                    tracing::info!(key = k, "hot-reloaded runtime setting");
+                    match std::fs::read_to_string(&env_path) {
+                        Ok(contents) => {
+                            for line in contents.lines() {
+                                let line = line.trim();
+                                if line.is_empty() || line.starts_with('#') {
+                                    continue;
+                                }
+                                if let Some((k, v)) = line.split_once('=') {
+                                    let k = k.trim();
+                                    if matches!(k, "RUST_LOG" | "INFERENCE_TIMEOUT_SECS" | "MAX_CONCURRENCY") {
+                                        // SAFETY: only RUST_LOG/perf tuning vars — safe to update
+                                        // between polling intervals. No concurrent env mutations.
+                                        #[allow(unused_unsafe)]
+                                        unsafe { std::env::set_var(k, v.trim()); }
+                                        tracing::info!(key = k, "hot-reloaded runtime setting");
+                                    }
                                 }
                             }
+                        }
+                        Err(e) => {
+                            tokio_prompt_orchestrator::metrics::inc_config_reload_error();
+                            tracing::warn!(
+                                path = %env_path.display(),
+                                error = %e,
+                                "config hot-reload failed — continuing with previous settings"
+                            );
                         }
                     }
                 }

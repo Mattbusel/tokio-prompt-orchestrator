@@ -153,6 +153,8 @@ pub struct RagOutput {
     pub session: SessionId,
     pub context: String,
     pub original: PromptRequest,
+    /// Deadline propagated from the originating [`PromptRequest`], if any.
+    pub deadline: Option<std::time::Instant>,
 }
 
 /// Output from assembly stage
@@ -239,7 +241,11 @@ impl DeadLetterQueue {
 
     /// Push a dropped request into the queue.  Evicts the oldest entry if full.
     pub fn push(&self, req: DroppedRequest) {
-        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let mut guard = self.inner.lock().unwrap_or_else(|p| {
+            tracing::warn!("DeadLetterQueue: recovering from poisoned mutex");
+            crate::metrics::inc_dlq_lock_poisoned();
+            p.into_inner()
+        });
         if guard.len() >= self.capacity {
             guard.pop_front();
         }
@@ -248,13 +254,24 @@ impl DeadLetterQueue {
 
     /// Drain all queued entries and return them, clearing the queue.
     pub fn drain(&self) -> Vec<DroppedRequest> {
-        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let mut guard = self.inner.lock().unwrap_or_else(|p| {
+            tracing::warn!("DeadLetterQueue: recovering from poisoned mutex");
+            crate::metrics::inc_dlq_lock_poisoned();
+            p.into_inner()
+        });
         guard.drain(..).collect()
     }
 
     /// Return the number of entries currently in the queue.
     pub fn len(&self) -> usize {
-        self.inner.lock().unwrap_or_else(|p| p.into_inner()).len()
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| {
+                tracing::warn!("DeadLetterQueue: recovering from poisoned mutex");
+                crate::metrics::inc_dlq_lock_poisoned();
+                p.into_inner()
+            })
+            .len()
     }
 
     /// Return `true` if the queue contains no entries.
