@@ -233,7 +233,7 @@ pub fn spawn_pipeline(worker: Arc<dyn ModelWorker>) -> PipelineHandles {
 ///
 /// This function never panics.
 fn validated_channel_size(value: usize, name: &str, default: usize) -> usize {
-    if value < 1 || value > 100_000 {
+    if !(1..=100_000).contains(&value) {
         warn!(
             channel = name,
             value = value,

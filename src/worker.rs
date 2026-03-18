@@ -1083,7 +1083,7 @@ impl LoadBalancedWorker {
     /// Panics if `n` is zero.
     pub fn replicate(worker: Arc<dyn ModelWorker>, n: usize) -> Self {
         assert!(n > 0, "replicate count must be > 0");
-        let workers = std::iter::repeat(Arc::clone(&worker)).take(n).collect();
+        let workers = std::iter::repeat_n(Arc::clone(&worker), n).collect();
         Self::round_robin(workers)
     }
 
