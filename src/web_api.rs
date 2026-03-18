@@ -39,7 +39,7 @@ use tower_http::cors::AllowOrigin;
 #[cfg(feature = "web-api")]
 use dashmap::DashMap;
 #[cfg(feature = "web-api")]
-use futures::{stream, StreamExt};
+use futures::{stream, SinkExt, StreamExt};
 #[cfg(feature = "web-api")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "web-api")]
@@ -271,6 +271,7 @@ pub async fn start_server(
 
     let app = Router::new()
         .route("/api/v1/infer", post(infer_handler))
+        .route("/api/v1/batch", post(batch_handler))
         .route("/api/v1/stream", post(sse_stream_handler))
         .route("/api/v1/status/:request_id", get(status_handler))
         .route("/api/v1/result/:request_id", get(result_handler))
@@ -452,13 +453,21 @@ async fn infer_handler(
         request_id: request_id.clone(),
         input: req.prompt,
         meta: req.metadata,
+        deadline: None,
     };
 
-    state
-        .pipeline_tx
-        .send(prompt_req)
-        .await
-        .map_err(|_| AppError::PipelineClosed)?;
+    match state.pipeline_tx.try_send(prompt_req) {
+        Ok(()) => {}
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            // Remove the pending tracker entry since we won't process this request.
+            state.tracker.status.remove(&request_id);
+            return Err(AppError::PipelineFull);
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            state.tracker.status.remove(&request_id);
+            return Err(AppError::PipelineClosed);
+        }
+    }
 
     if let Some(mut tracked) = state.tracker.status.get_mut(&request_id) {
         tracked.status = RequestStatus::Processing;
@@ -562,13 +571,18 @@ async fn sse_stream_handler(
         request_id: request_id.clone(),
         input: req.prompt,
         meta: req.metadata,
+        deadline: None,
     };
 
-    state
-        .pipeline_tx
-        .send(prompt_req)
-        .await
-        .map_err(|_| AppError::PipelineClosed)?;
+    match state.pipeline_tx.try_send(prompt_req) {
+        Ok(()) => {}
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            return Err(AppError::PipelineFull);
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            return Err(AppError::PipelineClosed);
+        }
+    }
 
     // Register request in tracker so collector can write the result.
     state.tracker.status.insert(
@@ -642,9 +656,19 @@ async fn websocket_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppStat
 
 /// Process a WebSocket connection with ping/pong keepalive, rate limiting,
 /// and clean disconnect handling.
+///
+/// The socket is split into a sink (writes) and a stream (reads) so that the
+/// inner inference-polling loop can race `tokio::select!` between:
+///   (a) the next 100 ms poll tick, and
+///   (b) an incoming WebSocket frame (Close / error = client gone).
+/// This avoids burning API tokens when the client disconnects mid-inference.
 #[cfg(feature = "web-api")]
-async fn websocket_stream(mut socket: WebSocket, state: Arc<AppState>) {
+async fn websocket_stream(socket: WebSocket, state: Arc<AppState>) {
     info!("WebSocket client connected");
+
+    // Split the socket so the read half (disconnect detection) and write half
+    // (result delivery) can be used independently inside the polling loop.
+    let (mut ws_sink, mut ws_stream) = socket.split();
 
     let mut ping_interval = tokio::time::interval(Duration::from_secs(WS_PING_INTERVAL_SECS));
     let mut msg_count: u32 = 0;
@@ -652,7 +676,7 @@ async fn websocket_stream(mut socket: WebSocket, state: Arc<AppState>) {
 
     loop {
         tokio::select! {
-            msg = socket.recv() => {
+            msg = ws_stream.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         //  Rate limiting
@@ -665,7 +689,7 @@ async fn websocket_stream(mut socket: WebSocket, state: Arc<AppState>) {
                             let err_msg = serde_json::json!({
                                 "error": "Rate limit exceeded"
                             }).to_string();
-                            let _ = socket.send(Message::Text(err_msg)).await;
+                            let _ = ws_sink.send(Message::Text(err_msg)).await;
                             continue;
                         }
 
@@ -676,7 +700,7 @@ async fn websocket_stream(mut socket: WebSocket, state: Arc<AppState>) {
                                 let error_msg = serde_json::json!({
                                     "error": format!("Invalid JSON: {e}")
                                 }).to_string();
-                                let _ = socket.send(Message::Text(error_msg)).await;
+                                let _ = ws_sink.send(Message::Text(error_msg)).await;
                                 continue;
                             }
                         };
@@ -695,7 +719,7 @@ async fn websocket_stream(mut socket: WebSocket, state: Arc<AppState>) {
                             "status": "processing"
                         }).to_string();
 
-                        if socket.send(Message::Text(processing_msg)).await.is_err() {
+                        if ws_sink.send(Message::Text(processing_msg)).await.is_err() {
                             break;
                         }
 
@@ -706,28 +730,71 @@ async fn websocket_stream(mut socket: WebSocket, state: Arc<AppState>) {
                             request_id: request_id.clone(),
                             input: req.prompt,
                             meta: req.metadata,
+                            deadline: None,
                         };
 
                         if state.pipeline_tx.send(prompt_req).await.is_ok() {
-                            // Poll tracker until Completed/Failed or timeout.
+                            // Poll the tracker until Completed/Failed, timeout, or
+                            // client disconnect — whichever comes first.
+                            //
+                            // Each iteration races a 100 ms sleep against the next
+                            // incoming WebSocket frame.  A Close frame, recv error,
+                            // or stream end means the client is gone: break early so
+                            // we stop burning API tokens on an abandoned request.
                             let ws_timeout = Duration::from_secs(state.config.timeout_seconds);
                             let ws_start = std::time::Instant::now();
-                            let (ws_status, ws_result, ws_error) = loop {
+                            let poll_result: Option<(&str, Option<String>, Option<String>)> = loop {
                                 if let Some(tracked) = state.tracker.status.get(&request_id) {
                                     match tracked.status {
                                         RequestStatus::Completed => {
-                                            break ("completed", tracked.result.clone(), None);
+                                            break Some(("completed", tracked.result.clone(), None));
                                         }
                                         RequestStatus::Failed => {
-                                            break ("failed", None, tracked.error.clone());
+                                            break Some(("failed", None, tracked.error.clone()));
                                         }
                                         _ => {}
                                     }
                                 }
                                 if ws_start.elapsed() > ws_timeout {
-                                    break ("timeout", None, Some("Request timed out".to_string()));
+                                    break Some(("timeout", None, Some("Request timed out".to_string())));
                                 }
-                                tokio::time::sleep(Duration::from_millis(100)).await;
+                                // Race poll sleep vs. incoming WS frame (disconnect detection).
+                                tokio::select! {
+                                    _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                                        // Continue polling; client still connected.
+                                    }
+                                    frame = ws_stream.next() => {
+                                        match frame {
+                                            Some(Ok(Message::Close(_))) | None => {
+                                                // Client sent Close or stream ended — abort.
+                                                debug!(
+                                                    "Client disconnected mid-inference; \
+                                                     aborting poll for request_id={}",
+                                                    request_id
+                                                );
+                                                break None;
+                                            }
+                                            Some(Err(e)) => {
+                                                warn!(error = %e, "WebSocket error during inference poll");
+                                                break None;
+                                            }
+                                            // Ping/pong/binary while waiting — respond to
+                                            // pings and keep polling.
+                                            Some(Ok(Message::Ping(data))) => {
+                                                if ws_sink.send(Message::Pong(data)).await.is_err() {
+                                                    break None;
+                                                }
+                                            }
+                                            _ => {} // Pong, Binary — ignore
+                                        }
+                                    }
+                                }
+                            };
+
+                            // None means the client disconnected; stop the handler.
+                            let (ws_status, ws_result, ws_error) = match poll_result {
+                                None => break,
+                                Some(t) => t,
                             };
 
                             let result_msg = serde_json::json!({
@@ -737,7 +804,7 @@ async fn websocket_stream(mut socket: WebSocket, state: Arc<AppState>) {
                                 "error": ws_error,
                             }).to_string();
 
-                            if socket.send(Message::Text(result_msg)).await.is_err() {
+                            if ws_sink.send(Message::Text(result_msg)).await.is_err() {
                                 break;
                             }
                         } else {
@@ -746,12 +813,12 @@ async fn websocket_stream(mut socket: WebSocket, state: Arc<AppState>) {
                                 "status": "failed",
                                 "error": "Pipeline closed"
                             }).to_string();
-                            let _ = socket.send(Message::Text(err_msg)).await;
+                            let _ = ws_sink.send(Message::Text(err_msg)).await;
                             break;
                         }
                     }
                     Some(Ok(Message::Ping(data))) => {
-                        if socket.send(Message::Pong(data)).await.is_err() {
+                        if ws_sink.send(Message::Pong(data)).await.is_err() {
                             break;
                         }
                     }
@@ -764,7 +831,7 @@ async fn websocket_stream(mut socket: WebSocket, state: Arc<AppState>) {
                 }
             }
             _ = ping_interval.tick() => {
-                if socket.send(Message::Ping(vec![])).await.is_err() {
+                if ws_sink.send(Message::Ping(vec![])).await.is_err() {
                     break;
                 }
             }
@@ -853,6 +920,7 @@ async fn token_stream_ws(mut socket: WebSocket, state: Arc<AppState>) {
         request_id: request_id.clone(),
         input: prompt.clone(),
         meta: std::collections::HashMap::new(),
+        deadline: None,
     };
 
     if state.pipeline_tx.send(prompt_req).await.is_err() {
@@ -864,10 +932,13 @@ async fn token_stream_ws(mut socket: WebSocket, state: Arc<AppState>) {
         return;
     }
 
-    // Stream synthetic token chunks (word-by-word) so the endpoint is functional
+    // Stream synthetic token chunks (word-by-word) so the endpoint is functional.
+    // Split the socket so we can detect client disconnect (Close frame / recv error)
+    // concurrently with sending each token chunk.
+    let (mut ws_sink, mut ws_stream) = socket.split();
     let words: Vec<&str> = prompt.split_whitespace().collect();
     let total = words.len();
-    for (i, word) in words.iter().enumerate() {
+    'stream: for (i, word) in words.iter().enumerate() {
         let is_last = i + 1 == total;
         let chunk = TokenChunk {
             text: format!("{} ", word),
@@ -882,8 +953,34 @@ async fn token_stream_ws(mut socket: WebSocket, state: Arc<AppState>) {
             Ok(j) => j,
             Err(_) => break,
         };
-        if socket.send(Message::Text(json)).await.is_err() {
-            break;
+        // Race the token send against an incoming Close/error from the client.
+        // If the client disconnects mid-stream, stop immediately to avoid
+        // burning API tokens on a gone connection.
+        tokio::select! {
+            send_result = ws_sink.send(Message::Text(json)) => {
+                if send_result.is_err() {
+                    break 'stream;
+                }
+            }
+            msg = ws_stream.next() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => {
+                        debug!("Token-stream client disconnected mid-stream; aborting request_id={}", request_id);
+                        break 'stream;
+                    }
+                    Some(Err(_)) => {
+                        break 'stream;
+                    }
+                    _ => {
+                        // Ignore other frames (ping, pong, etc.) and still send the chunk.
+                        if ws_sink.send(Message::Text(
+                            match serde_json::to_string(&chunk) { Ok(j) => j, Err(_) => break 'stream }
+                        )).await.is_err() {
+                            break 'stream;
+                        }
+                    }
+                }
+            }
         }
         if chunk.finish_reason.is_some() {
             break;
@@ -1111,6 +1208,168 @@ const OPENAPI_SCHEMA: &str = r##"{
 }"##;
 
 // ============================================================================
+// Batch Handler
+// ============================================================================
+
+/// JSON body for `POST /api/v1/batch`.
+#[cfg(feature = "web-api")]
+#[derive(Debug, Deserialize)]
+struct BatchRequest {
+    /// Prompts to process, up to 100.
+    prompts: Vec<String>,
+    /// Optional shared session ID prefix; a unique suffix is added per item.
+    #[serde(default)]
+    session_id: Option<String>,
+    /// Maximum parallel in-flight requests (1–16, default 4).
+    #[serde(default)]
+    max_concurrency: Option<usize>,
+}
+
+/// Per-item result in a batch response.
+#[cfg(feature = "web-api")]
+#[derive(Debug, Serialize)]
+struct BatchItemResult {
+    request_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// JSON response body for `POST /api/v1/batch`.
+#[cfg(feature = "web-api")]
+#[derive(Debug, Serialize)]
+struct BatchResponse {
+    results: Vec<BatchItemResult>,
+    total: usize,
+    succeeded: usize,
+    failed: usize,
+}
+
+/// `POST /api/v1/batch` — process multiple prompts concurrently.
+///
+/// Accepts up to 100 prompts.  `max_concurrency` controls in-flight parallelism
+/// (1–16, default 4).  Returns HTTP 429 if the pipeline is at capacity.
+///
+/// # Panics
+///
+/// This function never panics.
+#[cfg(feature = "web-api")]
+async fn batch_handler(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BatchRequest>,
+) -> Result<Json<BatchResponse>, AppError> {
+    const MAX_PROMPTS: usize = 100;
+    const MAX_CONCURRENCY: usize = 16;
+    const BATCH_TIMEOUT_SECS: u64 = 300;
+
+    if req.prompts.is_empty() {
+        return Err(AppError::BadRequest("prompts must not be empty".to_string()));
+    }
+    if req.prompts.len() > MAX_PROMPTS {
+        return Err(AppError::BadRequest(format!(
+            "too many prompts: {} (max {MAX_PROMPTS})",
+            req.prompts.len()
+        )));
+    }
+    let concurrency = req.max_concurrency.unwrap_or(4).clamp(1, MAX_CONCURRENCY);
+    let item_timeout = Duration::from_secs(state.config.timeout_seconds.min(BATCH_TIMEOUT_SECS));
+
+    let futures_iter = req.prompts.into_iter().enumerate().map(|(i, prompt)| {
+        let state = Arc::clone(&state);
+        let session_prefix = req.session_id.clone();
+        let item_timeout = item_timeout;
+        async move {
+            let request_id = Uuid::new_v4().to_string();
+            let session_id = session_prefix
+                .map(|s| format!("{s}-{i}"))
+                .unwrap_or_else(|| format!("batch-{request_id}"));
+
+            state.tracker.status.insert(
+                request_id.clone(),
+                TrackedRequest {
+                    status: RequestStatus::Pending,
+                    result: None,
+                    error: None,
+                },
+            );
+
+            let prompt_req = PromptRequest {
+                session: SessionId::new(session_id),
+                request_id: request_id.clone(),
+                input: prompt,
+                meta: HashMap::new(),
+                deadline: Some(std::time::Instant::now() + item_timeout),
+            };
+
+            match state.pipeline_tx.try_send(prompt_req) {
+                Ok(()) => {}
+                Err(_) => {
+                    state.tracker.status.remove(&request_id);
+                    return BatchItemResult {
+                        request_id,
+                        text: None,
+                        error: Some("pipeline_full_or_closed".to_string()),
+                    };
+                }
+            }
+
+            let start = std::time::Instant::now();
+            loop {
+                if let Some(tracked) = state.tracker.status.get(&request_id) {
+                    match tracked.status {
+                        RequestStatus::Completed => {
+                            let text = tracked.result.clone();
+                            drop(tracked);
+                            state.tracker.status.remove(&request_id);
+                            return BatchItemResult { request_id, text, error: None };
+                        }
+                        RequestStatus::Failed => {
+                            let err = tracked.error.clone();
+                            drop(tracked);
+                            state.tracker.status.remove(&request_id);
+                            return BatchItemResult {
+                                request_id,
+                                text: None,
+                                error: err.or_else(|| Some("inference_failed".to_string())),
+                            };
+                        }
+                        _ => {}
+                    }
+                } else {
+                    return BatchItemResult {
+                        request_id,
+                        text: None,
+                        error: Some("request_lost".to_string()),
+                    };
+                }
+                if start.elapsed() > item_timeout {
+                    state.tracker.status.remove(&request_id);
+                    return BatchItemResult {
+                        request_id,
+                        text: None,
+                        error: Some("timeout".to_string()),
+                    };
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    });
+
+    use futures::StreamExt as _;
+    let results: Vec<BatchItemResult> = futures::stream::iter(futures_iter)
+        .buffer_unordered(concurrency)
+        .collect()
+        .await;
+
+    let succeeded = results.iter().filter(|r| r.error.is_none()).count();
+    let failed = results.len() - succeeded;
+    let total = results.len();
+
+    Ok(Json(BatchResponse { results, total, succeeded, failed }))
+}
+
+// ============================================================================
 // Error Type
 // ============================================================================
 
@@ -1130,18 +1389,53 @@ enum AppError {
     PipelineClosed,
     /// The request timed out waiting for a result.
     Timeout,
+    /// Pipeline input queue is full — client should retry after a backoff period.
+    PipelineFull,
+    /// Request validation failed.
+    BadRequest(String),
 }
 
 #[cfg(feature = "web-api")]
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let (status, message) = match self {
-            AppError::NotFound => (StatusCode::NOT_FOUND, "Request not found"),
-            AppError::PipelineClosed => (StatusCode::SERVICE_UNAVAILABLE, "Pipeline closed"),
-            AppError::Timeout => (StatusCode::REQUEST_TIMEOUT, "Request timeout"),
-        };
-
-        (status, Json(serde_json::json!({"error": message}))).into_response()
+        match self {
+            AppError::NotFound => (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "not_found", "message": "Request not found"})),
+            )
+                .into_response(),
+            AppError::PipelineClosed => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "pipeline_closed", "message": "Pipeline closed"})),
+            )
+                .into_response(),
+            AppError::Timeout => (
+                StatusCode::REQUEST_TIMEOUT,
+                Json(serde_json::json!({"error": "timeout", "message": "Request timeout"})),
+            )
+                .into_response(),
+            AppError::PipelineFull => {
+                let mut resp = (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(serde_json::json!({
+                        "error": "server_busy",
+                        "message": "Pipeline at capacity — retry after backoff period",
+                        "retry_after_secs": 5
+                    })),
+                )
+                    .into_response();
+                resp.headers_mut().insert(
+                    "Retry-After",
+                    axum::http::HeaderValue::from_static("5"),
+                );
+                resp
+            }
+            AppError::BadRequest(msg) => (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "bad_request", "message": msg})),
+            )
+                .into_response(),
+        }
     }
 }
 

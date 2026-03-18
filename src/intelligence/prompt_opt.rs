@@ -71,13 +71,85 @@ impl Default for PromptOptimizerConfig {
 pub struct PromptOptimizer {
     history: Arc<Mutex<Vec<TransformRecord>>>,
     config: PromptOptimizerConfig,
+    /// Few-shot example store: (input, output) pairs used by ExampleInjection.
+    examples: Arc<Mutex<Vec<(String, String)>>>,
 }
 impl PromptOptimizer {
     pub fn new(config: PromptOptimizerConfig) -> Self {
         Self {
             history: Arc::new(Mutex::new(Vec::new())),
             config,
+            examples: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Add a (input, output) few-shot example to the retrieval store.
+    pub fn add_example(&self, input: impl Into<String>, output: impl Into<String>) {
+        if let Ok(mut guard) = self.examples.lock() {
+            guard.push((input.into(), output.into()));
+        }
+    }
+
+    /// Word-set Jaccard similarity between two strings.
+    ///
+    /// Splits both strings on whitespace, builds word-sets, then returns
+    /// |intersection| / |union|.  Returns 0.0 when both sets are empty.
+    fn jaccard_similarity(a: &str, b: &str) -> f64 {
+        use std::collections::HashSet;
+        let set_a: HashSet<&str> = a.split_whitespace().collect();
+        let set_b: HashSet<&str> = b.split_whitespace().collect();
+        if set_a.is_empty() && set_b.is_empty() {
+            return 0.0;
+        }
+        let intersection = set_a.intersection(&set_b).count() as f64;
+        let union = set_a.union(&set_b).count() as f64;
+        if union == 0.0 {
+            0.0
+        } else {
+            intersection / union
+        }
+    }
+
+    /// Retrieve the top-`k` most similar few-shot examples for `query`.
+    ///
+    /// Returns a `Vec` of `(input, output)` pairs sorted by descending Jaccard
+    /// similarity.  If `k` exceeds the number of stored examples the full store
+    /// is returned.
+    pub fn retrieve_examples(&self, query: &str, k: usize) -> Vec<(String, String)> {
+        let guard = match self.examples.lock() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        if guard.is_empty() || k == 0 {
+            return Vec::new();
+        }
+        let mut scored: Vec<(f64, &(String, String))> = guard
+            .iter()
+            .map(|ex| (Self::jaccard_similarity(query, &ex.0), ex))
+            .collect();
+        // Sort descending by score; stable sort for reproducibility.
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored
+            .into_iter()
+            .take(k)
+            .map(|(_, ex)| ex.clone())
+            .collect()
+    }
+
+    /// Format retrieved examples as a preamble prepended to the system prompt.
+    ///
+    /// Each example becomes an "Input: … / Output: …" block separated by
+    /// blank lines.  Returns an empty string when `examples` is empty.
+    fn format_examples(examples: &[(String, String)]) -> String {
+        if examples.is_empty() {
+            return String::new();
+        }
+        let mut parts = vec!["### Few-shot examples".to_string()];
+        for (i, (input, output)) in examples.iter().enumerate() {
+            parts.push(format!("Example {}:\nInput: {}\nOutput: {}", i + 1, input, output));
+        }
+        parts.push("### End of examples".to_string());
+        parts.join("\n\n")
     }
 
     fn compress_system_prompt(&self, prompt: &str) -> String {
@@ -174,7 +246,24 @@ impl PromptOptimizer {
                     self.record_transform(strategy.clone(), orig, sys.len());
                 }
                 OptimizationStrategy::ExampleInjection => {
-                    debug!("ExampleInjection: no-op in base implementation");
+                    // Retrieve the top-3 most relevant few-shot examples by
+                    // Jaccard word-overlap similarity to the user prompt, then
+                    // prepend them to the system prompt as a preamble.
+                    let top_k = self.retrieve_examples(&usr, 3);
+                    if !top_k.is_empty() {
+                        let preamble = Self::format_examples(&top_k);
+                        let orig = sys.len();
+                        sys = format!("{}\n\n{}", preamble, sys);
+                        debug!(
+                            orig,
+                            new = sys.len(),
+                            examples = top_k.len(),
+                            "ExampleInjection applied"
+                        );
+                        self.record_transform(strategy.clone(), orig, sys.len());
+                    } else {
+                        debug!("ExampleInjection: no examples in store, skipping");
+                    }
                 }
             }
         }

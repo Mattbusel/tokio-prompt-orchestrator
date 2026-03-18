@@ -61,7 +61,7 @@ bytes = "1"
 # Enhanced features
 async-nats = { version = "0.35", optional = true }
 notify = "6"
-schemars = "0.8"
+schemars = { version = "0.8", optional = true }
 redis = { version = "0.24", optional = true, features = ["tokio-comp", "connection-manager"] }
 dashmap = "5.5"
 governor = { version = "0.6", optional = true }
@@ -99,6 +99,7 @@ tui = ["ratatui", "crossterm"]
 mcp = ["rmcp", "web-api"]
 dashboard = ["web-api"]
 distributed = ["redis", "async-nats"]
+schema = ["schemars"]
 
 [dev-dependencies]
 tokio-test = "0.4"
@@ -106,6 +107,7 @@ tempfile = "3"
 wiremock = "0.6"
 tower = { version = "0.4", features = ["util"] }
 criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
+proptest = "1"
 
 [[example]]
 name = "rest_api"
@@ -154,6 +156,11 @@ required-features = ["self-improving"]
 [[bin]]
 name = "validate"
 path = "src/bin/validate.rs"
+
+[[bin]]
+name = "gen_schema"
+path = "src/bin/gen_schema.rs"
+required-features = ["schema"]
 
 [[bench]]
 name = "pipeline"

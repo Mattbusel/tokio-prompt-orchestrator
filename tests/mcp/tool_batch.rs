@@ -27,6 +27,7 @@ async fn test_batch_submit_multiple_prompts() {
                 m.insert("batch_job".to_string(), job_id.to_string());
                 m
             },
+            deadline: None,
         };
 
         let result = handles.input_tx.send(request).await;
@@ -47,6 +48,7 @@ async fn test_batch_submit_returns_immediately() {
             request_id: format!("speed-{i}"),
             input: format!("prompt {i}"),
             meta: HashMap::new(),
+            deadline: None,
         };
         let _ = handles.input_tx.send(request).await;
     }
@@ -70,6 +72,7 @@ async fn test_batch_prompts_share_session_id() {
             request_id: format!("{job_id}-{i}"),
             input: format!("prompt {i}"),
             meta: HashMap::new(),
+            deadline: None,
         })
         .collect();
 
@@ -104,6 +107,7 @@ async fn test_batch_empty_prompts_list() {
             request_id: format!("empty-{i}"),
             input: prompt.to_string(),
             meta: HashMap::new(),
+            deadline: None,
         };
         let _ = handles.input_tx.send(request).await;
     }
@@ -123,6 +127,7 @@ async fn test_batch_large_submission() {
             request_id: format!("large-{i}"),
             input: format!("batch prompt number {i}"),
             meta: HashMap::new(),
+            deadline: None,
         };
         let result = handles.input_tx.send(request).await;
         assert!(result.is_ok(), "prompt {i} should be accepted");

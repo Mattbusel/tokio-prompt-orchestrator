@@ -699,6 +699,7 @@ async fn run_repl(
             request_id: uuid_simple(),
             input: prompt,
             meta: Default::default(),
+            deadline: None,
         };
 
         if input_tx.send(req).await.is_err() {
@@ -836,6 +837,46 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
 
     let handles = spawn_pipeline(worker);
     tracing::info!("Pipeline stages spawned");
+
+    // ── Config hot-reload: poll orchestrator.env every 5 s ──────────────────
+    {
+        let env_path = env_file_path();
+        tokio::spawn(async move {
+            let mut last_mtime: Option<std::time::SystemTime> = std::fs::metadata(&env_path)
+                .and_then(|m| m.modified())
+                .ok();
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                let current_mtime =
+                    std::fs::metadata(&env_path).and_then(|m| m.modified()).ok();
+                if current_mtime != last_mtime && current_mtime.is_some() {
+                    last_mtime = current_mtime;
+                    tracing::info!(
+                        path = %env_path.display(),
+                        "orchestrator.env changed — reloading runtime-safe settings"
+                    );
+                    if let Ok(contents) = std::fs::read_to_string(&env_path) {
+                        for line in contents.lines() {
+                            let line = line.trim();
+                            if line.is_empty() || line.starts_with('#') {
+                                continue;
+                            }
+                            if let Some((k, v)) = line.split_once('=') {
+                                let k = k.trim();
+                                if matches!(k, "RUST_LOG" | "INFERENCE_TIMEOUT_SECS" | "MAX_CONCURRENCY") {
+                                    // SAFETY: only RUST_LOG/perf tuning vars — safe to update
+                                    // between polling intervals. No concurrent env mutations.
+                                    #[allow(unused_unsafe)]
+                                    unsafe { std::env::set_var(k, v.trim()); }
+                                    tracing::info!(key = k, "hot-reloaded runtime setting");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
 
     // ── Budget enforcement task ─────────────────────────────────────────────
     // If `--max-spend` was given, poll the Prometheus `inference_cost_total`

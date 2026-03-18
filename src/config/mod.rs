@@ -23,6 +23,7 @@ pub mod loader;
 pub mod validation;
 pub mod watcher;
 
+#[cfg(feature = "schema")]
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -90,7 +91,8 @@ fn default_true() -> bool {
 /// # Panics
 ///
 /// This type never panics during construction or access.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct PipelineConfig {
     /// Pipeline identity and version metadata.
@@ -115,7 +117,8 @@ pub struct PipelineConfig {
 /// # Panics
 ///
 /// This type never panics.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct PipelineSection {
     /// Human-readable pipeline name (e.g., "production", "staging").
@@ -133,7 +136,8 @@ pub struct PipelineSection {
 /// # Panics
 ///
 /// This type never panics.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct StagesConfig {
     /// RAG (retrieval-augmented generation) stage settings.
@@ -155,7 +159,8 @@ pub struct StagesConfig {
 /// # Panics
 ///
 /// This type never panics.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct RagStageConfig {
     /// Whether the RAG stage is enabled. Disabled stages pass-through.
@@ -176,7 +181,8 @@ pub struct RagStageConfig {
 /// # Panics
 ///
 /// This type never panics.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct AssembleStageConfig {
     /// Whether the assembly stage is enabled.
@@ -194,7 +200,8 @@ pub struct AssembleStageConfig {
 /// # Panics
 ///
 /// This type never panics.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct InferenceStageConfig {
     /// Which model worker backend to use.
@@ -214,7 +221,8 @@ pub struct InferenceStageConfig {
 /// # Panics
 ///
 /// This type never panics.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerKind {
@@ -235,7 +243,8 @@ pub enum WorkerKind {
 /// # Panics
 ///
 /// This type never panics.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct PostProcessStageConfig {
     /// Whether post-processing is enabled.
@@ -251,7 +260,8 @@ pub struct PostProcessStageConfig {
 /// # Panics
 ///
 /// This type never panics.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct StreamStageConfig {
     /// Whether output streaming is enabled.
@@ -287,7 +297,8 @@ fn default_rate_limit_enabled() -> bool {
 /// # Panics
 ///
 /// This type never panics.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct RateLimitConfig {
     /// Whether rate limiting is enabled.
@@ -318,7 +329,8 @@ impl Default for RateLimitConfig {
 /// # Panics
 ///
 /// This type never panics.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ResilienceConfig {
     /// Maximum number of retry attempts before failing a request.
@@ -344,7 +356,8 @@ pub struct ResilienceConfig {
 /// # Panics
 ///
 /// This type never panics.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct DeduplicationConfig {
     /// Whether deduplication is enabled.
@@ -364,7 +377,8 @@ pub struct DeduplicationConfig {
 /// # Panics
 ///
 /// This type never panics.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ObservabilityConfig {
     /// Log output format.
@@ -380,7 +394,8 @@ pub struct ObservabilityConfig {
 /// # Panics
 ///
 /// This type never panics.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub enum LogFormat {
@@ -402,6 +417,7 @@ pub enum LogFormat {
 /// # Panics
 ///
 /// This function never panics.
+#[cfg(feature = "schema")]
 pub fn export_schema() -> Result<String, serde_json::Error> {
     let schema = schemars::schema_for!(PipelineConfig);
     serde_json::to_string_pretty(&schema)
@@ -476,6 +492,7 @@ mod tests {
         assert_eq!(fmt, LogFormat::Json);
     }
 
+    #[cfg(feature = "schema")]
     #[test]
     fn test_export_schema_produces_valid_json() {
         let schema = export_schema().expect("test: schema export");

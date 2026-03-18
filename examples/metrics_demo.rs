@@ -102,6 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     meta.insert("request_num".to_string(), i.to_string());
                     meta
                 },
+                deadline: None,
             };
 
             if handles.input_tx.send(request).await.is_ok() {

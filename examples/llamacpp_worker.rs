@@ -73,6 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 meta.insert("backend".to_string(), "llama.cpp".to_string());
                 meta
             },
+            deadline: None,
         };
 
         match handles.input_tx.send(request).await {

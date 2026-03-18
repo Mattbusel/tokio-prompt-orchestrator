@@ -15,6 +15,7 @@
 //! #     request_id: String::new(),
 //! #     input: String::new(),
 //! #     meta: HashMap::new(),
+//! #     deadline: None,
 //! # };
 //! # let (request1, request2, request3) = (make_req(), make_req(), make_req());
 //! let queue = PriorityQueue::new();
@@ -279,6 +280,7 @@ mod tests {
             request_id: format!("test-{id}"),
             input: id.to_string(),
             meta: HashMap::new(),
+            deadline: None,
         }
     }
 

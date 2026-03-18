@@ -524,19 +524,76 @@ impl CapabilityDiscovery {
     }
 
     fn scan_test_coverage(&self) -> Vec<DiscoveryFinding> {
-        // NOT IMPLEMENTED: awaiting llvm-cov integration.
-        // This category intentionally returns no findings until the toolchain is
-        // available in CI.  Do not interpret an empty result as "full coverage".
-        //
-        // TODO: integrate llvm-cov by:
-        //   1. Add `cargo-llvm-cov` to the CI toolchain install step.
-        //   2. Run `cargo llvm-cov --json --output-path coverage.json`.
-        //   3. Parse `coverage.json` and emit a `DiscoveryFinding` for any
-        //      function / branch below the configured threshold.
-        //   4. Remove this comment and return real findings here.
-        //
-        // status: "not_implemented"
+        let workspace = match self.inner.lock() {
+            Ok(g) => g.cfg.workspace_path.clone(),
+            Err(_) => return Vec::new(),
+        };
+
+        // Attempt to measure line coverage using `cargo llvm-cov --json`.
+        // Returns None if llvm-cov is not installed or the invocation fails.
+        if let Some(pct) = Self::measure_llvm_cov_coverage(&workspace) {
+            // Emit a finding only when coverage is below the threshold.
+            const COVERAGE_THRESHOLD: f64 = 80.0;
+            if pct < COVERAGE_THRESHOLD {
+                return vec![DiscoveryFinding {
+                    id: format!("coverage-line-{:.0}", pct),
+                    category: FindingCategory::TestCoverage,
+                    title: format!("Line coverage {:.1}% is below {:.0}% threshold", pct, COVERAGE_THRESHOLD),
+                    description: format!(
+                        "cargo llvm-cov reports {:.2}% line coverage for this workspace. \
+                         The project target is {:.0}%. Uncovered lines increase the risk of \
+                         undetected regressions.",
+                        pct, COVERAGE_THRESHOLD
+                    ),
+                    affected_files: vec!["(entire workspace)".into()],
+                    suggested_action: format!(
+                        "Add tests to raise line coverage above {:.0}%. \
+                         Run `cargo llvm-cov --open` for an HTML report showing which lines are uncovered.",
+                        COVERAGE_THRESHOLD
+                    ),
+                    estimated_effort: "medium".into(),
+                    discovered_at_secs: unix_now(),
+                    resolved: false,
+                }];
+            }
+        }
+        // llvm-cov not installed or coverage is acceptable  -  no findings.
         Vec::new()
+    }
+
+    /// Shell out to `cargo llvm-cov --json` and return the overall line
+    /// coverage percentage, or `None` if llvm-cov is unavailable or the
+    /// output cannot be parsed.
+    ///
+    /// The JSON produced by llvm-cov has the following top-level shape:
+    /// ```json
+    /// { "data": [ { "totals": { "lines": { "percent": 82.5 } } } ] }
+    /// ```
+    fn measure_llvm_cov_coverage(workspace: &str) -> Option<f64> {
+        let output = std::process::Command::new(cargo_bin())
+            .args(["llvm-cov", "--json"])
+            .current_dir(workspace)
+            .output()
+            .ok()?;
+
+        // A non-zero exit code usually means llvm-cov is not installed or the
+        // build failed.  We treat both as "unavailable" and return None.
+        if !output.status.success() {
+            return None;
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let report: serde_json::Value = serde_json::from_str(&stdout).ok()?;
+
+        // Navigate: data[0].totals.lines.percent
+        report
+            .get("data")?
+            .as_array()?
+            .first()?
+            .get("totals")?
+            .get("lines")?
+            .get("percent")?
+            .as_f64()
     }
 
     fn scan_performance(&self) -> Vec<DiscoveryFinding> {

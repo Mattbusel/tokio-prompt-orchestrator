@@ -183,8 +183,13 @@ async fn main() {
         let counters = PipelineCounters::new();
         let bus = TelemetryBus::new(TelemetryBusConfig::default(), counters);
         bus.start();
-        let sil = SelfImprovingLoop::new(LoopConfig::default(), bus)
-            .expect("default LoopConfig is always valid");
+        let sil = match SelfImprovingLoop::new(LoopConfig::default(), bus) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Failed to create self-improving loop: {e}");
+                std::process::exit(1);
+            }
+        };
         eprintln!("Self-improvement loop enabled");
         Some(sil.spawn())
     } else {

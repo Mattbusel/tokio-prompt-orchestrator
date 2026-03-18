@@ -62,6 +62,7 @@ async fn main() {
             request_id: format!("req-{i:04}"),
             input: format!("What is {} squared?", i),
             meta: HashMap::new(),
+            deadline: None,
         };
 
         if let Err(e) = pipeline.input_tx.send(req).await {

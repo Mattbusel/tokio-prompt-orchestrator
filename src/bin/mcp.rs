@@ -173,6 +173,7 @@ impl OrchestratorMcp {
             request_id: request_id.clone(),
             input: params.prompt,
             meta: HashMap::new(),
+            deadline: None,
         };
 
         if let Err(e) = self.pipeline.input_tx.send(request).await {
@@ -298,6 +299,7 @@ impl OrchestratorMcp {
                     m.insert("batch_job".to_string(), job_id.clone());
                     m
                 },
+                deadline: None,
             };
 
             if let Err(e) = self.pipeline.input_tx.send(request).await {

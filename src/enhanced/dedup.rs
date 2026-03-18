@@ -137,6 +137,7 @@ impl Deduplicator {
             return match state.value() {
                 RequestState::InProgress { .. } => {
                     info!(key = key, "duplicate request detected (in progress)");
+                    crate::metrics::inc_dedup_hit();
                     DeduplicationResult::InProgress
                 }
                 RequestState::Completed {
@@ -145,6 +146,7 @@ impl Deduplicator {
                 } => {
                     if completed_at.elapsed().unwrap_or_default() < self.cache_duration {
                         info!(key = key, "duplicate request detected (cached)");
+                        crate::metrics::inc_dedup_hit();
                         DeduplicationResult::Cached(result.clone())
                     } else {
                         // Expired, treat as new.
@@ -196,7 +198,11 @@ impl Deduplicator {
             }
         };
 
-        rx.recv().await.ok()
+        let result = rx.recv().await.ok();
+        if result.is_some() {
+            crate::metrics::inc_dedup_waiter_unblocked();
+        }
+        result
     }
 
     /// Mark request as completed
@@ -327,36 +333,45 @@ pub struct DeduplicationStats {
 /// let k4 = dedup_key("hello", &meta, None);
 /// assert_ne!(k1, k4);
 /// ```
+/// FNV-1a hash (64-bit). Deterministic across process restarts — unlike
+/// `DefaultHasher` which uses a randomised seed since Rust 1.36.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    const PRIME: u64 = 1_099_511_628_211;
+    const BASIS: u64 = 14_695_981_039_346_656_037;
+    bytes.iter().fold(BASIS, |acc, &b| acc.wrapping_mul(PRIME) ^ b as u64)
+}
+
 pub fn dedup_key(
     prompt: &str,
     metadata: &std::collections::HashMap<String, String>,
     session_id: Option<&str>,
 ) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+    // Build a canonical byte sequence: optional session prefix + prompt + sorted metadata.
+    let mut buf = String::new();
 
-    let mut hasher = DefaultHasher::new();
-
-    // Scope by session first so collisions across sessions are impossible.
     if let Some(sid) = session_id {
-        sid.hash(&mut hasher);
+        buf.push_str(sid);
+        buf.push('\x00');
     }
 
-    prompt.hash(&mut hasher);
+    buf.push_str(prompt);
 
     // Include relevant metadata in key (sorted for determinism).
     let mut meta_keys: Vec<_> = metadata.keys().collect();
     meta_keys.sort();
     for key in meta_keys {
         if let Some(value) = metadata.get(key) {
-            key.hash(&mut hasher);
-            value.hash(&mut hasher);
+            buf.push('\x00');
+            buf.push_str(key);
+            buf.push('=');
+            buf.push_str(value);
         }
     }
 
+    let hash = fnv1a(buf.as_bytes());
     match session_id {
-        Some(_) => format!("dedup:s:{:x}", hasher.finish()),
-        None => format!("dedup:g:{:x}", hasher.finish()),
+        Some(_) => format!("dedup:s:{hash:x}"),
+        None => format!("dedup:g:{hash:x}"),
     }
 }
 

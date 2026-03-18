@@ -37,6 +37,8 @@ use crate::{
     metrics,
     send_with_shed,
     AssembleOutput,
+    DeadLetterQueue,
+    DroppedRequest,
     InferenceOutput,
     ModelWorker,
     PipelineStage,
@@ -52,6 +54,9 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{info, warn, Span};
+
+/// Default timeout for a single inference call (seconds).
+const DEFAULT_INFERENCE_TIMEOUT_SECS: u64 = 120;
 
 //  OutputSink trait
 
@@ -165,6 +170,10 @@ pub struct PipelineHandles {
     /// Exposed so callers (e.g. MCP server) can query live open/closed/half-open
     /// state without hardcoding.
     pub circuit_breaker: CircuitBreaker,
+    /// Dead-letter queue capturing requests dropped by backpressure or inference failure.
+    ///
+    /// Callers can call `dlq.drain()` to inspect dropped requests for debugging or replay.
+    pub dlq: Arc<DeadLetterQueue>,
 }
 
 /// Spawn the complete 5-stage pipeline
@@ -197,17 +206,20 @@ pub fn spawn_pipeline(worker: Arc<dyn ModelWorker>) -> PipelineHandles {
     // Success rate: 80% of recent requests must succeed to close.
     // Timeout: 60 seconds before half-open probe.
     let circuit_breaker = CircuitBreaker::new(5, 0.8, std::time::Duration::from_secs(60));
+    let dlq = Arc::new(DeadLetterQueue::new(1000));
 
     // Spawn each stage
-    let rag = tokio::spawn(rag_stage(input_rx, rag_tx));
-    let assemble = tokio::spawn(assemble_stage(rag_rx, assemble_tx));
+    let rag = tokio::spawn(rag_stage(input_rx, rag_tx, Arc::clone(&dlq)));
+    let assemble = tokio::spawn(assemble_stage(rag_rx, assemble_tx, Arc::clone(&dlq)));
     let inference = tokio::spawn(inference_stage(
         assemble_rx,
         inference_tx,
         worker,
         circuit_breaker.clone(),
+        DEFAULT_INFERENCE_TIMEOUT_SECS,
+        Arc::clone(&dlq),
     ));
-    let post = tokio::spawn(post_stage(inference_rx, post_tx));
+    let post = tokio::spawn(post_stage(inference_rx, post_tx, Arc::clone(&dlq)));
     let stream = tokio::spawn(stream_stage(post_rx, output_tx, Arc::new(LogSink)));
 
     PipelineHandles {
@@ -219,6 +231,7 @@ pub fn spawn_pipeline(worker: Arc<dyn ModelWorker>) -> PipelineHandles {
         input_tx,
         output_rx: tokio::sync::Mutex::new(Some(output_rx)),
         circuit_breaker,
+        dlq,
     }
 }
 
@@ -260,16 +273,20 @@ pub fn spawn_pipeline_with_config(
         r.circuit_breaker_success_rate,
         std::time::Duration::from_secs(r.circuit_breaker_timeout_s),
     );
+    let dlq = Arc::new(DeadLetterQueue::new(1000));
+    let inference_timeout_secs = DEFAULT_INFERENCE_TIMEOUT_SECS;
 
-    let rag = tokio::spawn(rag_stage(input_rx, rag_tx));
-    let assemble = tokio::spawn(assemble_stage(rag_rx, assemble_tx));
+    let rag = tokio::spawn(rag_stage(input_rx, rag_tx, Arc::clone(&dlq)));
+    let assemble = tokio::spawn(assemble_stage(rag_rx, assemble_tx, Arc::clone(&dlq)));
     let inference = tokio::spawn(inference_stage(
         assemble_rx,
         inference_tx,
         worker,
         circuit_breaker.clone(),
+        inference_timeout_secs,
+        Arc::clone(&dlq),
     ));
-    let post = tokio::spawn(post_stage(inference_rx, post_tx));
+    let post = tokio::spawn(post_stage(inference_rx, post_tx, Arc::clone(&dlq)));
     let stream = tokio::spawn(stream_stage(post_rx, output_tx, Arc::new(LogSink)));
 
     PipelineHandles {
@@ -281,6 +298,7 @@ pub fn spawn_pipeline_with_config(
         input_tx,
         output_rx: tokio::sync::Mutex::new(Some(output_rx)),
         circuit_breaker,
+        dlq,
     }
 }
 
@@ -292,7 +310,7 @@ pub fn spawn_pipeline_with_config(
 /// # Panics
 ///
 /// This function never panics.
-async fn rag_stage(mut rx: mpsc::Receiver<PromptRequest>, tx: mpsc::Sender<RagOutput>) {
+async fn rag_stage(mut rx: mpsc::Receiver<PromptRequest>, tx: mpsc::Sender<RagOutput>, dlq: Arc<DeadLetterQueue>) {
     info!(target: "orchestrator::pipeline", "RAG stage started");
 
     while let Some(request) = rx.recv().await {
@@ -348,6 +366,13 @@ async fn rag_stage(mut rx: mpsc::Receiver<PromptRequest>, tx: mpsc::Sender<RagOu
                     "RAG stage: item shed due to backpressure"
                 );
                 metrics::inc_shed("rag");
+                metrics::inc_dropped("rag");
+                dlq.push(DroppedRequest {
+                    request_id: request_id.clone(),
+                    session_id: session_id.clone(),
+                    reason: "backpressure:rag".to_string(),
+                    dropped_at: std::time::SystemTime::now(),
+                });
             }
             Err(e) => {
                 warn!(
@@ -374,7 +399,7 @@ async fn rag_stage(mut rx: mpsc::Receiver<PromptRequest>, tx: mpsc::Sender<RagOu
 /// # Panics
 ///
 /// This function never panics.
-async fn assemble_stage(mut rx: mpsc::Receiver<RagOutput>, tx: mpsc::Sender<AssembleOutput>) {
+async fn assemble_stage(mut rx: mpsc::Receiver<RagOutput>, tx: mpsc::Sender<AssembleOutput>, dlq: Arc<DeadLetterQueue>) {
     info!(target: "orchestrator::pipeline", "Assemble stage started");
 
     while let Some(rag_output) = rx.recv().await {
@@ -406,6 +431,7 @@ async fn assemble_stage(mut rx: mpsc::Receiver<RagOutput>, tx: mpsc::Sender<Asse
             session: rag_output.session,
             request_id: request_id.clone(),
             prompt,
+            deadline: rag_output.original.deadline,
         };
 
         let elapsed = start.elapsed();
@@ -423,6 +449,13 @@ async fn assemble_stage(mut rx: mpsc::Receiver<RagOutput>, tx: mpsc::Sender<Asse
                     "Assemble stage: item shed due to backpressure"
                 );
                 metrics::inc_shed("assemble");
+                metrics::inc_dropped("assemble");
+                dlq.push(DroppedRequest {
+                    request_id: request_id.clone(),
+                    session_id: session_id.clone(),
+                    reason: "backpressure:assemble".to_string(),
+                    dropped_at: std::time::SystemTime::now(),
+                });
             }
             Err(e) => {
                 warn!(
@@ -460,6 +493,8 @@ async fn inference_stage(
     tx: mpsc::Sender<InferenceOutput>,
     worker: Arc<dyn ModelWorker>,
     breaker: CircuitBreaker,
+    timeout_secs: u64,
+    dlq: Arc<DeadLetterQueue>,
 ) {
     info!(target: "orchestrator::pipeline", "Inference stage started");
 
@@ -481,10 +516,58 @@ async fn inference_stage(
 
         metrics::inc_request("inference");
 
-        // Call model worker through the circuit breaker  -  prompt content is NOT logged
+        // Drop requests whose deadline has already passed.
+        if let Some(deadline) = assemble_output.deadline {
+            if std::time::Instant::now() > deadline {
+                warn!(
+                    target: "orchestrator::pipeline",
+                    session_id = %session_id,
+                    request_id = %request_id,
+                    "Inference: request deadline expired, dropping"
+                );
+                metrics::inc_error("inference", "deadline_expired");
+                metrics::inc_expired();
+                dlq.push(DroppedRequest {
+                    request_id: request_id.clone(),
+                    session_id: session_id.clone(),
+                    reason: "deadline_expired".to_string(),
+                    dropped_at: std::time::SystemTime::now(),
+                });
+                continue;
+            }
+        }
+
+        // Call model worker through the circuit breaker with a per-request timeout.
+        // Prompt content is NOT logged.
         let prompt = assemble_output.prompt.clone();
         let w = Arc::clone(&worker);
-        let cb_result = breaker.call(|| async move { w.infer(&prompt).await }).await;
+        let infer_fut = breaker.call(|| async move { w.infer(&prompt).await });
+        let cb_result = match tokio::time::timeout(
+            std::time::Duration::from_secs(timeout_secs),
+            infer_fut,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_elapsed) => {
+                metrics::inc_inference_timeout();
+                metrics::inc_error("inference", "timeout");
+                warn!(
+                    target: "orchestrator::pipeline",
+                    session_id = %session_id,
+                    request_id = %request_id,
+                    timeout_secs = timeout_secs,
+                    "Inference timed out — dropping request into DLQ"
+                );
+                dlq.push(DroppedRequest {
+                    request_id: request_id.clone(),
+                    session_id: session_id.clone(),
+                    reason: format!("inference_timeout:{timeout_secs}s"),
+                    dropped_at: std::time::SystemTime::now(),
+                });
+                continue;
+            }
+        };
 
         match cb_result {
             Ok(tokens) => {
@@ -509,6 +592,13 @@ async fn inference_stage(
                             "Inference stage: item shed due to backpressure"
                         );
                         metrics::inc_shed("inference");
+                        metrics::inc_dropped("inference");
+                        dlq.push(DroppedRequest {
+                            request_id: request_id.clone(),
+                            session_id: session_id.clone(),
+                            reason: "backpressure:inference".to_string(),
+                            dropped_at: std::time::SystemTime::now(),
+                        });
                     }
                     Err(e) => {
                         warn!(
@@ -538,6 +628,13 @@ async fn inference_stage(
                 );
                 metrics::inc_error("inference", "circuit_open");
                 metrics::inc_shed("inference");
+                metrics::inc_dropped("inference");
+                dlq.push(DroppedRequest {
+                    request_id: request_id.clone(),
+                    session_id: session_id.clone(),
+                    reason: "circuit_breaker_open".to_string(),
+                    dropped_at: std::time::SystemTime::now(),
+                });
             }
             Err(crate::enhanced::circuit_breaker::CircuitBreakerError::Failed(e)) => {
                 let elapsed = start.elapsed();
@@ -554,7 +651,12 @@ async fn inference_stage(
                     "Inference failed"
                 );
                 metrics::inc_error("inference", "inference_failure");
-                // Drop request  -  could also send to DLQ
+                dlq.push(DroppedRequest {
+                    request_id: request_id.clone(),
+                    session_id: session_id.clone(),
+                    reason: format!("inference_failure:{e}"),
+                    dropped_at: std::time::SystemTime::now(),
+                });
             }
         }
     }
@@ -570,7 +672,7 @@ async fn inference_stage(
 /// # Panics
 ///
 /// This function never panics.
-async fn post_stage(mut rx: mpsc::Receiver<InferenceOutput>, tx: mpsc::Sender<PostOutput>) {
+async fn post_stage(mut rx: mpsc::Receiver<InferenceOutput>, tx: mpsc::Sender<PostOutput>, dlq: Arc<DeadLetterQueue>) {
     info!(target: "orchestrator::pipeline", "Post stage started");
 
     while let Some(inference_output) = rx.recv().await {
@@ -615,6 +717,13 @@ async fn post_stage(mut rx: mpsc::Receiver<InferenceOutput>, tx: mpsc::Sender<Po
                     "Post stage: item shed due to backpressure"
                 );
                 metrics::inc_shed("post");
+                metrics::inc_dropped("post");
+                dlq.push(DroppedRequest {
+                    request_id: request_id.clone(),
+                    session_id: session_id.clone(),
+                    reason: "backpressure:post".to_string(),
+                    dropped_at: std::time::SystemTime::now(),
+                });
             }
             Err(e) => {
                 warn!(
@@ -693,6 +802,7 @@ async fn stream_stage(
                 request_id = %request_id,
                 "Output channel full or closed, discarding result"
             );
+            metrics::inc_dropped("stream");
         }
     }
 
@@ -732,6 +842,7 @@ pub fn spawn_pipeline_with_intelligence(
     let (output_tx, output_rx) = mpsc::channel::<PostOutput>(256);
 
     let circuit_breaker = CircuitBreaker::new(5, 0.8, std::time::Duration::from_secs(60));
+    let dlq = Arc::new(DeadLetterQueue::new(1000));
 
     // Shared request counter for RPS estimation.
     let req_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -741,7 +852,7 @@ pub fn spawn_pipeline_with_intelligence(
         let counter = Arc::clone(&req_counter);
         tokio::spawn(rag_stage_tracked(input_rx, rag_tx, bridge_clone, counter))
     };
-    let assemble = tokio::spawn(assemble_stage(rag_rx, assemble_tx));
+    let assemble = tokio::spawn(assemble_stage(rag_rx, assemble_tx, Arc::clone(&dlq)));
     let inference = {
         let bridge_clone = Arc::clone(&bridge);
         let name = worker_name.to_string();
@@ -754,7 +865,7 @@ pub fn spawn_pipeline_with_intelligence(
             name,
         ))
     };
-    let post = tokio::spawn(post_stage(inference_rx, post_tx));
+    let post = tokio::spawn(post_stage(inference_rx, post_tx, Arc::clone(&dlq)));
     let stream = tokio::spawn(stream_stage(post_rx, output_tx, Arc::new(LogSink)));
 
     PipelineHandles {
@@ -766,6 +877,7 @@ pub fn spawn_pipeline_with_intelligence(
         input_tx,
         output_rx: tokio::sync::Mutex::new(Some(output_rx)),
         circuit_breaker,
+        dlq,
     }
 }
 
@@ -971,6 +1083,7 @@ async fn inference_stage_with_intelligence(
                 );
                 metrics::inc_error("inference", "circuit_open");
                 metrics::inc_shed("inference");
+                metrics::inc_dropped("inference");
             }
             Err(crate::enhanced::circuit_breaker::CircuitBreakerError::Failed(e)) => {
                 metrics::record_stage_latency("inference", elapsed);
@@ -1097,6 +1210,7 @@ mod tests {
             request_id: request_id.to_string(),
             input: input.to_string(),
             meta: HashMap::new(),
+            deadline: None,
         }
     }
 

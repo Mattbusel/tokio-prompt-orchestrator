@@ -13,9 +13,12 @@
 //! |------|------|--------|
 //! | `orchestrator_requests_total` | Counter | `stage` |
 //! | `orchestrator_requests_shed_total` | Counter | `stage` |
+//! | `orchestrator_requests_dropped_total` | Counter | `stage` |
 //! | `orchestrator_errors_total` | Counter | `stage`, `err_type` |
 //! | `orchestrator_stage_duration_seconds` | Histogram | `stage` |
 //! | `orchestrator_queue_depth` | Gauge | `stage` |
+//! | `inference_time_to_first_token_seconds` | Histogram | `worker`, `model` |
+//! | `orchestrator_requests_expired_total` | Counter | (none) |
 
 use crate::OrchestratorError;
 use prometheus::{
@@ -37,6 +40,8 @@ pub struct Metrics {
     pub requests_total: CounterVec,
     /// Requests shed (queue full) per stage.
     pub requests_shed: CounterVec,
+    /// Requests dropped due to full queue, labelled by stage.
+    pub requests_dropped: CounterVec,
     /// Errors by stage and error type.
     pub errors_total: CounterVec,
     /// Stage processing latency histogram.
@@ -45,6 +50,16 @@ pub struct Metrics {
     pub queue_depth: IntGaugeVec,
     /// Cumulative USD cost of all inference calls.
     pub inference_cost_usd: prometheus::Counter,
+    /// Time from request start to first streaming token, labelled by worker and model.
+    pub ttft_seconds: HistogramVec,
+    /// Total dedup hits (in-progress or cached responses returned without new inference).
+    pub dedup_hits_total: Counter,
+    /// Total dedup waiters unblocked (requests that waited and received a broadcast result).
+    pub dedup_waiters_unblocked_total: Counter,
+    /// Total inference timeouts.
+    pub inference_timeouts_total: Counter,
+    /// Requests dropped because their deadline had already passed at dequeue time.
+    pub requests_expired_total: Counter,
 }
 
 static METRICS: OnceLock<Metrics> = OnceLock::new();
@@ -92,6 +107,18 @@ pub fn init_metrics() -> Result<(), OrchestratorError> {
         .register(Box::new(requests_shed.clone()))
         .map_err(|e| OrchestratorError::Other(format!("metrics registration failed: {e}")))?;
 
+    let requests_dropped = CounterVec::new(
+        Opts::new(
+            "requests_dropped_total",
+            "Requests dropped due to full queue per stage",
+        ),
+        &["stage"],
+    )
+    .map_err(|e| OrchestratorError::Other(format!("metrics init failed: {e}")))?;
+    registry
+        .register(Box::new(requests_dropped.clone()))
+        .map_err(|e| OrchestratorError::Other(format!("metrics registration failed: {e}")))?;
+
     let errors_total = CounterVec::new(
         Opts::new("orchestrator_errors_total", "Errors by stage and type"),
         &["stage", "err_type"],
@@ -131,16 +158,71 @@ pub fn init_metrics() -> Result<(), OrchestratorError> {
         .register(Box::new(inference_cost_usd.clone()))
         .map_err(|e| OrchestratorError::Other(format!("metrics registration failed: {e}")))?;
 
+    let ttft_seconds = HistogramVec::new(
+        HistogramOpts::new(
+            "inference_time_to_first_token_seconds",
+            "Time from request start to first streaming token received",
+        )
+        .buckets(vec![0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0]),
+        &["worker", "model"],
+    )
+    .map_err(|e| OrchestratorError::Other(format!("metrics init failed: {e}")))?;
+    registry
+        .register(Box::new(ttft_seconds.clone()))
+        .map_err(|e| OrchestratorError::Other(format!("metrics registration failed: {e}")))?;
+
+    let dedup_hits_total = Counter::with_opts(Opts::new(
+        "orchestrator_dedup_hits_total",
+        "Requests served from dedup cache (in-progress or completed) without new inference",
+    ))
+    .map_err(|e| OrchestratorError::Other(format!("metrics init failed: {e}")))?;
+    registry
+        .register(Box::new(dedup_hits_total.clone()))
+        .map_err(|e| OrchestratorError::Other(format!("metrics registration failed: {e}")))?;
+
+    let dedup_waiters_unblocked_total = Counter::with_opts(Opts::new(
+        "orchestrator_dedup_waiters_unblocked_total",
+        "Requests that waited on an in-progress dedup entry and received its broadcast result",
+    ))
+    .map_err(|e| OrchestratorError::Other(format!("metrics init failed: {e}")))?;
+    registry
+        .register(Box::new(dedup_waiters_unblocked_total.clone()))
+        .map_err(|e| OrchestratorError::Other(format!("metrics registration failed: {e}")))?;
+
+    let inference_timeouts_total = Counter::with_opts(Opts::new(
+        "orchestrator_inference_timeouts_total",
+        "Inference calls that exceeded the configured timeout and were cancelled",
+    ))
+    .map_err(|e| OrchestratorError::Other(format!("metrics init failed: {e}")))?;
+    registry
+        .register(Box::new(inference_timeouts_total.clone()))
+        .map_err(|e| OrchestratorError::Other(format!("metrics registration failed: {e}")))?;
+
+    let requests_expired_total = Counter::with_opts(Opts::new(
+        "orchestrator_requests_expired_total",
+        "Requests dropped at the inference stage because their deadline had already passed",
+    ))
+    .map_err(|e| OrchestratorError::Other(format!("metrics init failed: {e}")))?;
+    registry
+        .register(Box::new(requests_expired_total.clone()))
+        .map_err(|e| OrchestratorError::Other(format!("metrics registration failed: {e}")))?;
+
     // If another thread raced us, the first one wins  -  both initializations
     // produce identical metric descriptors, so neither outcome is incorrect.
     let _ = METRICS.set(Metrics {
         registry,
         requests_total,
         requests_shed,
+        requests_dropped,
         errors_total,
         stage_duration,
         queue_depth,
         inference_cost_usd,
+        ttft_seconds,
+        dedup_hits_total,
+        dedup_waiters_unblocked_total,
+        inference_timeouts_total,
+        requests_expired_total,
     });
 
     Ok(())
@@ -195,6 +277,44 @@ pub fn inc_shed(stage: &str) {
     if let Some(m) = metrics() {
         if let Ok(c) = m.requests_shed.get_metric_with_label_values(&[stage]) {
             c.inc();
+        }
+    }
+}
+
+/// Increment the dropped-request counter for a pipeline stage.
+///
+/// This counter tracks requests that were discarded because the downstream
+/// channel was full (backpressure shed).  It is incremented in addition to
+/// `inc_shed` so callers can query drops independently.
+///
+/// No-op if metrics have not been initialised.
+///
+/// # Panics
+///
+/// This function never panics.
+pub fn inc_dropped(stage: &str) {
+    if let Some(m) = metrics() {
+        if let Ok(c) = m.requests_dropped.get_metric_with_label_values(&[stage]) {
+            c.inc();
+        }
+    }
+}
+
+/// Record the time-to-first-token (TTFT) for a streaming inference call.
+///
+/// `worker` is a short identifier such as `"openai"` or `"anthropic"`.
+/// `model` is the model name string reported by the worker.
+/// `d` is the elapsed duration from request start until the first token arrived.
+///
+/// No-op if metrics have not been initialised.
+///
+/// # Panics
+///
+/// This function never panics.
+pub fn record_ttft(worker: &str, model: &str, d: Duration) {
+    if let Some(m) = metrics() {
+        if let Ok(h) = m.ttft_seconds.get_metric_with_label_values(&[worker, model]) {
+            h.observe(d.as_secs_f64());
         }
     }
 }
@@ -261,6 +381,55 @@ pub fn record_inference_cost(usd: f64) {
 /// This function never panics.
 pub fn total_inference_cost_usd() -> f64 {
     metrics().map_or(0.0, |m| m.inference_cost_usd.get())
+}
+
+/// Increment the dedup hit counter.
+///
+/// Call when a duplicate request is detected (InProgress or Cached result returned).
+///
+/// No-op if metrics have not been initialised.
+pub fn inc_dedup_hit() {
+    if let Some(m) = metrics() {
+        m.dedup_hits_total.inc();
+    }
+}
+
+/// Increment the dedup waiters-unblocked counter.
+///
+/// Call when `wait_for_result` successfully receives a broadcast result.
+///
+/// No-op if metrics have not been initialised.
+pub fn inc_dedup_waiter_unblocked() {
+    if let Some(m) = metrics() {
+        m.dedup_waiters_unblocked_total.inc();
+    }
+}
+
+/// Increment the inference timeout counter.
+///
+/// Call when an inference call is cancelled because it exceeded the configured timeout.
+///
+/// No-op if metrics have not been initialised.
+pub fn inc_inference_timeout() {
+    if let Some(m) = metrics() {
+        m.inference_timeouts_total.inc();
+    }
+}
+
+/// Increment the deadline-expired counter.
+///
+/// Called by the inference stage when a request is dropped because
+/// `Instant::now()` is past its `deadline`.
+///
+/// No-op if metrics have not been initialised.
+///
+/// # Panics
+///
+/// This function never panics.
+pub fn inc_expired() {
+    if let Some(m) = metrics() {
+        m.requests_expired_total.inc();
+    }
 }
 
 pub fn gather() -> Vec<prometheus::proto::MetricFamily> {
@@ -385,6 +554,15 @@ mod tests {
             .register(Box::new(requests_shed.clone()))
             .expect("register must succeed in tests");
 
+        let requests_dropped = CounterVec::new(
+            Opts::new("t_requests_dropped_total", "test counter"),
+            &["stage"],
+        )
+        .expect("CounterVec construction must succeed in tests");
+        registry
+            .register(Box::new(requests_dropped.clone()))
+            .expect("register must succeed in tests");
+
         let errors_total = CounterVec::new(
             Opts::new("t_errors_total", "test counter"),
             &["stage", "err_type"],
@@ -416,14 +594,57 @@ mod tests {
             .register(Box::new(inference_cost_usd.clone()))
             .expect("register must succeed in tests");
 
+        let ttft_seconds = HistogramVec::new(
+            HistogramOpts::new("t_ttft_seconds", "test ttft histogram"),
+            &["worker", "model"],
+        )
+        .expect("HistogramVec construction must succeed in tests");
+        registry
+            .register(Box::new(ttft_seconds.clone()))
+            .expect("register must succeed in tests");
+
+        let dedup_hits_total =
+            Counter::with_opts(Opts::new("t_dedup_hits_total", "test counter"))
+                .expect("Counter construction must succeed in tests");
+        registry
+            .register(Box::new(dedup_hits_total.clone()))
+            .expect("register must succeed in tests");
+
+        let dedup_waiters_unblocked_total =
+            Counter::with_opts(Opts::new("t_dedup_waiters_unblocked_total", "test counter"))
+                .expect("Counter construction must succeed in tests");
+        registry
+            .register(Box::new(dedup_waiters_unblocked_total.clone()))
+            .expect("register must succeed in tests");
+
+        let inference_timeouts_total =
+            Counter::with_opts(Opts::new("t_inference_timeouts_total", "test counter"))
+                .expect("Counter construction must succeed in tests");
+        registry
+            .register(Box::new(inference_timeouts_total.clone()))
+            .expect("register must succeed in tests");
+
+        let requests_expired_total =
+            Counter::with_opts(Opts::new("t_requests_expired_total", "test counter"))
+                .expect("Counter construction must succeed in tests");
+        registry
+            .register(Box::new(requests_expired_total.clone()))
+            .expect("register must succeed in tests");
+
         Metrics {
             registry,
             requests_total,
             requests_shed,
+            requests_dropped,
             errors_total,
             stage_duration,
             queue_depth,
             inference_cost_usd,
+            ttft_seconds,
+            dedup_hits_total,
+            dedup_waiters_unblocked_total,
+            inference_timeouts_total,
+            requests_expired_total,
         }
     }
 
@@ -588,5 +809,64 @@ mod tests {
         let _ = init_metrics();
         set_queue_depth("rag", 7);
         // Primary assertion: no panic.
+    }
+
+    #[test]
+    fn test_inc_dropped_increments_dropped_counter() {
+        let m = make_test_metrics();
+        m.requests_dropped
+            .get_metric_with_label_values(&["rag"])
+            .expect("label ok")
+            .inc();
+        m.requests_dropped
+            .get_metric_with_label_values(&["rag"])
+            .expect("label ok")
+            .inc();
+
+        let families = m.registry.gather();
+        let family = families
+            .iter()
+            .find(|f| f.get_name() == "t_requests_dropped_total")
+            .expect("dropped counter family must be present");
+        let value = family.get_metric()[0].get_counter().get_value();
+        assert!(
+            (value - 2.0).abs() < f64::EPSILON,
+            "counter must be 2.0, got {value}"
+        );
+    }
+
+    #[test]
+    fn test_record_ttft_records_observation_with_worker_model_labels() {
+        let m = make_test_metrics();
+        m.ttft_seconds
+            .get_metric_with_label_values(&["openai", "gpt-4o"])
+            .expect("label values must be valid")
+            .observe(0.25);
+
+        let families = m.registry.gather();
+        let family = families
+            .iter()
+            .find(|f| f.get_name() == "t_ttft_seconds")
+            .expect("ttft histogram family must be present");
+        let count = family.get_metric()[0].get_histogram().get_sample_count();
+        assert_eq!(count, 1, "one TTFT observation should have been recorded");
+    }
+
+    #[test]
+    fn test_inc_expired_increments_expired_counter() {
+        let m = make_test_metrics();
+        m.requests_expired_total.inc();
+        m.requests_expired_total.inc();
+
+        let families = m.registry.gather();
+        let family = families
+            .iter()
+            .find(|f| f.get_name() == "t_requests_expired_total")
+            .expect("expired counter family must be present");
+        let value = family.get_metric()[0].get_counter().get_value();
+        assert!(
+            (value - 2.0).abs() < f64::EPSILON,
+            "counter must be 2.0, got {value}"
+        );
     }
 }

@@ -68,6 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 meta.insert("model".to_string(), "claude-3-5-sonnet".to_string());
                 meta
             },
+            deadline: None,
         };
 
         handles.input_tx.send(request).await?;

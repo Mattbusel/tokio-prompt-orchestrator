@@ -13,24 +13,28 @@
 //! # Stage: Lexical Deduplicator (misnamed "Semantic")
 //!
 //! **IMPORTANT**: Despite the name `SemanticDedup`, this module does NOT
-//! perform true semantic deduplication. The "embeddings" are produced by a
-//! deterministic hash-projection algorithm that captures *lexical* similarity
-//! (shared words/tokens) rather than semantic meaning. Two prompts that express
-//! the same idea in different words will generally NOT be collapsed by this
-//! module.
+//! perform true semantic deduplication.
 //!
-//! ## Actual algorithm
+//! ## Primary algorithm (hash-projection cosine)
 //! 1. Split prompt into whitespace-delimited words.
 //! 2. Hash each word with `DefaultHasher`.
 //! 3. Project each hash through sin/cos into a `dim`-dimensional vector.
 //! 4. Normalise to unit length (cosine similarity space).
 //! 5. Compare against stored entries using cosine similarity.
 //!
-//! This approach is deterministic and fast, but it is **lexical similarity**,
-//! not semantic similarity.
+//! ## Secondary algorithm (TF-IDF-style Jaccard word overlap)
+//! A second, complementary similarity measure is provided via
+//! [`SemanticDedup::jaccard_word_similarity`].  It tokenises both texts on
+//! whitespace (lowercased), computes the multi-set intersection / union of
+//! word frequencies (soft-TF Jaccard), and returns a score in [0, 1].  This
+//! is deterministic, requires no external files or model weights, and captures
+//! lexical overlap more intuitively than the hash-projection approach.
 //!
-//! // TODO: replace with actual sentence embeddings (e.g. via an embedding
-//! // model endpoint) to achieve true semantic deduplication.
+//! [`SemanticDedup::lookup_jaccard`] uses this measure to search the index and
+//! can be used as a drop-in complement to the primary [`SemanticDedup::lookup`].
+//!
+//! Neither measure performs true *semantic* similarity.  For that, an embedding
+//! model endpoint would be required (deferred TODO).
 
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
@@ -80,6 +84,8 @@ pub struct SimilarityMatch {
 #[derive(Debug, Clone)]
 pub struct EmbeddingEntry {
     pub key: String,
+    /// Original prompt text, stored to enable Jaccard word-overlap comparisons.
+    pub key_text: String,
     pub embedding: Vec<f64>,
     pub response: Option<String>,
     pub hit_count: u64,
@@ -142,6 +148,116 @@ impl SemanticDedup {
             return 0.0;
         }
         (dot / (mag_a * mag_b)).clamp(-1.0, 1.0)
+    }
+
+    /// Soft TF-Jaccard word-overlap similarity.
+    ///
+    /// Tokenises both strings on whitespace and lowercases each token, then
+    /// computes:
+    ///
+    /// ```text
+    /// score = sum_w min(freq_a(w), freq_b(w))
+    ///       / sum_w max(freq_a(w), freq_b(w))
+    /// ```
+    ///
+    /// This is the multi-set (bag-of-words) Jaccard coefficient.  It is
+    /// deterministic, requires no model files, and is a pragmatic improvement
+    /// over plain set Jaccard because it weights repeated words appropriately.
+    ///
+    /// Returns a value in `[0.0, 1.0]`.  Returns `0.0` when both texts are
+    /// empty or contain only whitespace.
+    pub fn jaccard_word_similarity(a: &str, b: &str) -> f64 {
+        use std::collections::HashMap;
+
+        fn word_freq(text: &str) -> HashMap<String, u32> {
+            let mut freq: HashMap<String, u32> = HashMap::new();
+            for w in text.split_whitespace() {
+                *freq.entry(w.to_lowercase()).or_insert(0) += 1;
+            }
+            freq
+        }
+
+        let fa = word_freq(a);
+        let fb = word_freq(b);
+
+        if fa.is_empty() && fb.is_empty() {
+            return 0.0;
+        }
+
+        // Collect the union of all word types
+        let all_words: std::collections::HashSet<&String> =
+            fa.keys().chain(fb.keys()).collect();
+
+        let mut intersection_sum: u32 = 0;
+        let mut union_sum: u32 = 0;
+        for word in all_words {
+            let ca = *fa.get(word).unwrap_or(&0);
+            let cb = *fb.get(word).unwrap_or(&0);
+            intersection_sum += ca.min(cb);
+            union_sum += ca.max(cb);
+        }
+
+        if union_sum == 0 {
+            0.0
+        } else {
+            intersection_sum as f64 / union_sum as f64
+        }
+    }
+
+    /// Look up `prompt` in the index using Jaccard word-overlap similarity.
+    ///
+    /// This is an alternative to [`Self::lookup`] which uses the hash-projection
+    /// cosine similarity.  Both use the same `similarity_threshold` from the
+    /// config and the same index storage, so they can be used interchangeably or
+    /// in combination.
+    ///
+    /// Returns `Ok(Some(…))` when the best match exceeds the threshold, or
+    /// `Ok(None)` on a miss.  Miss/hit counters are updated the same way as in
+    /// `lookup`.
+    pub fn lookup_jaccard(
+        &self,
+        prompt: &str,
+    ) -> Result<Option<SimilarityMatch>, SemanticDedupError> {
+        let guard = self
+            .index
+            .read()
+            .map_err(|_| SemanticDedupError::LockPoisoned)?;
+        if guard.is_empty() {
+            self.misses.fetch_add(1, Ordering::Relaxed);
+            return Ok(None);
+        }
+
+        let mut best_sim = -1.0f64;
+        let mut best_entry: Option<&EmbeddingEntry> = None;
+        for entry in guard.iter() {
+            let sim = Self::jaccard_word_similarity(prompt, &entry.key_text);
+            if sim > best_sim {
+                best_sim = sim;
+                best_entry = Some(entry);
+            }
+        }
+
+        if best_sim >= self.config.similarity_threshold {
+            if let Some(entry) = best_entry {
+                if entry.key == Self::make_key(prompt) {
+                    self.exact_hits.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    self.semantic_hits.fetch_add(1, Ordering::Relaxed);
+                }
+                debug!(
+                    key = entry.key.as_str(),
+                    similarity = best_sim,
+                    "jaccard match found"
+                );
+                return Ok(Some(SimilarityMatch {
+                    key: entry.key.clone(),
+                    similarity: best_sim,
+                    cached_response: entry.response.clone(),
+                }));
+            }
+        }
+        self.misses.fetch_add(1, Ordering::Relaxed);
+        Ok(None)
     }
 
     pub fn lookup(&self, prompt: &str) -> Result<Option<SimilarityMatch>, SemanticDedupError> {
@@ -229,6 +345,7 @@ impl SemanticDedup {
         }
         guard.push(EmbeddingEntry {
             key: key.clone(),
+            key_text: prompt.to_string(),
             embedding,
             response,
             hit_count: 0,
@@ -807,6 +924,7 @@ mod tests {
     fn test_embedding_entry_struct_fields() {
         let e = EmbeddingEntry {
             key: "k".into(),
+            key_text: "k".into(),
             embedding: vec![0.5, 0.5],
             response: Some("r".into()),
             hit_count: 42,

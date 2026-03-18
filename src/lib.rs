@@ -113,6 +113,38 @@ pub struct PromptRequest {
     pub request_id: String,
     pub input: String,
     pub meta: HashMap<String, String>,
+    /// Optional absolute deadline for this request.  When `Some`, the inference
+    /// stage drops the request and increments `requests_expired_total` if the
+    /// deadline has already passed at dequeue time.
+    pub deadline: Option<std::time::Instant>,
+}
+
+impl PromptRequest {
+    /// Builder-style helper that sets an absolute deadline `duration` from now.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use std::collections::HashMap;
+    /// use std::time::Duration;
+    /// use tokio_prompt_orchestrator::{PromptRequest, SessionId};
+    ///
+    /// let req = PromptRequest {
+    ///     session: SessionId::new("s1"),
+    ///     request_id: "r1".to_string(),
+    ///     input: "hello".to_string(),
+    ///     meta: HashMap::new(),
+    ///     deadline: None,
+    /// }
+    /// .with_deadline(Duration::from_secs(5));
+    ///
+    /// assert!(req.deadline.is_some());
+    /// ```
+    #[must_use]
+    pub fn with_deadline(mut self, duration: std::time::Duration) -> Self {
+        self.deadline = Some(std::time::Instant::now() + duration);
+        self
+    }
 }
 
 /// Output from RAG stage
@@ -129,6 +161,8 @@ pub struct AssembleOutput {
     pub session: SessionId,
     pub request_id: String,
     pub prompt: String,
+    /// Deadline propagated from the originating [`PromptRequest`], if any.
+    pub deadline: Option<std::time::Instant>,
 }
 
 /// Output from inference stage
@@ -147,13 +181,86 @@ pub struct PostOutput {
     pub text: String,
 }
 
-/// Session affinity sharding helper
+/// FNV-1a hash — deterministic across process restarts unlike `DefaultHasher`.
+fn fnv1a_hash(s: &str) -> u64 {
+    const PRIME: u64 = 1_099_511_628_211;
+    const BASIS: u64 = 14_695_981_039_346_656_037;
+    s.bytes().fold(BASIS, |acc, b| acc.wrapping_mul(PRIME) ^ b as u64)
+}
+
+/// Session affinity sharding helper.
+///
+/// Uses FNV-1a for stable hashing across process restarts so that the same
+/// session always routes to the same shard after a restart.
 pub fn shard_session(session: &SessionId, shards: usize) -> usize {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    session.0.hash(&mut hasher);
-    (hasher.finish() as usize) % shards
+    if shards == 0 {
+        return 0;
+    }
+    (fnv1a_hash(&session.0) as usize) % shards
+}
+
+/// A request that was dropped (shed) by the pipeline due to backpressure or
+/// failure.  Stored in the [`DeadLetterQueue`] for inspection and replay.
+#[derive(Debug, Clone)]
+pub struct DroppedRequest {
+    /// The original request ID for trace correlation.
+    pub request_id: String,
+    /// The session this request belonged to.
+    pub session_id: String,
+    /// Human-readable reason the request was dropped.
+    pub reason: String,
+    /// Wall-clock time at which the request was dropped.
+    pub dropped_at: std::time::SystemTime,
+}
+
+/// In-memory dead-letter queue for shed pipeline requests.
+///
+/// Stores up to `capacity` most-recent dropped requests in a ring buffer.
+/// When full, the oldest entry is evicted to make room for the newest.
+///
+/// Thread-safe via an internal `Mutex`.  Clone is cheap — all clones share
+/// the same underlying ring.
+#[derive(Clone)]
+pub struct DeadLetterQueue {
+    inner: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<DroppedRequest>>>,
+    capacity: usize,
+}
+
+impl DeadLetterQueue {
+    /// Create a new `DeadLetterQueue` with the given ring-buffer capacity.
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            inner: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::with_capacity(capacity.min(1024)),
+            )),
+            capacity,
+        }
+    }
+
+    /// Push a dropped request into the queue.  Evicts the oldest entry if full.
+    pub fn push(&self, req: DroppedRequest) {
+        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if guard.len() >= self.capacity {
+            guard.pop_front();
+        }
+        guard.push_back(req);
+    }
+
+    /// Drain all queued entries and return them, clearing the queue.
+    pub fn drain(&self) -> Vec<DroppedRequest> {
+        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        guard.drain(..).collect()
+    }
+
+    /// Return the number of entries currently in the queue.
+    pub fn len(&self) -> usize {
+        self.inner.lock().unwrap_or_else(|p| p.into_inner()).len()
+    }
+
+    /// Return `true` if the queue contains no entries.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// Type alias for the optional OpenTelemetry tracing layer used in main.rs.
@@ -467,5 +574,37 @@ mod tests {
                 "trace_id must be non-zero"
             );
         });
+    }
+
+    #[test]
+    fn test_prompt_request_with_deadline_sets_future_instant() {
+        use std::time::Duration;
+
+        let req = PromptRequest {
+            session: SessionId::new("s1"),
+            request_id: "r1".to_string(),
+            input: "hello".to_string(),
+            meta: HashMap::new(),
+            deadline: None,
+        }
+        .with_deadline(Duration::from_secs(10));
+
+        let deadline = req.deadline.expect("deadline must be Some after with_deadline");
+        assert!(
+            deadline > std::time::Instant::now(),
+            "deadline must be in the future"
+        );
+    }
+
+    #[test]
+    fn test_prompt_request_default_deadline_is_none() {
+        let req = PromptRequest {
+            session: SessionId::new("s2"),
+            request_id: "r2".to_string(),
+            input: "world".to_string(),
+            meta: HashMap::new(),
+            deadline: None,
+        };
+        assert!(req.deadline.is_none(), "default deadline must be None");
     }
 }

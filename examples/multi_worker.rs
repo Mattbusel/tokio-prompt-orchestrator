@@ -116,6 +116,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 meta.insert("routing".to_string(), "hash-based".to_string());
                 meta
             },
+            deadline: None,
         };
 
         handles.input_tx.send(request).await?;

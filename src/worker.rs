@@ -14,13 +14,13 @@
 //! - `LLAMA_CPP_URL`: llama.cpp server URL (default: http://localhost:8080)
 //! - `VLLM_URL`: vLLM server URL (default: http://localhost:8000)
 
-use crate::OrchestratorError;
+use crate::{metrics, OrchestratorError};
 use async_trait::async_trait;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Boxed streaming token iterator returned by `infer_stream`.
 pub type TokenStream =
@@ -411,6 +411,8 @@ impl ModelWorker for OpenAiWorker {
         }
 
         // Convert the raw byte stream into SSE token chunks.
+        let request_start = Instant::now();
+        let model_name = self.model.clone();
         let byte_stream = response.bytes_stream();
         let token_stream = byte_stream.filter_map(|chunk| async move {
             let bytes = chunk.ok()?;
@@ -441,7 +443,17 @@ impl ModelWorker for OpenAiWorker {
             }
         });
 
-        Ok(Box::pin(token_stream))
+        // Wrap the stream to record TTFT on the very first token.
+        let mut first_token_seen = false;
+        let ttft_stream = token_stream.map(move |item| {
+            if !first_token_seen {
+                first_token_seen = true;
+                metrics::record_ttft("openai", &model_name, request_start.elapsed());
+            }
+            item
+        });
+
+        Ok(Box::pin(ttft_stream))
     }
 }
 
@@ -668,6 +680,8 @@ impl ModelWorker for AnthropicWorker {
             )));
         }
 
+        let request_start = Instant::now();
+        let model_name = self.model.clone();
         let byte_stream = response.bytes_stream();
         let token_stream = byte_stream.filter_map(|chunk| async move {
             let bytes = chunk.ok()?;
@@ -698,7 +712,17 @@ impl ModelWorker for AnthropicWorker {
             }
         });
 
-        Ok(Box::pin(token_stream))
+        // Wrap the stream to record TTFT on the very first token.
+        let mut first_token_seen = false;
+        let ttft_stream = token_stream.map(move |item| {
+            if !first_token_seen {
+                first_token_seen = true;
+                metrics::record_ttft("anthropic", &model_name, request_start.elapsed());
+            }
+            item
+        });
+
+        Ok(Box::pin(ttft_stream))
     }
 }
 
@@ -1046,6 +1070,20 @@ impl LoadBalancedWorker {
                 .map(|_| std::sync::atomic::AtomicUsize::new(0))
                 .collect(),
         }
+    }
+
+    /// Create a round-robin pool by replicating a single worker `n` times.
+    ///
+    /// All pool slots share the same underlying `Arc`; this is useful for
+    /// concurrency control rather than load distribution across different backends.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `n` is zero.
+    pub fn replicate(worker: Arc<dyn ModelWorker>, n: usize) -> Self {
+        assert!(n > 0, "replicate count must be > 0");
+        let workers = std::iter::repeat(Arc::clone(&worker)).take(n).collect();
+        Self::round_robin(workers)
     }
 
     /// Create a least-loaded pool.

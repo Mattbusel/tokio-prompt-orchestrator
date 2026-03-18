@@ -175,6 +175,7 @@ async fn test_pipeline_20_identical_prompts_all_processed() {
             request_id: format!("req-{i}"),
             input: "What is the capital of France?".to_string(),
             meta: HashMap::new(),
+            deadline: None,
         };
         let _ = handles.input_tx.send(request).await;
     }
@@ -241,6 +242,7 @@ async fn test_dedup_integrated_with_pipeline_achieves_95_percent() {
                     request_id: format!("req-{i}"),
                     input: prompt.to_string(),
                     meta: HashMap::new(),
+                    deadline: None,
                 };
                 let _ = handles.input_tx.send(request).await;
                 inferences_executed += 1;

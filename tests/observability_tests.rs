@@ -98,6 +98,7 @@ async fn test_pipeline_request_id_propagates_through_all_stages() {
         request_id: "req-propagation-001".to_string(),
         input: "propagation test input".to_string(),
         meta: HashMap::new(),
+        deadline: None,
     };
 
     handles.input_tx.send(request).await.unwrap_or_else(|_| ());
@@ -116,6 +117,7 @@ async fn test_pipeline_handles_empty_request_id_gracefully() {
         request_id: String::new(),
         input: "empty request id test".to_string(),
         meta: HashMap::new(),
+        deadline: None,
     };
 
     handles.input_tx.send(request).await.unwrap_or_else(|_| ());
@@ -135,6 +137,7 @@ async fn test_pipeline_graceful_shutdown_after_input_close() {
         request_id: "req-shutdown".to_string(),
         input: "shutdown".to_string(),
         meta: HashMap::new(),
+        deadline: None,
     };
     handles.input_tx.send(request).await.unwrap_or_else(|_| ());
     drop(handles.input_tx);
@@ -155,6 +158,7 @@ async fn test_pipeline_multiple_requests_complete_without_panic() {
             request_id: format!("req-batch-{i:03}"),
             input: format!("batch input {i}"),
             meta: HashMap::new(),
+            deadline: None,
         };
         handles.input_tx.send(request).await.unwrap_or_else(|_| ());
     }
@@ -178,6 +182,7 @@ async fn test_pipeline_records_metrics_for_all_stages() {
             request_id: format!("req-metrics-{i}"),
             input: "metrics test".to_string(),
             meta: HashMap::new(),
+            deadline: None,
         };
         handles.input_tx.send(request).await.unwrap_or_else(|_| ());
     }
@@ -203,6 +208,7 @@ async fn test_pipeline_increments_request_counter() {
         request_id: "req-counter".to_string(),
         input: "counter test".to_string(),
         meta: HashMap::new(),
+        deadline: None,
     };
     handles.input_tx.send(request).await.unwrap_or_else(|_| ());
     drop(handles.input_tx);

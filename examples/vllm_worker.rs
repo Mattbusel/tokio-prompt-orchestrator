@@ -81,6 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 meta.insert("batch_size".to_string(), "5".to_string());
                 meta
             },
+            deadline: None,
         };
 
         match handles.input_tx.send(request).await {

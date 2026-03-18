@@ -16,6 +16,7 @@ fn make_request(id: &str) -> PromptRequest {
         request_id: format!("req-{id}"),
         input: id.to_string(),
         meta: HashMap::new(),
+        deadline: None,
     }
 }
 

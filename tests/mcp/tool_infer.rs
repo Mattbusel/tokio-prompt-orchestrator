@@ -30,6 +30,7 @@ async fn test_pipeline_accepts_prompt_request() {
         request_id: "mcp-req-001".to_string(),
         input: "test prompt for mcp".to_string(),
         meta: HashMap::new(),
+        deadline: None,
     };
 
     let result = handles.input_tx.send(request).await;
@@ -63,6 +64,7 @@ async fn test_session_id_preserved_through_request() {
         request_id: "req-test".to_string(),
         input: "test".to_string(),
         meta: HashMap::new(),
+        deadline: None,
     };
 
     assert_eq!(request.session.as_str(), "my-unique-session");
@@ -103,6 +105,7 @@ async fn test_request_meta_carries_batch_info() {
         request_id: "batch-req-0".to_string(),
         input: "batch prompt".to_string(),
         meta: meta.clone(),
+        deadline: None,
     };
 
     assert_eq!(

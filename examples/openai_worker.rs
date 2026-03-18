@@ -55,6 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             input: prompt.to_string(),
             request_id: "example-req-0".to_string(),
             meta: HashMap::new(),
+            deadline: None,
         };
 
         handles.input_tx.send(request).await?;
