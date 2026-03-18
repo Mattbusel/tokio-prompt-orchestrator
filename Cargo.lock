@@ -3681,7 +3681,7 @@ dependencies = [
 
 [[package]]
 name = "tokio-prompt-orchestrator"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "async-nats",
  "async-stream",
