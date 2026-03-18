@@ -415,13 +415,6 @@ pub fn set_queue_depth(stage: &str, depth: i64) {
     }
 }
 
-/// Gather all registered metrics as a raw list of metric families.
-///
-/// Returns an empty `Vec` if metrics have not been initialised.
-///
-/// # Panics
-///
-/// This function never panics.
 /// Record USD cost for an inference call.
 ///
 /// No-op if metrics have not been initialised.
@@ -576,6 +569,13 @@ pub fn inc_config_reload_error() {
     }
 }
 
+/// Gather all registered metrics as a raw list of metric families.
+///
+/// Returns an empty `Vec` if metrics have not been initialised.
+///
+/// # Panics
+///
+/// This function never panics.
 pub fn gather() -> Vec<prometheus::proto::MetricFamily> {
     metrics().map_or_else(Vec::new, |m| m.registry.gather())
 }

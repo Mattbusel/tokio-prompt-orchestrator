@@ -1,7 +1,19 @@
-//! Enhanced Features
+//! Enhanced resilience and performance features for the pipeline.
 //!
-//! Provides caching, rate limiting, priority queues, deduplication,
-//! circuit breakers, and retry logic.
+//! This module groups six production-grade primitives that operate at the
+//! nanosecond-to-microsecond range and are safe to use concurrently across
+//! multiple pipeline stages:
+//!
+//! | Sub-module | Purpose |
+//! |------------|---------|
+//! | [`cache`] | In-process LRU cache with TTL for inference results |
+//! | [`circuit_breaker`] | Prevents cascading failures; opens on threshold, probes recovery |
+//! | [`dedup`] | Request coalescing — collapses identical in-flight prompts |
+//! | [`priority`] | Four-level priority queue for request scheduling |
+//! | [`rate_limit`] | Token-bucket rate limiter with configurable burst |
+//! | [`retry`] | Exponential back-off with jitter and configurable attempt cap |
+//!
+//! All types are `Clone` and `Send + Sync`, suitable for sharing across Tokio tasks.
 
 pub mod cache;
 pub mod circuit_breaker;
