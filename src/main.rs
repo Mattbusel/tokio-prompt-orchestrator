@@ -947,7 +947,13 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
             });
 
             let pipeline_tx = handles.input_tx.clone();
-            let output_rx = output_rx_raw.expect("output_rx must be present");
+            let output_rx = match output_rx_raw {
+                Some(rx) => rx,
+                None => {
+                    tracing::error!("output_rx was already taken before web API start — this is a bug");
+                    std::process::exit(1);
+                }
+            };
             let config = ServerConfig {
                 host: cfg.host.clone(),
                 port: cfg.port,

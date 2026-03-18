@@ -291,15 +291,90 @@ full             # web-api, metrics-server, caching, rate-limiting, tui, dashboa
 
 ## Environment Variables
 
+Complete reference for all environment variables recognised by the orchestrator binary and library.
+
+| Variable | Default | Required | Description |
+|---|---|---|---|
+| `OPENAI_API_KEY` | — | For OpenAI workers | API key for `OpenAiWorker`. Must start with `sk-`. |
+| `ANTHROPIC_API_KEY` | — | For Anthropic workers | API key for `AnthropicWorker`. Must start with `sk-ant-`. |
+| `LLAMA_CPP_URL` | `http://localhost:8080` | No | llama.cpp server base URL. |
+| `VLLM_URL` | `http://localhost:8000` | No | vLLM inference server base URL. |
+| `REDIS_URL` | `redis://localhost:6379` | For `caching` / `distributed` features | Redis connection string. |
+| `NATS_URL` | `nats://localhost:4222` | For `distributed` feature | NATS broker URL for inter-node messaging. |
+| `RUST_LOG` | `info` | No | `tracing` log filter. E.g. `tokio_prompt_orchestrator=debug,info`. |
+| `RUST_LOG_FORMAT` | *(pretty)* | No | Set to `json` for newline-delimited JSON logs (Datadog / Loki / Grafana Loki). |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | — | No | OTLP exporter endpoint. Activates the OTel tracing layer when set. |
+| `JAEGER_ENDPOINT` | — | No | Jaeger OTLP HTTP endpoint (e.g. `http://localhost:4318`). Checked before `OTEL_EXPORTER_OTLP_ENDPOINT`. |
+| `API_KEY` | — | No | Bearer token for HTTP API authentication. Omit to run unauthenticated. |
+| `PORT` | `8080` | No | HTTP port for the web API / metrics server. |
+
 ```bash
-OPENAI_API_KEY="sk-..."               # OpenAI worker
-ANTHROPIC_API_KEY="sk-ant-..."        # Anthropic worker
-LLAMA_CPP_URL="http://localhost:8080" # llama.cpp server
-REDIS_URL="redis://localhost:6379"    # Redis (caching + distributed)
-NATS_URL="nats://localhost:4222"      # NATS (distributed clustering)
-RUST_LOG="info"
-LOG_FORMAT="json"                     # Structured logs for Datadog/Loki
+# Minimal setup (echo worker, no external services)
+RUST_LOG=info cargo run --bin orchestrator
+
+# Anthropic with structured logging and Jaeger tracing
+ANTHROPIC_API_KEY="sk-ant-..." \
+RUST_LOG_FORMAT=json \
+JAEGER_ENDPOINT="http://localhost:4318" \
+cargo run --bin orchestrator --features full
 ```
+
+---
+
+## Prometheus Metrics
+
+Start the metrics server with the `metrics-server` feature:
+
+```bash
+cargo run --bin orchestrator --features metrics-server
+```
+
+Prometheus scrape endpoint: `http://127.0.0.1:9090/metrics`
+
+Example metrics exposed:
+
+| Metric | Type | Description |
+|---|---|---|
+| `orchestrator_requests_total{stage}` | Counter | Requests entering each pipeline stage |
+| `orchestrator_requests_shed_total{stage}` | Counter | Requests dropped due to backpressure |
+| `orchestrator_errors_total{stage}` | Counter | Errors per pipeline stage |
+| `orchestrator_stage_latency_seconds{stage}` | Histogram | Per-stage latency distribution |
+| `orchestrator_dedup_hits_total` | Counter | Requests collapsed by deduplication |
+| `orchestrator_circuit_breaker_state{backend}` | Gauge | Circuit state (0=closed, 1=open, 2=half-open) |
+| `orchestrator_inference_cost_usd_total` | Counter | Cumulative inference cost |
+| `orchestrator_dlq_dropped_total` | Counter | Requests stored in dead-letter queue |
+
+Add to `prometheus.yml`:
+
+```yaml
+scrape_configs:
+  - job_name: orchestrator
+    static_configs:
+      - targets: ['localhost:9090']
+```
+
+---
+
+## OpenTelemetry
+
+Distributed tracing is enabled automatically when `JAEGER_ENDPOINT` or
+`OTEL_EXPORTER_OTLP_ENDPOINT` is set. The exporter uses HTTP/protobuf (OTLP).
+
+```bash
+# Jaeger all-in-one (local dev)
+docker run -p 4318:4318 -p 16686:16686 jaegertracing/all-in-one
+
+JAEGER_ENDPOINT="http://localhost:4318" cargo run --bin orchestrator
+# View traces at http://localhost:16686
+```
+
+```bash
+# Any OTLP-compatible backend (Grafana Tempo, Honeycomb, Datadog, etc.)
+OTEL_EXPORTER_OTLP_ENDPOINT="http://otel-collector:4318" cargo run --bin orchestrator
+```
+
+When neither variable is set the OTel layer is omitted and the binary starts
+without blocking on a collector. Service name in traces: `tokio-prompt-orchestrator`.
 
 ---
 
@@ -334,6 +409,58 @@ Channel send        <1us p99
 | Binary size | **7.6 MB** (single .exe, no runtime) | 100s of MB deps | 100s of MB deps |
 
 Use LangChain if you need to prototype quickly in Python. Use this if you need predictable latency, zero panics, and autonomous optimization at scale.
+
+---
+
+## Observability
+
+The orchestrator exposes three complementary observability surfaces:
+
+### Prometheus metrics (`/metrics`)
+
+Enable with `--features metrics-server`. Scraped at `http://127.0.0.1:9090/metrics`.
+
+| Metric | Type | Description |
+|---|---|---|
+| `orchestrator_requests_total{stage}` | Counter | Requests entering each pipeline stage |
+| `orchestrator_requests_shed_total{stage}` | Counter | Requests dropped (backpressure) per stage |
+| `orchestrator_errors_total{stage}` | Counter | Errors per pipeline stage |
+| `orchestrator_stage_latency_seconds{stage}` | Histogram | Per-stage latency distribution |
+| `orchestrator_dedup_hits_total` | Counter | Requests collapsed by the deduplication layer |
+| `orchestrator_circuit_breaker_state{backend}` | Gauge | Circuit state: 0=closed, 1=open, 2=half-open |
+| `orchestrator_inference_cost_usd_total` | Counter | Cumulative inference cost in USD |
+| `orchestrator_dlq_dropped_total` | Counter | Requests stored in the dead-letter queue |
+| `orchestrator_dlq_lock_poisoned_total` | Counter | DLQ mutex poison recovery events (should stay 0) |
+
+A pre-built Grafana dashboard JSON is provided at `grafana-dashboard.json`. Import it into any Grafana instance pointed at your Prometheus datasource.
+
+### Distributed tracing (OpenTelemetry)
+
+Activated automatically when `JAEGER_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` is set. Uses OTLP HTTP/protobuf. Compatible with Jaeger, Grafana Tempo, Honeycomb, Datadog, and any W3C Trace Context-compliant backend.
+
+Service name in traces: `tokio-prompt-orchestrator`. Each pipeline stage creates a child span, so the full RAG → Assemble → Inference → Post → Stream latency breakdown is visible in any trace view.
+
+When neither variable is set, the OTel layer is omitted entirely — the binary starts without blocking on a collector.
+
+### TUI terminal dashboard
+
+Enable with `--features tui`. Displays real-time throughput, dedup savings, per-stage latency (p50/p95/p99), circuit breaker states, and the self-improvement loop status in a ratatui terminal UI.
+
+```bash
+cargo run --bin tui --features tui
+```
+
+---
+
+## Architecture Decision Records
+
+The three most consequential design decisions and the reasoning behind them:
+
+| # | Decision | Alternatives considered | Rationale |
+|---|---|---|---|
+| ADR-001 | **Bounded `mpsc` channels with load-shedding instead of unbounded queues** | Unbounded queues; backpressure via `await` on `send` | Unbounded queues allow memory growth unbounded by arrival rate. Blocking `send` propagates latency upstream and can deadlock pipeline stages. Bounded channels with `try_send` + shed give predictable memory and latency at the cost of some requests being dropped — an explicit and measurable tradeoff. |
+| ADR-002 | **Single-pass deduplication via FNV-1a hash with configurable TTL** | SHA-256 content hashing; embedding-based semantic dedup; no dedup | SHA-256 is 10-100x slower on the hot path. Embedding-based dedup requires a model call to dedup, which defeats the purpose. FNV-1a at ~1.5 µs p50 gives 67% collapse rate in production without adding a model dependency. Semantic dedup is available as an opt-in (`SemanticDedup`) for cases where FNV collisions are insufficient. |
+| ADR-003 | **Circuit breaker opens on 5 consecutive failures, closes at 80% success rate** | Fixed timeout with automatic reset; no circuit breaker | Fixed-timeout reset re-routes traffic to a degraded provider at a fixed interval, causing thundering-herd recovery. A success-rate gate (80%) closes the circuit only after confirming the provider is healthy, reducing retry storms. The 5-failure threshold avoids tripping on transient single-request errors while catching genuine provider outages within one request cycle. |
 
 ---
 

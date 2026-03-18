@@ -42,8 +42,16 @@ jobs:
         run: cargo test --features "full,mcp"
         if: runner.os == 'Linux'
 
-      - name: doc
-        run: cargo doc --no-deps --document-private-items
+      - name: test (no features)
+        run: cargo test --no-default-features
+        if: runner.os == 'Linux'
+
+      - name: build (no features)
+        run: cargo build --no-default-features
+        if: runner.os == 'Linux'
+
+      - name: doc (all features)
+        run: cargo doc --no-deps --all-features
         if: runner.os == 'Linux'
         env:
           RUSTDOCFLAGS: "-D warnings"
@@ -75,7 +83,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: run benchmarks
-        run: cargo bench --bench bench_pipeline 2>&1 | tee bench_output.txt
+        run: cargo bench --bench pipeline 2>&1 | tee bench_output.txt
       - name: check for regression
         run: |
           # Fail if any benchmark regressed >10% vs the stored baseline.

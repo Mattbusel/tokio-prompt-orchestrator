@@ -65,15 +65,29 @@ pub use worker::{
     OpenAiWorker, VllmWorker,
 };
 
-/// Orchestrator-specific errors
+/// Orchestrator-specific errors.
+///
+/// All variants are non-panicking. Callers should match on the variant to
+/// decide whether to retry, shed, or propagate the error.
 #[derive(Error, Debug)]
 pub enum OrchestratorError {
+    /// A pipeline channel was closed before the request could be delivered.
+    ///
+    /// This typically means a pipeline stage task has exited. The pipeline
+    /// should be restarted. This error is not retryable within the same pipeline instance.
     #[error("channel closed unexpectedly")]
     ChannelClosed,
 
+    /// An inference worker returned an error.
+    ///
+    /// The inner string contains the provider error message. May be retryable
+    /// depending on the underlying cause (transient network vs. invalid request).
     #[error("inference failed: {0}")]
     Inference(String),
 
+    /// Pipeline or worker configuration is invalid.
+    ///
+    /// Returned during startup validation. Not retryable without a config change.
     #[error("configuration error: {0}")]
     ConfigError(String),
 
@@ -86,8 +100,14 @@ pub enum OrchestratorError {
 
     /// Spending cap reached — no further inference allowed this session.
     #[error("budget exceeded: spent ${spent:.4} of ${limit:.4} limit")]
-    BudgetExceeded { spent: f64, limit: f64 },
+    BudgetExceeded {
+        /// Amount spent so far in USD.
+        spent: f64,
+        /// Configured spending limit in USD.
+        limit: f64,
+    },
 
+    /// A catch-all error variant for errors that do not fit the other categories.
     #[error("{0}")]
     Other(String),
 }
@@ -97,9 +117,12 @@ pub enum OrchestratorError {
 pub struct SessionId(pub String);
 
 impl SessionId {
+    /// Create a new `SessionId` from any string-like value.
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
+
+    /// Borrow the inner string slice.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -108,10 +131,14 @@ impl SessionId {
 /// Initial prompt request from client
 #[derive(Debug, Clone)]
 pub struct PromptRequest {
+    /// Session this request belongs to.  Used for affinity sharding and
+    /// deduplication key generation.
     pub session: SessionId,
     /// Unique ID for distributed trace correlation across all pipeline stages.
     pub request_id: String,
+    /// The raw prompt text to send to the inference backend.
     pub input: String,
+    /// Arbitrary key-value metadata forwarded unchanged through the pipeline.
     pub meta: HashMap<String, String>,
     /// Optional absolute deadline for this request.  When `Some`, the inference
     /// stage drops the request and increments `requests_expired_total` if the
@@ -147,39 +174,63 @@ impl PromptRequest {
     }
 }
 
-/// Output from RAG stage
+/// Output from the RAG (retrieval-augmented generation) stage.
+///
+/// Carries the retrieved context string alongside the original request so the
+/// assembly stage can compose the final prompt without re-reading the original.
 #[derive(Debug, Clone)]
 pub struct RagOutput {
+    /// Session this output belongs to.
     pub session: SessionId,
+    /// Retrieved context text (documents, embeddings, etc.) for the prompt.
     pub context: String,
+    /// The original request, forwarded intact for use in the assembly stage.
     pub original: PromptRequest,
     /// Deadline propagated from the originating [`PromptRequest`], if any.
     pub deadline: Option<std::time::Instant>,
 }
 
-/// Output from assembly stage
+/// Output from the prompt assembly stage.
+///
+/// The assembled `prompt` string is the final, context-injected input that will
+/// be sent to the inference worker.
 #[derive(Debug, Clone)]
 pub struct AssembleOutput {
+    /// Session this output belongs to.
     pub session: SessionId,
+    /// Unique request identifier for distributed trace correlation.
     pub request_id: String,
+    /// The fully assembled prompt string ready for inference.
     pub prompt: String,
     /// Deadline propagated from the originating [`PromptRequest`], if any.
     pub deadline: Option<std::time::Instant>,
 }
 
-/// Output from inference stage
+/// Output from the inference stage.
+///
+/// Contains the raw token list as returned by the model worker before
+/// post-processing joins them into a coherent response string.
 #[derive(Debug, Clone)]
 pub struct InferenceOutput {
+    /// Session this output belongs to.
     pub session: SessionId,
+    /// Unique request identifier for distributed trace correlation.
     pub request_id: String,
+    /// Raw token list from the model worker.
     pub tokens: Vec<String>,
 }
 
-/// Output from post-processing stage
+/// Output from the post-processing stage.
+///
+/// Tokens have been joined, filtered, and formatted into the final
+/// response string delivered to the stream stage.
 #[derive(Debug, Clone)]
 pub struct PostOutput {
+    /// Session this output belongs to.
     pub session: SessionId,
+    /// Unique request identifier for distributed trace correlation.
     pub request_id: String,
+    /// Final response text after post-processing.
     pub text: String,
 }
 
@@ -360,7 +411,7 @@ pub fn try_build_otel_layer() -> Option<
     {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("Warning: OTel exporter build failed: {e}");
+            tracing::warn!("OTel exporter build failed: {e}");
             return None;
         }
     };
@@ -393,14 +444,20 @@ pub enum SendOutcome {
 /// Pipeline stage identifier for metrics and logging.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PipelineStage {
+    /// Retrieval-augmented generation — fetches context before assembly.
     Rag,
+    /// Prompt assembly — combines context and user input into a full prompt.
     Assemble,
+    /// Inference — sends the assembled prompt to the model backend.
     Inference,
+    /// Post-processing — formats and filters the raw model response.
     Post,
+    /// Streaming output — delivers the processed response downstream.
     Stream,
 }
 
 impl PipelineStage {
+    /// Return the canonical lowercase ASCII name used in metrics labels.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Rag => "rag",

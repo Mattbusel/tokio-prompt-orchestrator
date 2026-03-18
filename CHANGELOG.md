@@ -12,10 +12,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `cargo doc --no-deps -D warnings` step added to CI to prevent documentation regressions.
 - Module-level doc comment for `enhanced` with feature-table overview of all six sub-modules.
 - `gather()` function in `metrics` now has a proper `///` doc comment (was accidentally merged with an adjacent comment).
+- CI: added `--no-default-features` build and test steps to catch compilation breakage when all optional features are disabled.
+- CI: `cargo doc` step now uses `--all-features` so feature-gated public API is always verified.
+- CI: fixed bench step to reference the correct bench target name (`pipeline` not `bench_pipeline`).
+- Tests: `tier_integration_tests.rs` — independent integration tests for each of the four self-improvement tiers (self-tune, self-modify, intelligence, evolution), each gated by the corresponding feature flag.
+- Tests: four additional distributed tests covering quorum loss, partial quorum loss, leader election initial state, and leader step-down error handling.
+- Docstrings: `SessionId::new`, `SessionId::as_str` now have `///` doc comments.
+- Docstrings: `PromptRequest` fields `session`, `input`, and `meta` now have `///` field doc comments.
+- Docstrings: `PipelineStage` variants and `as_str` method now have `///` doc comments.
 
 ### Fixed
 
 - Misplaced doc comment in `metrics.rs`: the doc block that was intended for `gather()` was positioned above `record_inference_cost()`. Both functions now have their correct, isolated doc comments.
+- `src/bin/self_improve.rs`: replaced `.expect("LoopConfig is valid")` with a graceful error handler that logs via `tracing::error!` and exits with code 1.
+- `src/main.rs`: replaced `.expect("output_rx must be present")` with an explicit match that logs via `tracing::error!` and exits with code 1 instead of panicking.
 
 ---
 

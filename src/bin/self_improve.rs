@@ -41,7 +41,13 @@ async fn main() {
         ..LoopConfig::default()
     };
 
-    let self_loop = SelfImprovingLoop::new(loop_cfg, bus.clone()).expect("LoopConfig is valid");
+    let self_loop = match SelfImprovingLoop::new(loop_cfg, bus.clone()) {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to create self-improving loop — invalid LoopConfig");
+            std::process::exit(1);
+        }
+    };
     let handles = self_loop.handles();
     let _loop_handle = self_loop.spawn();
 

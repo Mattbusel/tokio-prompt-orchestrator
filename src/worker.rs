@@ -338,7 +338,9 @@ impl ModelWorker for OpenAiWorker {
         }
 
         // Return the full content as a single token rather than splitting on
-        // whitespace (which loses punctuation context).
+        // whitespace (which loses punctuation context).  Filter out
+        // whitespace-only responses so callers see an empty vec rather than
+        // a single blank token.
         let content = api_response
             .choices
             .first()
@@ -349,7 +351,11 @@ impl ModelWorker for OpenAiWorker {
             .content
             .clone();
 
-        Ok(vec![content])
+        if content.trim().is_empty() {
+            Ok(vec![])
+        } else {
+            Ok(vec![content])
+        }
     }
 
     async fn infer_stream(&self, prompt: &str) -> Result<TokenStream, OrchestratorError> {
@@ -602,7 +608,9 @@ impl ModelWorker for AnthropicWorker {
             OrchestratorError::Inference(format!("Failed to parse response: {}", e))
         })?;
 
-        // Collect text from all text content blocks
+        // Collect text from all text content blocks.  Filter out
+        // whitespace-only results so callers receive an empty vec rather than
+        // a single blank token.
         let full_text: String = api_response
             .content
             .into_iter()
@@ -611,7 +619,11 @@ impl ModelWorker for AnthropicWorker {
             .collect::<Vec<_>>()
             .join("");
 
-        Ok(vec![full_text])
+        if full_text.trim().is_empty() {
+            Ok(vec![])
+        } else {
+            Ok(vec![full_text])
+        }
     }
 
     async fn infer_stream(&self, prompt: &str) -> Result<TokenStream, OrchestratorError> {
@@ -847,7 +859,14 @@ impl ModelWorker for LlamaCppWorker {
             OrchestratorError::Inference(format!("Failed to parse response: {}", e))
         })?;
 
-        Ok(vec![api_response.content])
+        // Filter out empty strings so callers receive a genuinely-empty vec when
+        // the model returns no text content.
+        let content = api_response.content;
+        if content.is_empty() {
+            Ok(vec![])
+        } else {
+            Ok(vec![content])
+        }
     }
 }
 
@@ -1302,7 +1321,7 @@ mod tests {
             make_openai_worker_for(&server.uri())
         };
         let tokens = worker.infer("test prompt").await.unwrap();
-        assert_eq!(tokens, vec!["hello", "world", "response"]);
+        assert_eq!(tokens, vec!["hello world response"]);
     }
 
     #[tokio::test]
@@ -1523,7 +1542,7 @@ mod tests {
             make_anthropic_worker_for(&server.uri())
         };
         let tokens = worker.infer("test prompt").await.unwrap();
-        assert_eq!(tokens, vec!["hello", "world", "response"]);
+        assert_eq!(tokens, vec!["hello world response"]);
     }
 
     #[tokio::test]
@@ -1702,7 +1721,7 @@ mod tests {
 
         let worker = LlamaCppWorker::new().with_url(server.uri());
         let tokens = worker.infer("test prompt").await.unwrap();
-        assert_eq!(tokens, vec!["hello", "world", "response"]);
+        assert_eq!(tokens, vec!["hello world response"]);
     }
 
     #[tokio::test]
@@ -1827,7 +1846,7 @@ mod tests {
 
         let worker = VllmWorker::new().with_url(server.uri());
         let tokens = worker.infer("test prompt").await.unwrap();
-        assert_eq!(tokens, vec!["hello", "world", "response"]);
+        assert_eq!(tokens, vec!["hello world response"]);
     }
 
     #[tokio::test]

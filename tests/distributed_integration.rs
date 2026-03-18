@@ -416,6 +416,95 @@ async fn test_error_types_are_distinct() {
     }
 }
 
+// ── Quorum Loss and Leader Failover Tests ─────────────────────────────────
+
+/// When the only active node is evicted (quorum loss), routing returns None.
+/// This ensures the coordinator does not send work to a dead node.
+#[tokio::test]
+async fn test_quorum_loss_stops_routing() {
+    let cluster = ClusterManager::new("coordinator", Duration::from_millis(50));
+
+    cluster.register("n1", "h1:8080", 0).await;
+    cluster.register("n2", "h2:8080", 0).await;
+
+    // Confirm routing works with 2 nodes
+    assert!(cluster.route().await.is_some());
+
+    // Both nodes go stale
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let evicted = cluster.evict_stale_nodes().await;
+    assert_eq!(evicted.len(), 2, "both nodes should be evicted");
+
+    // No nodes left — routing must return None
+    assert!(
+        cluster.route().await.is_none(),
+        "routing after quorum loss must return None"
+    );
+    assert_eq!(cluster.node_count().await, 0);
+}
+
+/// Verifies that a single surviving node is still routed to after partial
+/// quorum loss (one of two nodes goes stale).
+#[tokio::test]
+async fn test_partial_quorum_loss_routes_to_survivor() {
+    let cluster = ClusterManager::new("coordinator", Duration::from_millis(80));
+
+    cluster.register("n1", "h1:8080", 5).await;
+    cluster.register("n2", "h2:8080", 2).await;
+
+    // Let both go stale, then renew only n1
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    cluster.register("n1", "h1:8080", 5).await; // heartbeat renewe n1
+
+    let evicted = cluster.evict_stale_nodes().await;
+    assert!(evicted.contains(&"n2".to_string()), "n2 should be evicted");
+    assert!(!evicted.contains(&"n1".to_string()), "n1 renewed — should survive");
+
+    assert_eq!(cluster.node_count().await, 1);
+    assert_eq!(
+        cluster.route().await,
+        Some("n1".to_string()),
+        "surviving node must still receive work"
+    );
+}
+
+/// Verifies `is_leader` is initially false and `step_down` is safe to call
+/// without an active Redis connection.
+#[test]
+fn test_leader_election_initial_state_is_follower() {
+    if let Ok(client) = redis::Client::open("redis://localhost:6379") {
+        let election = LeaderElection::from_client(Arc::new(client), "node-test", 30);
+        assert!(
+            !election.is_leader(),
+            "node must start as follower, not leader"
+        );
+        assert_eq!(
+            *election.role_watcher().borrow(),
+            LeaderRole::Follower(None),
+            "initial role watcher value must be Follower(None)"
+        );
+        assert_eq!(election.node_id(), "node-test");
+        assert_eq!(election.renewal_interval(), Duration::from_secs(15));
+    }
+}
+
+/// Verifies that `step_down` does not panic when Redis is unavailable
+/// (it should return an error, not crash).
+#[tokio::test]
+async fn test_leader_step_down_without_redis_returns_error() {
+    // Use an unreachable Redis URL so connections always fail
+    let result = LeaderElection::new("redis://192.0.2.1:6379", "node-sd", 5).await;
+    // Construction succeeds (lazy connection); operations will fail
+    if let Ok(election) = result {
+        let step_down_result = election.step_down().await;
+        // Must not panic — returning Err is acceptable
+        assert!(
+            step_down_result.is_err(),
+            "step_down to unreachable Redis must return Err, not panic"
+        );
+    }
+}
+
 #[test]
 fn test_distributed_config_serialization_stability() {
     let config = DistributedConfig::with_urls(
