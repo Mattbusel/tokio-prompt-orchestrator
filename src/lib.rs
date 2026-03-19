@@ -389,6 +389,11 @@ impl DeadLetterQueue {
 
     /// Push a dropped request into the queue.  Evicts the oldest entry if full.
     pub fn push(&self, req: DroppedRequest) {
+        // NOTE: std::sync::Mutex is safe here because the critical section is
+        // extremely short (a deque push plus an optional pop_front) and there
+        // is no `.await` inside the guard.  Using a sync lock avoids the
+        // overhead of a tokio::sync::Mutex while keeping the operation
+        // compatible with both sync and async callers.
         let mut guard = self.inner.lock().unwrap_or_else(|p| {
             tracing::warn!("DeadLetterQueue: recovering from poisoned mutex");
             crate::metrics::inc_dlq_lock_poisoned();
@@ -402,6 +407,9 @@ impl DeadLetterQueue {
 
     /// Drain all queued entries and return them, clearing the queue.
     pub fn drain(&self) -> Vec<DroppedRequest> {
+        // NOTE: std::sync::Mutex is safe here because the critical section is
+        // a single drain-and-collect with no `.await` inside the guard.  The
+        // lock is always released before any async work can be scheduled.
         let mut guard = self.inner.lock().unwrap_or_else(|p| {
             tracing::warn!("DeadLetterQueue: recovering from poisoned mutex");
             crate::metrics::inc_dlq_lock_poisoned();

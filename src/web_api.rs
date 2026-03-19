@@ -1718,8 +1718,50 @@ async fn batch_progress_handler(
 
 /// `POST /api/v1/batch` — process multiple prompts concurrently.
 ///
-/// Accepts up to 100 prompts.  `max_concurrency` controls in-flight parallelism
-/// (1–16, default 4).  Returns HTTP 429 if the pipeline is at capacity.
+/// Accepts up to 100 prompts and fans them out to the pipeline in parallel,
+/// controlled by `max_concurrency` (1–16, default 4). All sub-requests share
+/// the same `session_id` prefix (a unique suffix is added per item). The
+/// handler returns HTTP 429 if the pipeline is at capacity.
+///
+/// ## Request format
+///
+/// ```json
+/// {
+///   "prompts": ["What is Rust?", "Explain backpressure."],
+///   "session_id": "my-session",
+///   "max_concurrency": 4
+/// }
+/// ```
+///
+/// - `prompts` (required): 1–100 prompt strings.
+/// - `session_id` (optional): shared session prefix for all sub-requests.
+/// - `max_concurrency` (optional): max parallel in-flight requests (1–16).
+///
+/// ## Response format
+///
+/// ```json
+/// {
+///   "results": [
+///     { "request_id": "uuid-1", "text": "Response text..." },
+///     { "request_id": "uuid-2", "error": "timeout" }
+///   ],
+///   "total": 2,
+///   "succeeded": 1,
+///   "failed": 1
+/// }
+/// ```
+///
+/// ## Polling progress
+///
+/// While items are processing you can poll the progress endpoint:
+///
+/// ```text
+/// GET /api/v1/batch/{job_id}/progress
+/// ```
+///
+/// The `job_id` is the UUID returned in the response body once the handler
+/// has registered the batch. See [`batch_progress_handler`] for the response
+/// schema.
 ///
 /// # Panics
 ///

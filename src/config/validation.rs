@@ -13,6 +13,29 @@
 //! ## NOT Responsible For
 //! - Parsing TOML (that belongs to `loader`)
 //! - File I/O (that belongs to `loader`)
+//!
+//! ## Validation Rules
+//!
+//! | Field path | Rule | Error variant |
+//! |---|---|---|
+//! | `resilience.retry_base_ms` | Must be ≤ `retry_max_ms` | `InvalidField` |
+//! | `resilience.retry_attempts` | Must be ≥ 1 | `InvalidField` |
+//! | `resilience.circuit_breaker_success_rate` | Must be in [0.0, 1.0] | `InvalidField` |
+//! | `resilience.circuit_breaker_threshold` | Must be ≥ 1 | `InvalidField` |
+//! | `resilience.circuit_breaker_timeout_s` | Must be ≥ 1 | `InvalidField` |
+//! | `stages.inference.temperature` | If set, must be in [0.0, 2.0] | `InvalidField` |
+//! | `stages.inference.model` | Must not be blank/whitespace-only | `InvalidField` |
+//! | `pipeline.name` | Must not be blank/whitespace-only | `InvalidField` |
+//! | `pipeline.version` | Must not be blank/whitespace-only | `InvalidField` |
+//! | `stages.rag.timeout_ms` | Must be ≥ 1 when `stages.rag.enabled = true` | `InvalidField` |
+//! | `stages.rag.max_context_tokens` | Must be ≥ 1 when `stages.rag.enabled = true` | `InvalidField` |
+//! | `stages.rag.channel_capacity` | If set, must be ≥ 1 | `InvalidField` |
+//! | `stages.assemble.channel_capacity` | Must be ≥ 1 | `InvalidField` |
+//! | `stages.post_process.channel_capacity` | Must be ≥ 1 | `InvalidField` |
+//! | `stages.stream.channel_capacity` | Must be ≥ 1 | `InvalidField` |
+//! | `deduplication.window_s` | Must be ≥ 1 when `deduplication.enabled = true` | `InvalidField` |
+//! | `deduplication.max_entries` | Must be ≥ 1 when `deduplication.enabled = true` | `InvalidField` |
+//! | `observability.metrics_port` | If set, must be ≥ 1 | `InvalidField` |
 
 use super::PipelineConfig;
 
@@ -72,6 +95,30 @@ pub enum ConfigError {
 ///
 /// - `Ok(())` if all constraints pass.
 /// - `Err(Vec<ConfigError>)` with every violation found.
+///
+/// # Errors
+///
+/// Returns `Err(Vec<ConfigError>)` containing one [`ConfigError::InvalidField`]
+/// entry per violated rule. The possible violations are:
+///
+/// - `resilience.retry_base_ms > resilience.retry_max_ms`
+/// - `resilience.retry_attempts == 0`
+/// - `resilience.circuit_breaker_success_rate` outside `[0.0, 1.0]`
+/// - `resilience.circuit_breaker_threshold == 0`
+/// - `resilience.circuit_breaker_timeout_s == 0`
+/// - `stages.inference.temperature` outside `[0.0, 2.0]` (when `Some`)
+/// - `stages.inference.model` is blank or whitespace-only
+/// - `pipeline.name` is blank or whitespace-only
+/// - `pipeline.version` is blank or whitespace-only
+/// - `stages.rag.timeout_ms == 0` when RAG is enabled
+/// - `stages.rag.max_context_tokens == 0` when RAG is enabled
+/// - `stages.rag.channel_capacity == Some(0)`
+/// - `stages.assemble.channel_capacity == 0`
+/// - `stages.post_process.channel_capacity == 0`
+/// - `stages.stream.channel_capacity == 0`
+/// - `deduplication.window_s == 0` when deduplication is enabled
+/// - `deduplication.max_entries == 0` when deduplication is enabled
+/// - `observability.metrics_port == Some(0)`
 ///
 /// # Panics
 ///

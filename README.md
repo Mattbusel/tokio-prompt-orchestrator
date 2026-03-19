@@ -241,6 +241,70 @@ tracing_endpoint  = "http://jaeger:4318"  # OTLP endpoint; omit to disable
 
 ---
 
+## Configuration
+
+### Timeouts
+
+Each stage can have its own timeout, and individual requests can carry a
+per-request deadline. These are configured independently:
+
+```toml
+[stages.rag]
+timeout_ms = 5000       # RAG stage timeout (ms)
+
+[stages.inference]
+timeout_ms = 30000      # Per-worker inference call timeout (ms)
+                        # Overrides DEFAULT_INFERENCE_TIMEOUT_SECS (120 s)
+
+[resilience]
+retry_base_ms = 100     # Initial retry delay (ms)
+retry_max_ms  = 5000    # Maximum retry delay after back-off (ms)
+retry_attempts = 3      # Maximum number of retries per request
+```
+
+Set a per-request deadline in code:
+
+```rust,no_run
+use tokio_prompt_orchestrator::{PromptRequest, SessionId};
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
+let req = PromptRequest {
+    session: SessionId::new("user-1"),
+    request_id: "req-42".into(),
+    input: "Summarise this document.".into(),
+    meta: HashMap::new(),
+    deadline: Some(Instant::now() + Duration::from_secs(10)),
+};
+```
+
+### Circuit breaker
+
+The circuit breaker opens after `circuit_breaker_threshold` consecutive
+failures, waits `circuit_breaker_timeout_s` seconds, then probes in
+HALF-OPEN mode. It closes again when the probe success rate meets
+`circuit_breaker_success_rate`.
+
+```toml
+[resilience]
+circuit_breaker_threshold    = 5    # failures before opening
+circuit_breaker_timeout_s    = 60   # seconds before half-open probe
+circuit_breaker_success_rate = 0.8  # probe success rate to re-close
+```
+
+### Rate limiting
+
+Token-bucket rate limiting is opt-in. Enable with `--features rate-limiting`.
+
+```toml
+[rate_limits]
+enabled             = true
+requests_per_second = 100   # sustained rate (tokens/s)
+burst_capacity      = 20    # burst allowance on top of the steady rate
+```
+
+---
+
 ## Live Dashboard
 
 Start the TUI dashboard with the `tui` feature:

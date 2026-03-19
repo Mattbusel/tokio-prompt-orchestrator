@@ -204,6 +204,9 @@ impl ConsensusBrain {
     /// # Panics
     /// This function never panics.
     pub fn register_node(&self, node_id: &str) -> Result<(), BrainError> {
+        // NOTE: std::sync::Mutex is safe here because the critical section is
+        // a single Vec membership check and optional push — no `.await` inside
+        // the guard.  The lock is always released before returning.
         let mut inner = self.inner.lock().map_err(|_| BrainError::LockPoisoned)?;
         if !inner.known_nodes.contains(&node_id.to_string()) {
             inner.known_nodes.push(node_id.to_string());

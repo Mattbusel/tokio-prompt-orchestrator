@@ -18,6 +18,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - README rewritten with architecture ASCII diagram, quickstart async example,
   API overview table, full configuration reference, feature flags table, and
   contributing and license sections.
+- Full `///` doc comments added to all five worker constructors (`OpenAiWorker::new`,
+  `AnthropicWorker::new`, `LlamaCppWorker::new`, `VllmWorker::new`,
+  `EchoWorker::new`), each with environment-variable table, `# Errors`, and
+  `# Examples` sections.
+- `## Timeout Semantics` section added to `src/stages.rs` module doc, covering
+  `DEFAULT_INFERENCE_TIMEOUT_SECS`, per-request deadlines, circuit-breaker
+  timeout independence, stage-level timeouts, and deadline-vs-stage-timeout
+  interaction.
+- Module-level `//!` doc comment in `src/config/validation.rs` now includes a
+  complete validation-rule table. `validate()` gains a `# Errors` section
+  listing every `ConfigError::InvalidField` variant that can be returned.
+- `POST /api/v1/batch` and `GET /api/v1/batch/:job_id/progress` endpoints
+  documented in `src/web_api.rs` with request/response JSON schemas and
+  progress-polling instructions. `WEB_API.md` updated with curl examples.
+- `## Configuration` subsections added to `README.md` covering timeout TOML
+  snippets, circuit-breaker TOML, and rate-limit TOML.
+- `## Troubleshooting` section added to `CONTRIBUTING.md` covering DLQ
+  inspection, circuit-breaker state interpretation, replaying failed requests,
+  and common configuration mistakes.
+- Inline `// NOTE: …` comments added at every `parking_lot::Mutex` / sync
+  `std::sync::Mutex` lock site inside async contexts, explaining why a sync
+  lock is acceptable (short critical section, no `.await` inside the guard).
+- `cargo doc --no-deps -D warnings` step added to CI to prevent documentation
+  regressions.
+- Module-level doc comment for `enhanced` with feature-table overview of all
+  six sub-modules.
+- `gather()` function in `metrics` now has a proper `///` doc comment.
+- CI: added `--no-default-features` build and test steps to catch compilation
+  breakage when all optional features are disabled.
+- CI: `cargo doc` step now uses `--all-features` so feature-gated public API
+  is always verified.
+- CI: fixed bench step to reference the correct bench target name.
+- Tests: `tier_integration_tests.rs` — independent integration tests for each
+  of the four self-improvement tiers.
+- Tests: four additional distributed tests covering quorum loss and leader
+  election edge cases.
+- Docstrings: `SessionId::new`, `SessionId::as_str`, `PromptRequest` fields,
+  and `PipelineStage` variants now have `///` doc comments.
 
 ### Fixed
 
@@ -40,6 +78,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Five test assertions in `worker.rs` corrected: `vec!["hello", "world", "response"]`
   changed to `vec!["hello world response"]` to match the single-token return
   contract of OpenAI, Anthropic, LlamaCpp, and vLLM workers.
+- Misplaced doc lines in `metrics.rs` and `stages.rs` now correctly attributed
+  to their respective functions.
+- `src/bin/self_improve.rs` and `src/main.rs` replaced `.expect()` calls with
+  graceful error handlers that log via `tracing::error!` and exit with code 1.
 
 ## [1.0.0] - 2026-03-18
 
@@ -64,28 +106,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Version bumped from `0.1.0` to `1.0.0` -- the public API is stable.
-
-## [Unreleased]
-
-### Added
-
-- `cargo doc --no-deps -D warnings` step added to CI to prevent documentation regressions.
-- Module-level doc comment for `enhanced` with feature-table overview of all six sub-modules.
-- `gather()` function in `metrics` now has a proper `///` doc comment (was accidentally merged with an adjacent comment).
-- CI: added `--no-default-features` build and test steps to catch compilation breakage when all optional features are disabled.
-- CI: `cargo doc` step now uses `--all-features` so feature-gated public API is always verified.
-- CI: fixed bench step to reference the correct bench target name (`pipeline` not `bench_pipeline`).
-- Tests: `tier_integration_tests.rs` — independent integration tests for each of the four self-improvement tiers (self-tune, self-modify, intelligence, evolution), each gated by the corresponding feature flag.
-- Tests: four additional distributed tests covering quorum loss, partial quorum loss, leader election initial state, and leader step-down error handling.
-- Docstrings: `SessionId::new`, `SessionId::as_str` now have `///` doc comments.
-- Docstrings: `PromptRequest` fields `session`, `input`, and `meta` now have `///` field doc comments.
-- Docstrings: `PipelineStage` variants and `as_str` method now have `///` doc comments.
-
-### Fixed
-
-- Misplaced doc comment in `metrics.rs`: the doc block that was intended for `gather()` was positioned above `record_inference_cost()`. Both functions now have their correct, isolated doc comments.
-- `src/bin/self_improve.rs`: replaced `.expect("LoopConfig is valid")` with a graceful error handler that logs via `tracing::error!` and exits with code 1.
-- `src/main.rs`: replaced `.expect("output_rx must be present")` with an explicit match that logs via `tracing::error!` and exits with code 1 instead of panicking.
 
 ---
 

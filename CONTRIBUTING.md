@@ -200,6 +200,78 @@ Body explaining the motivation and any tradeoffs.
 
 ---
 
+## Troubleshooting
+
+### Inspecting the dead-letter queue (DLQ)
+
+Requests that are shed under backpressure are written to the `DeadLetterQueue`
+ring buffer. Use the debug endpoint (requires `debug_mode = true` in
+`ServerConfig`) to inspect its current contents:
+
+```bash
+# List all shed requests currently in the DLQ
+curl http://localhost:8080/api/v1/debug/dlq | jq .
+```
+
+Or inspect it programmatically in Rust:
+
+```rust,no_run
+use tokio_prompt_orchestrator::DeadLetterQueue;
+use std::sync::Arc;
+
+// Obtain the DLQ handle from PipelineHandles or shared state.
+fn inspect(dlq: &Arc<DeadLetterQueue>) {
+    for entry in dlq.drain() {
+        eprintln!("shed: session={} request_id={} reason={:?}",
+            entry.session.as_str(), entry.request_id, entry.reason);
+    }
+}
+```
+
+### Replaying failed requests from the DLQ
+
+After fixing the root cause (e.g. a downstream service outage), drain and
+resubmit the shed requests:
+
+```bash
+# Replay via the debug replay endpoint
+curl -X POST http://localhost:8080/api/v1/debug/dlq/replay
+```
+
+The replay endpoint resubmits all items currently in the DLQ back through the
+pipeline entry channel. Items that are shed again remain in the DLQ for the
+next replay attempt.
+
+### Interpreting circuit-breaker state
+
+The circuit breaker has three states:
+
+| State | Meaning | Action |
+|---|---|---|
+| `CLOSED` | Normal operation. All requests flow through. | No action needed. |
+| `OPEN` | Failure threshold breached. All requests are rejected immediately without reaching the backend. | Wait for `circuit_breaker_timeout_s` before the breaker automatically probes. Check backend health. |
+| `HALF-OPEN` | Probe mode. One request is allowed through; if it succeeds the breaker closes; if it fails the breaker re-opens. | Monitor the next request outcome. |
+
+View current state from the TUI dashboard or via:
+
+```bash
+curl http://localhost:8080/api/v1/debug/circuit_breaker | jq .state
+```
+
+### Common configuration mistakes
+
+| Error message | Likely cause | Fix |
+|---|---|---|
+| `Field 'resilience.retry_base_ms' has invalid value … must be ≤ retry_max_ms` | `retry_base_ms > retry_max_ms` in TOML | Swap the values or increase `retry_max_ms`. |
+| `Field 'resilience.retry_attempts' has invalid value 0` | `retry_attempts = 0` | Set `retry_attempts` to at least 1. |
+| `Field 'stages.inference.model' has invalid value` | Empty string for model name | Set `model = "gpt-4o"` (or your chosen model). |
+| `Field 'stages.rag.timeout_ms' has invalid value 0` | `timeout_ms = 0` with `enabled = true` | Set a positive timeout, e.g. `timeout_ms = 5000`. |
+| `OPENAI_API_KEY environment variable not set` | Missing env var | Export `OPENAI_API_KEY=sk-…` before running. |
+| `ANTHROPIC_API_KEY environment variable not set` | Missing env var | Export `ANTHROPIC_API_KEY=sk-ant-…` before running. |
+| `channel capacity must be at least 1` | A channel capacity is set to 0 | Set all `channel_capacity` fields to ≥ 1 (defaults: 512). |
+
+---
+
 ## Questions
 
 Open a [Discussion](https://github.com/Mattbusel/tokio-prompt-orchestrator/discussions) for design questions, research ideas, or "would you accept a PR for X?" conversations.
