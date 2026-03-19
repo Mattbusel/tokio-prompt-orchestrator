@@ -10,7 +10,7 @@
 //! - `VecDeque` collections are bounded and never grow unbounded
 //! - `update()` and `on_tick()` never panic
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
 /// Maximum number of throughput history data points (one per second, 60s window).
@@ -20,16 +20,31 @@ pub const THROUGHPUT_HISTORY_CAP: usize = 60;
 pub const LOG_ENTRIES_CAP: usize = 50;
 
 /// Minimum terminal width for the dashboard to render.
-pub const MIN_COLS: u16 = 60;
+pub const MIN_COLS: u16 = 40;
 
 /// Minimum terminal height for the dashboard to render.
-pub const MIN_ROWS: u16 = 20;
+pub const MIN_ROWS: u16 = 10;
 
 /// Pipeline stage names in order.
 pub const STAGE_NAMES: [&str; 5] = ["RAG", "ASSEMBLE", "INFER", "POST", "STREAM"];
 
-/// Pipeline stage latency budgets in milliseconds (P99).
-pub const STAGE_BUDGETS_MS: [f64; 5] = [20.0, 10.0, 400.0, 15.0, 10.0];
+/// Default pipeline stage latency budgets in milliseconds (P99).
+pub const DEFAULT_STAGE_BUDGETS_MS: [f64; 5] = [20.0, 10.0, 400.0, 15.0, 10.0];
+
+/// Per-stage latency budgets (configurable at runtime).
+#[derive(Debug, Clone)]
+pub struct LatencyBudgets {
+    /// Budget for each stage in milliseconds, ordered RAG/ASSEMBLE/INFER/POST/STREAM.
+    pub ms: [f64; 5],
+}
+
+impl Default for LatencyBudgets {
+    fn default() -> Self {
+        Self {
+            ms: DEFAULT_STAGE_BUDGETS_MS,
+        }
+    }
+}
 
 /// Primary application state for the TUI dashboard.
 #[derive(Debug)]
@@ -46,8 +61,17 @@ pub struct App {
     /// Pipeline stage latencies in milliseconds (rolling average).
     /// Order: RAG, ASSEMBLE, INFER, POST, STREAM.
     pub stage_latencies: [f64; 5],
+    /// P50 latency per stage in milliseconds.
+    pub stage_latency_p50: [f64; 5],
+    /// P95 latency per stage in milliseconds.
+    pub stage_latency_p95: [f64; 5],
+    /// P99 latency per stage in milliseconds.
+    pub stage_latency_p99: [f64; 5],
     /// Index of the currently-processing stage, if any.
     pub active_stage: Option<usize>,
+
+    /// Per-stage latency budgets (configurable; defaults to DEFAULT_STAGE_BUDGETS_MS).
+    pub latency_budgets: LatencyBudgets,
 
     /// Channel depths between pipeline stages.
     pub channel_depths: [ChannelDepth; 4],
@@ -61,6 +85,9 @@ pub struct App {
     pub inferences_total: u64,
     /// Estimated cost saved via deduplication in USD.
     pub cost_saved_usd: f64,
+
+    /// Per-worker inference cost totals in USD.
+    pub worker_costs: HashMap<String, f64>,
 
     /// Throughput history: requests per second for the last 60 seconds.
     pub throughput_history: VecDeque<u64>,
@@ -82,6 +109,9 @@ pub struct App {
 
     /// Data update interval.
     pub tick_rate: Duration,
+
+    /// Set to true when a live metrics fetch fails; false on success.
+    pub metrics_fetch_error: bool,
 }
 
 /// Depth of a bounded channel between two pipeline stages.
@@ -156,7 +186,12 @@ impl App {
             tick_count: 0,
 
             stage_latencies: [0.0; 5],
+            stage_latency_p50: [0.0; 5],
+            stage_latency_p95: [0.0; 5],
+            stage_latency_p99: [0.0; 5],
             active_stage: None,
+
+            latency_budgets: LatencyBudgets::default(),
 
             channel_depths: [
                 ChannelDepth {
@@ -203,6 +238,8 @@ impl App {
             inferences_total: 0,
             cost_saved_usd: 0.0,
 
+            worker_costs: HashMap::new(),
+
             throughput_history: VecDeque::with_capacity(THROUGHPUT_HISTORY_CAP),
 
             cpu_percent: 0.0,
@@ -214,6 +251,8 @@ impl App {
             log_scroll_offset: 0,
 
             tick_rate,
+
+            metrics_fetch_error: false,
         }
     }
 
@@ -314,14 +353,29 @@ impl App {
     /// Ratio of current latency to budget. Values >1.0 indicate budget exceeded.
     /// Returns 0.0 if index is out of range or budget is zero.
     pub fn stage_budget_ratio(&self, index: usize) -> f64 {
-        if index >= self.stage_latencies.len() || index >= STAGE_BUDGETS_MS.len() {
+        if index >= self.stage_latencies.len() || index >= self.latency_budgets.ms.len() {
             return 0.0;
         }
-        let budget = STAGE_BUDGETS_MS[index];
+        let budget = self.latency_budgets.ms[index];
         if budget <= 0.0 {
             return 0.0;
         }
         self.stage_latencies[index] / budget
+    }
+
+    /// Returns or inserts a circuit breaker entry by name, returning its index.
+    ///
+    /// Used in live mode to dynamically add circuit breaker entries from Prometheus labels.
+    pub fn circuit_breaker_index_or_insert(&mut self, name: &str) -> usize {
+        if let Some(pos) = self.circuit_breakers.iter().position(|cb| cb.name == name) {
+            return pos;
+        }
+        self.circuit_breakers.push(CircuitBreakerStatus {
+            name: name.to_string(),
+            state: CircuitState::Closed,
+            detail: "(0 ok)".into(),
+        });
+        self.circuit_breakers.len() - 1
     }
 }
 
@@ -384,6 +438,8 @@ mod tests {
         assert_eq!(app.log_entries.len(), 0);
         assert_eq!(app.circuit_breakers.len(), 3);
         assert_eq!(app.channel_depths.len(), 4);
+        assert!(!app.metrics_fetch_error);
+        assert!(app.worker_costs.is_empty());
     }
 
     #[test]
@@ -732,5 +788,56 @@ mod tests {
         assert_eq!(app.log_scroll_offset, 0);
         app.scroll_log_down();
         assert_eq!(app.log_scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_latency_budgets_default() {
+        let app = App::new(Duration::from_secs(1));
+        assert_eq!(app.latency_budgets.ms, DEFAULT_STAGE_BUDGETS_MS);
+    }
+
+    #[test]
+    fn test_stage_budget_ratio_uses_latency_budgets() {
+        let mut app = App::new(Duration::from_secs(1));
+        app.latency_budgets.ms[0] = 50.0;
+        app.stage_latencies[0] = 25.0;
+        assert!((app.stage_budget_ratio(0) - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_circuit_breaker_index_or_insert_existing() {
+        let mut app = App::new(Duration::from_secs(1));
+        let idx = app.circuit_breaker_index_or_insert("openai");
+        assert_eq!(idx, 0);
+        assert_eq!(app.circuit_breakers.len(), 3); // no new entry added
+    }
+
+    #[test]
+    fn test_circuit_breaker_index_or_insert_new() {
+        let mut app = App::new(Duration::from_secs(1));
+        let idx = app.circuit_breaker_index_or_insert("new-worker");
+        assert_eq!(idx, 3);
+        assert_eq!(app.circuit_breakers.len(), 4);
+        assert_eq!(app.circuit_breakers[3].name, "new-worker");
+    }
+
+    #[test]
+    fn test_worker_costs_empty_by_default() {
+        let app = App::new(Duration::from_secs(1));
+        assert!(app.worker_costs.is_empty());
+    }
+
+    #[test]
+    fn test_metrics_fetch_error_default_false() {
+        let app = App::new(Duration::from_secs(1));
+        assert!(!app.metrics_fetch_error);
+    }
+
+    #[test]
+    fn test_stage_latency_percentiles_default_zero() {
+        let app = App::new(Duration::from_secs(1));
+        assert_eq!(app.stage_latency_p50, [0.0; 5]);
+        assert_eq!(app.stage_latency_p95, [0.0; 5]);
+        assert_eq!(app.stage_latency_p99, [0.0; 5]);
     }
 }
