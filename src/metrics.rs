@@ -22,8 +22,8 @@
 
 use crate::OrchestratorError;
 use prometheus::{
-    core::Collector, Counter, CounterVec, Encoder, HistogramOpts, HistogramVec, IntGaugeVec, Opts,
-    Registry, TextEncoder,
+    core::Collector, Counter, CounterVec, Encoder, GaugeVec, HistogramOpts, HistogramVec,
+    IntGaugeVec, Opts, Registry, TextEncoder,
 };
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -70,6 +70,20 @@ pub struct Metrics {
     pub circuit_breaker_requests_rejected_total: Counter,
     /// Config hot-reload attempts that failed validation or parse.
     pub config_reload_errors_total: Counter,
+    /// Errors returned by a specific named worker, labelled by worker name.
+    pub worker_errors_total: CounterVec,
+    /// Cache hits on the response cache (in-memory or Redis).
+    pub cache_hits_total: Counter,
+    /// Cache misses on the response cache (in-memory or Redis).
+    pub cache_misses_total: Counter,
+    /// Current number of tokens remaining in the rate-limiter bucket per session.
+    pub rate_limiter_tokens_remaining: GaugeVec,
+    /// Duration of config hot-reload operations (parse + validate), in seconds.
+    pub config_reload_duration_seconds: HistogramVec,
+    /// Session affinity routing hits (request routed to its preferred shard).
+    pub session_affinity_hits_total: Counter,
+    /// Session affinity routing misses (preferred shard unavailable, rerouted).
+    pub session_affinity_misses_total: Counter,
 }
 
 static METRICS: OnceLock<Metrics> = OnceLock::new();
@@ -265,6 +279,79 @@ pub fn init_metrics() -> Result<(), OrchestratorError> {
         .register(Box::new(config_reload_errors_total.clone()))
         .map_err(|e| OrchestratorError::Other(format!("metrics registration failed: {e}")))?;
 
+    let worker_errors_total = CounterVec::new(
+        Opts::new(
+            "orchestrator_worker_errors_total",
+            "Errors returned by a named worker, labelled by worker name",
+        ),
+        &["worker"],
+    )
+    .map_err(|e| OrchestratorError::Other(format!("metrics init failed: {e}")))?;
+    registry
+        .register(Box::new(worker_errors_total.clone()))
+        .map_err(|e| OrchestratorError::Other(format!("metrics registration failed: {e}")))?;
+
+    let cache_hits_total = Counter::with_opts(Opts::new(
+        "orchestrator_cache_hits_total",
+        "Response cache hits (in-memory or Redis)",
+    ))
+    .map_err(|e| OrchestratorError::Other(format!("metrics init failed: {e}")))?;
+    registry
+        .register(Box::new(cache_hits_total.clone()))
+        .map_err(|e| OrchestratorError::Other(format!("metrics registration failed: {e}")))?;
+
+    let cache_misses_total = Counter::with_opts(Opts::new(
+        "orchestrator_cache_misses_total",
+        "Response cache misses (in-memory or Redis)",
+    ))
+    .map_err(|e| OrchestratorError::Other(format!("metrics init failed: {e}")))?;
+    registry
+        .register(Box::new(cache_misses_total.clone()))
+        .map_err(|e| OrchestratorError::Other(format!("metrics registration failed: {e}")))?;
+
+    let rate_limiter_tokens_remaining = GaugeVec::new(
+        Opts::new(
+            "orchestrator_rate_limiter_tokens_remaining",
+            "Current token-bucket tokens remaining for a session",
+        ),
+        &["session"],
+    )
+    .map_err(|e| OrchestratorError::Other(format!("metrics init failed: {e}")))?;
+    registry
+        .register(Box::new(rate_limiter_tokens_remaining.clone()))
+        .map_err(|e| OrchestratorError::Other(format!("metrics registration failed: {e}")))?;
+
+    let config_reload_duration_seconds = HistogramVec::new(
+        HistogramOpts::new(
+            "orchestrator_config_reload_duration_seconds",
+            "Duration of config hot-reload operations (parse + validate)",
+        )
+        .buckets(vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]),
+        &["result"],
+    )
+    .map_err(|e| OrchestratorError::Other(format!("metrics init failed: {e}")))?;
+    registry
+        .register(Box::new(config_reload_duration_seconds.clone()))
+        .map_err(|e| OrchestratorError::Other(format!("metrics registration failed: {e}")))?;
+
+    let session_affinity_hits_total = Counter::with_opts(Opts::new(
+        "orchestrator_session_affinity_hits_total",
+        "Requests routed to their preferred affinity shard",
+    ))
+    .map_err(|e| OrchestratorError::Other(format!("metrics init failed: {e}")))?;
+    registry
+        .register(Box::new(session_affinity_hits_total.clone()))
+        .map_err(|e| OrchestratorError::Other(format!("metrics registration failed: {e}")))?;
+
+    let session_affinity_misses_total = Counter::with_opts(Opts::new(
+        "orchestrator_session_affinity_misses_total",
+        "Requests rerouted because preferred affinity shard was unavailable",
+    ))
+    .map_err(|e| OrchestratorError::Other(format!("metrics init failed: {e}")))?;
+    registry
+        .register(Box::new(session_affinity_misses_total.clone()))
+        .map_err(|e| OrchestratorError::Other(format!("metrics registration failed: {e}")))?;
+
     // If another thread raced us, the first one wins  -  both initializations
     // produce identical metric descriptors, so neither outcome is incorrect.
     let _ = METRICS.set(Metrics {
@@ -286,6 +373,13 @@ pub fn init_metrics() -> Result<(), OrchestratorError> {
         circuit_breaker_state_transitions_total,
         circuit_breaker_requests_rejected_total,
         config_reload_errors_total,
+        worker_errors_total,
+        cache_hits_total,
+        cache_misses_total,
+        rate_limiter_tokens_remaining,
+        config_reload_duration_seconds,
+        session_affinity_hits_total,
+        session_affinity_misses_total,
     });
 
     Ok(())
@@ -572,6 +666,125 @@ pub fn inc_config_reload_error() {
     }
 }
 
+/// Increment the per-worker error counter.
+///
+/// Call when a named worker (e.g. `"openai"`, `"anthropic"`) returns an error.
+///
+/// No-op if metrics have not been initialised.
+///
+/// # Panics
+///
+/// This function never panics.
+pub fn inc_worker_error(worker: &str) {
+    if let Some(m) = metrics() {
+        if let Ok(c) = m.worker_errors_total.get_metric_with_label_values(&[worker]) {
+            c.inc();
+        }
+    }
+}
+
+/// Increment the cache hit counter.
+///
+/// Call when the response cache returns a cached value.
+///
+/// No-op if metrics have not been initialised.
+///
+/// # Panics
+///
+/// This function never panics.
+pub fn inc_cache_hit() {
+    if let Some(m) = metrics() {
+        m.cache_hits_total.inc();
+    }
+}
+
+/// Increment the cache miss counter.
+///
+/// Call when the response cache returns `None` (no entry or expired).
+///
+/// No-op if metrics have not been initialised.
+///
+/// # Panics
+///
+/// This function never panics.
+pub fn inc_cache_miss() {
+    if let Some(m) = metrics() {
+        m.cache_misses_total.inc();
+    }
+}
+
+/// Set the rate-limiter tokens-remaining gauge for a session.
+///
+/// Call after each rate-limit check to update the gauge with the current
+/// number of tokens remaining in that session's bucket.
+///
+/// No-op if metrics have not been initialised.
+///
+/// # Panics
+///
+/// This function never panics.
+pub fn set_rate_limiter_tokens(session: &str, tokens: f64) {
+    if let Some(m) = metrics() {
+        if let Ok(g) = m
+            .rate_limiter_tokens_remaining
+            .get_metric_with_label_values(&[session])
+        {
+            g.set(tokens);
+        }
+    }
+}
+
+/// Record the duration of a config hot-reload operation.
+///
+/// `result` should be `"ok"` on success or `"error"` on failure.
+///
+/// No-op if metrics have not been initialised.
+///
+/// # Panics
+///
+/// This function never panics.
+pub fn record_config_reload_duration(result: &str, d: Duration) {
+    if let Some(m) = metrics() {
+        if let Ok(h) = m
+            .config_reload_duration_seconds
+            .get_metric_with_label_values(&[result])
+        {
+            h.observe(d.as_secs_f64());
+        }
+    }
+}
+
+/// Increment the session affinity hit counter.
+///
+/// Call when a request is successfully routed to its preferred affinity shard.
+///
+/// No-op if metrics have not been initialised.
+///
+/// # Panics
+///
+/// This function never panics.
+pub fn inc_session_affinity_hit() {
+    if let Some(m) = metrics() {
+        m.session_affinity_hits_total.inc();
+    }
+}
+
+/// Increment the session affinity miss counter.
+///
+/// Call when a request's preferred affinity shard is unavailable and it must
+/// be rerouted to a different shard.
+///
+/// No-op if metrics have not been initialised.
+///
+/// # Panics
+///
+/// This function never panics.
+pub fn inc_session_affinity_miss() {
+    if let Some(m) = metrics() {
+        m.session_affinity_misses_total.inc();
+    }
+}
+
 /// Gather all registered metrics as a raw list of metric families.
 ///
 /// Returns an empty `Vec` if metrics have not been initialised.
@@ -816,6 +1029,61 @@ mod tests {
             .register(Box::new(config_reload_errors_total.clone()))
             .expect("register must succeed in tests");
 
+        let worker_errors_total = CounterVec::new(
+            Opts::new("t_worker_errors_total", "test counter"),
+            &["worker"],
+        )
+        .expect("CounterVec construction must succeed in tests");
+        registry
+            .register(Box::new(worker_errors_total.clone()))
+            .expect("register must succeed in tests");
+
+        let cache_hits_total =
+            Counter::with_opts(Opts::new("t_cache_hits_total", "test counter"))
+                .expect("Counter construction must succeed in tests");
+        registry
+            .register(Box::new(cache_hits_total.clone()))
+            .expect("register must succeed in tests");
+
+        let cache_misses_total =
+            Counter::with_opts(Opts::new("t_cache_misses_total", "test counter"))
+                .expect("Counter construction must succeed in tests");
+        registry
+            .register(Box::new(cache_misses_total.clone()))
+            .expect("register must succeed in tests");
+
+        let rate_limiter_tokens_remaining = GaugeVec::new(
+            Opts::new("t_rate_limiter_tokens_remaining", "test gauge"),
+            &["session"],
+        )
+        .expect("GaugeVec construction must succeed in tests");
+        registry
+            .register(Box::new(rate_limiter_tokens_remaining.clone()))
+            .expect("register must succeed in tests");
+
+        let config_reload_duration_seconds = HistogramVec::new(
+            HistogramOpts::new("t_config_reload_duration_seconds", "test histogram"),
+            &["result"],
+        )
+        .expect("HistogramVec construction must succeed in tests");
+        registry
+            .register(Box::new(config_reload_duration_seconds.clone()))
+            .expect("register must succeed in tests");
+
+        let session_affinity_hits_total =
+            Counter::with_opts(Opts::new("t_session_affinity_hits_total", "test counter"))
+                .expect("Counter construction must succeed in tests");
+        registry
+            .register(Box::new(session_affinity_hits_total.clone()))
+            .expect("register must succeed in tests");
+
+        let session_affinity_misses_total =
+            Counter::with_opts(Opts::new("t_session_affinity_misses_total", "test counter"))
+                .expect("Counter construction must succeed in tests");
+        registry
+            .register(Box::new(session_affinity_misses_total.clone()))
+            .expect("register must succeed in tests");
+
         Metrics {
             registry,
             requests_total,
@@ -835,6 +1103,13 @@ mod tests {
             circuit_breaker_state_transitions_total,
             circuit_breaker_requests_rejected_total,
             config_reload_errors_total,
+            worker_errors_total,
+            cache_hits_total,
+            cache_misses_total,
+            rate_limiter_tokens_remaining,
+            config_reload_duration_seconds,
+            session_affinity_hits_total,
+            session_affinity_misses_total,
         }
     }
 

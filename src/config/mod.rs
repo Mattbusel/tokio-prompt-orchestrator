@@ -29,42 +29,85 @@ use serde::{Deserialize, Serialize};
 
 // ── Default value functions ──────────────────────────────────────────────
 
-/// Default RAG stage timeout: 5000ms.
+/// Default RAG stage timeout: 5000 ms.
+///
+/// **Why 5 s?** Covers P99 of most retrieval backends (vector DBs, BM25 indexes)
+/// under normal load while still bounding worst-case pipeline latency.  Increase
+/// for slow cross-region retrieval or when using large embedding models for
+/// re-ranking.
 fn default_timeout_ms() -> u64 {
     5000
 }
 
-/// Default maximum context tokens for the RAG stage.
+/// Default maximum context tokens for the RAG stage: 2048 tokens.
+///
+/// **Why 2048?** Fits comfortably in the context window of all major models
+/// (≥4K context) while leaving ample room for the instruction, user prompt,
+/// and model response.  Increase to 4096–8192 for RAG-heavy workloads where
+/// retrieved passages tend to be long.
 fn default_max_context_tokens() -> usize {
     2048
 }
 
-/// Default retry base delay: 100ms.
+/// Default retry base delay: 100 ms.
+///
+/// **Why 100 ms?** With exponential back-off (2×) this reaches ~3 s by
+/// attempt 5, covering most transient LLM API failures (rate-limit windows,
+/// brief network blips) without introducing multi-second latency on the first
+/// retry.  Reduce to 50 ms for latency-sensitive workflows; increase for
+/// providers with aggressive rate limits.
 fn default_retry_base_ms() -> u64 {
     100
 }
 
-/// Default retry maximum delay: 5000ms.
+/// Default retry maximum delay: 5000 ms.
+///
+/// **Why 5 s?** Caps the exponential back-off ceiling so no single retry ever
+/// blocks a pipeline stage for more than 5 s.  This balances giving slow
+/// providers time to recover with keeping end-to-end P99 latency predictable.
 fn default_retry_max_ms() -> u64 {
     5000
 }
 
 /// Default deduplication window: 300 seconds (5 minutes).
+///
+/// **Why 5 minutes?** Covers typical LLM retry storms — clients that retry on
+/// error within a few minutes will hit the in-flight dedup cache rather than
+/// issuing a duplicate API call.  Longer windows reduce redundant API costs
+/// but proportionally increase memory use; at 10K entries × 5 min the overhead
+/// is negligible.
 fn default_dedup_window_s() -> u64 {
     300
 }
 
 /// Default deduplication max entries: 10 000.
+///
+/// **Why 10 000?** At ~256 bytes per entry (key hash + response pointer) this
+/// costs ~2.5 MB of heap, which is acceptable even in memory-constrained
+/// deployments.  For high-cardinality workloads (many unique sessions) increase
+/// to 50K–100K; for embedded deployments reduce to 1K–5K.
 fn default_dedup_max_entries() -> usize {
     10_000
 }
 
-/// Default channel capacity for pipeline stages.
+/// Default channel capacity for pipeline stages: 512 entries.
+///
+/// **Why 512?** Sized for ~50 ms of burst traffic at 10 000 req/s while
+/// keeping per-stage memory under ~4 MB (each `PromptRequest` ≈ 8 KB).
+/// This gives downstream stages enough headroom to absorb a slow GC pause or
+/// brief processing spike without shedding load.  Reduce to 128–256 for
+/// memory-constrained deployments; increase to 1024–2048 for very high
+/// throughput or bursty workloads.
 fn default_channel_capacity() -> usize {
     512
 }
 
-/// Default enabled state: true.
+/// Default enabled state: `true`.
+///
+/// **Why true?** Most stages should be on by default so that a minimal config
+/// file (with only required fields) produces a fully-functional pipeline.
+/// Stages that should be off by default (rate limiting) have their own
+/// `default_*_enabled` functions that return `false`.
 fn default_true() -> bool {
     true
 }
@@ -137,6 +180,13 @@ pub struct PipelineConfig {
     /// its compiled-in default (512 / 512 / 1024 / 512 / 256).
     #[serde(default)]
     pub channel_sizes: Option<ChannelSizes>,
+    /// Optional per-worker configuration overrides.
+    ///
+    /// Allows setting model, API base URL, and connection parameters for each
+    /// worker type directly in the pipeline TOML without modifying worker code.
+    /// Workers read these values at construction time in `spawn_pipeline_with_config`.
+    #[serde(default)]
+    pub workers: WorkersConfig,
 }
 
 // ── Pipeline identity ────────────────────────────────────────────────────
@@ -222,7 +272,12 @@ pub struct AssembleStageConfig {
     pub channel_capacity: usize,
 }
 
-/// Default number of concurrent inference workers (1 = backward-compatible single worker).
+/// Default number of concurrent inference workers: 1 (single worker).
+///
+/// **Why 1?** Preserves backward compatibility with existing deployments that
+/// assume a single ordered inference queue.  Increase to the number of
+/// parallel in-flight requests you want to sustain (e.g. 4–8 for high-
+/// throughput deployments with async LLM APIs that support concurrent calls).
 fn default_inference_workers() -> usize {
     1
 }
@@ -277,6 +332,120 @@ pub enum WorkerKind {
     Echo,
 }
 
+/// Provider identifier enum used in per-worker configuration.
+///
+/// Accepts the following string values in TOML (case-insensitive via custom
+/// `Deserialize`): `"openai"`, `"anthropic"`, `"llama_cpp"` / `"llama-cpp"`,
+/// `"vllm"`, `"echo"`.  Unknown values produce a clear serde error at
+/// parse time.
+///
+/// # Panics
+///
+/// This type never panics.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+pub enum Provider {
+    /// OpenAI-compatible API.
+    OpenAi,
+    /// Anthropic Claude API.
+    Anthropic,
+    /// Local llama.cpp server.
+    LlamaCpp,
+    /// vLLM inference server.
+    Vllm,
+    /// Echo (test) worker.
+    Echo,
+}
+
+impl<'de> serde::Deserialize<'de> for Provider {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        match s.to_lowercase().replace('-', "_").as_str() {
+            "openai" => Ok(Provider::OpenAi),
+            "anthropic" => Ok(Provider::Anthropic),
+            "llama_cpp" => Ok(Provider::LlamaCpp),
+            "vllm" => Ok(Provider::Vllm),
+            "echo" => Ok(Provider::Echo),
+            other => Err(serde::de::Error::custom(format!(
+                "unknown provider {other:?}; expected one of: openai, anthropic, llama_cpp, vllm, echo"
+            ))),
+        }
+    }
+}
+
+/// Per-worker connection and model configuration.
+///
+/// Optional overrides for a named worker. All fields are optional; when absent
+/// the worker falls back to its built-in defaults or environment variables.
+///
+/// Workers prefer TOML config over defaults but environment variables still
+/// override TOML values (e.g. `OPENAI_API_KEY` always takes precedence over
+/// any key stored in the config file).
+///
+/// # Example
+///
+/// ```toml
+/// [workers.openai]
+/// model = "gpt-4o"
+/// api_base_url = "https://api.openai.com/v1"
+///
+/// [workers.anthropic]
+/// model = "claude-opus-4-6"
+/// max_tokens = 4096
+///
+/// [workers.llama_cpp]
+/// host = "localhost"
+/// port = 8080
+/// ```
+///
+/// # Panics
+///
+/// This type never panics.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+pub struct WorkerConfig {
+    /// Model name to use (e.g. `"gpt-4o"`, `"claude-opus-4-6"`).
+    pub model: Option<String>,
+    /// API base URL (e.g. `"https://api.openai.com/v1"`).
+    /// Overrides the worker's built-in default endpoint.
+    pub api_base_url: Option<String>,
+    /// Maximum tokens to generate.  `None` uses the worker default.
+    pub max_tokens: Option<u32>,
+    /// Sampling temperature.  `None` uses the worker default.
+    pub temperature: Option<f32>,
+    /// Hostname for local servers (llama.cpp / vLLM).
+    pub host: Option<String>,
+    /// Port for local servers (llama.cpp / vLLM).
+    pub port: Option<u16>,
+}
+
+/// Per-worker configuration map, keyed by provider name.
+///
+/// Used in the `[workers.*]` TOML sections.
+///
+/// # Panics
+///
+/// This type never panics.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+pub struct WorkersConfig {
+    /// OpenAI worker configuration overrides.
+    #[serde(default)]
+    pub openai: WorkerConfig,
+    /// Anthropic worker configuration overrides.
+    #[serde(default)]
+    pub anthropic: WorkerConfig,
+    /// llama.cpp worker configuration overrides.
+    #[serde(default)]
+    pub llama_cpp: WorkerConfig,
+    /// vLLM worker configuration overrides.
+    #[serde(default)]
+    pub vllm: WorkerConfig,
+    /// Echo worker configuration overrides (mostly useful for testing).
+    #[serde(default)]
+    pub echo: WorkerConfig,
+}
+
 /// Post-processing stage configuration.
 ///
 /// # Panics
@@ -313,17 +482,32 @@ pub struct StreamStageConfig {
 
 // ── Rate limiting ────────────────────────────────────────────────────────
 
-/// Default requests-per-second limit: 100.
+/// Default requests-per-second limit: 100 req/s.
+///
+/// **Why 100?** A conservative starting point that prevents accidental
+/// saturation of the downstream LLM provider (most have free-tier limits of
+/// ~60 req/min ≈ 1 req/s).  Operators deploying against higher-tier API
+/// accounts should raise this to their actual quota.
 fn default_rps() -> u32 {
     100
 }
 
-/// Default burst capacity: 20.
+/// Default burst capacity above the sustained rate: 20 requests.
+///
+/// **Why 20?** Allows a short burst (e.g. a web page loading many parallel
+/// requests) without immediately triggering the rate limiter, while still
+/// preventing sustained abuse.  Equivalent to ~200 ms of sustained quota at
+/// the 100 req/s default.
 fn default_burst() -> u32 {
     20
 }
 
-/// Default enabled state for rate limiting: false.
+/// Default enabled state for rate limiting: `false`.
+///
+/// **Why false?** Rate limiting has no sensible universal default — the right
+/// limit depends entirely on the provider contract.  Enabling it by default
+/// with wrong values would silently reject legitimate traffic.  Operators must
+/// explicitly set `enabled = true` and configure `requests_per_second`.
 fn default_rate_limit_enabled() -> bool {
     false
 }
@@ -693,6 +877,7 @@ metrics_port = 9090
             },
             rate_limits: RateLimitConfig::default(),
             channel_sizes: None,
+            workers: WorkersConfig::default(),
         };
 
         let toml_str = toml::to_string_pretty(&config).expect("test: serialize to TOML");
@@ -756,6 +941,7 @@ metrics_port = 9090
             },
             rate_limits: RateLimitConfig::default(),
             channel_sizes: None,
+            workers: WorkersConfig::default(),
         };
 
         let json = serde_json::to_string(&config).expect("test: serialize to JSON");

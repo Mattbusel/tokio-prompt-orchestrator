@@ -23,6 +23,7 @@
 //! # }
 //! ```
 
+use crate::metrics;
 use dashmap::DashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -166,6 +167,7 @@ impl CacheLayer {
                 if let Some(entry) = cache.store.get(key) {
                     if entry.expires_at > SystemTime::now() {
                         debug!(key = key, "cache hit (memory)");
+                        metrics::inc_cache_hit();
                         return Some(entry.value.clone());
                     }
                     // Expired
@@ -174,20 +176,24 @@ impl CacheLayer {
                     debug!(key = key, "cache expired");
                 }
                 debug!(key = key, "cache miss (memory)");
+                metrics::inc_cache_miss();
                 None
             }
             #[cfg(feature = "caching")]
             CacheBackend::Redis(cache) => match cache.get_redis(key).await {
                 Ok(Some(value)) => {
                     debug!(key = key, "cache hit (redis)");
+                    metrics::inc_cache_hit();
                     Some(value)
                 }
                 Ok(None) => {
                     debug!(key = key, "cache miss (redis)");
+                    metrics::inc_cache_miss();
                     None
                 }
                 Err(e) => {
                     warn!(key = key, error = ?e, "redis get error");
+                    metrics::inc_cache_miss();
                     None
                 }
             },

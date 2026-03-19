@@ -22,6 +22,7 @@ use std::time::Duration;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::{broadcast, Mutex};
 
+use crate::metrics;
 use super::loader::load_from_file;
 use super::validation::ConfigError;
 use super::PipelineConfig;
@@ -142,8 +143,11 @@ impl ConfigWatcher {
 
                 if should_reload && last_reload.elapsed() >= debounce {
                     last_reload = std::time::Instant::now();
+                    let reload_start = std::time::Instant::now();
                     match load_from_file(&config_path) {
                         Ok(new_config) => {
+                            let elapsed = reload_start.elapsed();
+                            metrics::record_config_reload_duration("ok", elapsed);
                             tracing::info!(
                                 path = %config_path.display(),
                                 pipeline = %new_config.pipeline.name,
@@ -153,6 +157,8 @@ impl ConfigWatcher {
                             let _ = tx_clone.send(new_config);
                         }
                         Err(e) => {
+                            let elapsed = reload_start.elapsed();
+                            metrics::record_config_reload_duration("error", elapsed);
                             tracing::warn!(
                                 path = %config_path.display(),
                                 error = %e,
