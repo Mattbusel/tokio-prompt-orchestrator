@@ -22,7 +22,7 @@ use axum::{
     body::Body,
     extract::{
         ws::{Message, WebSocket},
-        Path, State, WebSocketUpgrade,
+        Path, Query, State, WebSocketUpgrade,
     },
     http::{header, HeaderValue, Request, StatusCode},
     middleware::{self, Next},
@@ -46,6 +46,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 #[cfg(feature = "web-api")]
 use std::collections::HashSet;
+#[cfg(feature = "web-api")]
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 #[cfg(feature = "web-api")]
 use std::sync::Arc;
 #[cfg(feature = "web-api")]
@@ -85,6 +87,9 @@ pub struct ServerConfig {
     pub max_request_size: usize,
     /// How long (in seconds) to wait for a result before returning a timeout error.
     pub timeout_seconds: u64,
+    /// When `true`, the `/api/v1/debug/*` endpoints are enabled.
+    /// Default: `true` (safe for development; set to `false` in production).
+    pub debug_mode: bool,
 }
 
 #[cfg(feature = "web-api")]
@@ -95,6 +100,7 @@ impl Default for ServerConfig {
             port: 8080,
             max_request_size: 10 * 1024 * 1024, // 10MB
             timeout_seconds: 300,               // 5 minutes
+            debug_mode: true,
         }
     }
 }
@@ -193,6 +199,124 @@ const TRACKER_RETENTION: Duration = Duration::from_secs(60 * 60); // 1 hour
 #[cfg(feature = "web-api")]
 const TRACKER_CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 60); // 5 minutes
 
+// ============================================================================
+// Batch Job Tracker
+// ============================================================================
+
+/// Per-job state stored in the [`BatchJobTracker`].
+#[cfg(feature = "web-api")]
+#[derive(Clone)]
+struct BatchJob {
+    total: usize,
+    completed: Arc<AtomicU64>,
+    failed: Arc<AtomicU64>,
+    /// IDs of the sub-requests that belong to this batch job.
+    #[allow(dead_code)]
+    sub_request_ids: Vec<String>,
+}
+
+/// Tracks progress of batch jobs submitted via `POST /api/v1/batch`.
+#[cfg(feature = "web-api")]
+#[derive(Clone)]
+struct BatchJobTracker {
+    jobs: Arc<DashMap<String, BatchJob>>,
+}
+
+#[cfg(feature = "web-api")]
+impl BatchJobTracker {
+    fn new() -> Self {
+        Self {
+            jobs: Arc::new(DashMap::new()),
+        }
+    }
+
+    fn create(&self, job_id: String, total: usize, sub_request_ids: Vec<String>) {
+        self.jobs.insert(
+            job_id,
+            BatchJob {
+                total,
+                completed: Arc::new(AtomicU64::new(0)),
+                failed: Arc::new(AtomicU64::new(0)),
+                sub_request_ids,
+            },
+        );
+    }
+
+    fn record_completed(&self, job_id: &str) {
+        if let Some(job) = self.jobs.get(job_id) {
+            job.completed.fetch_add(1, AtomicOrdering::Relaxed);
+        }
+    }
+
+    fn record_failed(&self, job_id: &str) {
+        if let Some(job) = self.jobs.get(job_id) {
+            job.failed.fetch_add(1, AtomicOrdering::Relaxed);
+        }
+    }
+}
+
+// ============================================================================
+// Validation Errors
+// ============================================================================
+
+/// A single field-level validation error.
+#[cfg(feature = "web-api")]
+#[derive(Debug, Serialize)]
+struct FieldError {
+    field: &'static str,
+    code: &'static str,
+    message: &'static str,
+}
+
+/// Structured validation error response (HTTP 422).
+#[cfg(feature = "web-api")]
+#[derive(Debug, Serialize)]
+struct ValidationErrorBody {
+    error: &'static str,
+    fields: Vec<FieldError>,
+}
+
+#[cfg(feature = "web-api")]
+impl IntoResponse for ValidationErrorBody {
+    fn into_response(self) -> Response {
+        (StatusCode::UNPROCESSABLE_ENTITY, Json(self)).into_response()
+    }
+}
+
+/// Validate an [`InferRequest`] and return a [`ValidationErrorBody`] if any
+/// fields are invalid.  Returns `None` when all fields are valid.
+#[cfg(feature = "web-api")]
+fn validate_infer_request(req: &InferRequest) -> Option<ValidationErrorBody> {
+    let mut fields = Vec::new();
+
+    if req.prompt.trim().is_empty() {
+        fields.push(FieldError {
+            field: "prompt",
+            code: "ERR_REQUIRED",
+            message: "prompt is required and cannot be empty",
+        });
+    }
+
+    if let Some(t) = req.timeout_seconds {
+        if t == 0 || t > 3600 {
+            fields.push(FieldError {
+                field: "timeout_seconds",
+                code: "ERR_OUT_OF_RANGE",
+                message: "timeout_seconds must be between 1 and 3600 (inclusive)",
+            });
+        }
+    }
+
+    if fields.is_empty() {
+        None
+    } else {
+        Some(ValidationErrorBody {
+            error: "VALIDATION_ERROR",
+            fields,
+        })
+    }
+}
+
 #[cfg(feature = "web-api")]
 impl RequestTracker {
     /// Create a new tracker and spawn a background task that every 5 minutes
@@ -229,9 +353,16 @@ impl RequestTracker {
 struct AppState {
     pipeline_tx: mpsc::Sender<PromptRequest>,
     tracker: RequestTracker,
+    batch_tracker: BatchJobTracker,
     config: ServerConfig,
     /// Optional API key.  `None` means authentication is disabled (startup warning emitted).
     api_key: Option<String>,
+    /// When `true`, the `/api/v1/debug/*` endpoints are active.
+    debug_mode: bool,
+    /// Dead-letter queue from the pipeline — exposed on the debug endpoints.
+    dlq: Arc<crate::DeadLetterQueue>,
+    /// Circuit breaker from the inference stage — exposed on the debug endpoints.
+    circuit_breaker: crate::enhanced::CircuitBreaker,
 }
 
 // ============================================================================
@@ -271,6 +402,8 @@ pub async fn start_server(
     config: ServerConfig,
     pipeline_tx: mpsc::Sender<PromptRequest>,
     mut output_rx: mpsc::Receiver<crate::PostOutput>,
+    dlq: Arc<crate::DeadLetterQueue>,
+    circuit_breaker: crate::enhanced::CircuitBreaker,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr = format!("{}:{}", config.host, config.port);
 
@@ -285,31 +418,54 @@ pub async fn start_server(
         }
     };
 
-    // Configure CORS origins from ALLOWED_ORIGINS (comma-separated) or fall back to wildcard.
-    // We always start with a permissive layer so the type is uniform, then override the
-    // allow_origin when a specific list is provided.
+    // Configure CORS origins from ALLOWED_ORIGINS or fall back to wildcard.
+    //
+    // ALLOWED_ORIGINS format:
+    //   Comma-separated list of allowed origins, e.g.
+    //   `https://app.example.com,https://staging.example.com`.
+    //   Supports exact matches only (no wildcards within a value).
+    //   Leave unset to allow all origins (not recommended for production).
     let cors = match std::env::var("ALLOWED_ORIGINS") {
         Ok(origins) if !origins.is_empty() => {
             let allowed_set: HashSet<HeaderValue> = origins
                 .split(',')
                 .filter_map(|o| HeaderValue::from_str(o.trim()).ok())
                 .collect();
+            let origin_list: Vec<String> = allowed_set
+                .iter()
+                .filter_map(|v| v.to_str().ok().map(|s| s.to_owned()))
+                .collect();
+            info!(
+                origins = %origin_list.join(", "),
+                "CORS configured with explicit allow-list (exact-match only; \
+                 update ALLOWED_ORIGINS to add new origins)"
+            );
             let allowed_vec: Vec<HeaderValue> = allowed_set.into_iter().collect();
             CorsLayer::new().allow_origin(AllowOrigin::list(allowed_vec))
         }
         _ => {
-            warn!("ALLOWED_ORIGINS not set — CORS is open to all origins. Set ALLOWED_ORIGINS=http://localhost:PORT for production.");
+            warn!(
+                "ALLOWED_ORIGINS not set — CORS is open to all origins. \
+                 Set ALLOWED_ORIGINS=https://app.example.com,https://staging.example.com \
+                 for production (comma-separated, exact matches only)."
+            );
             CorsLayer::new().allow_origin(AllowOrigin::any())
         }
     };
 
     let tracker = RequestTracker::new();
+    let batch_tracker = BatchJobTracker::new();
+    let debug_mode = config.debug_mode;
 
     let state = Arc::new(AppState {
         pipeline_tx,
         tracker,
+        batch_tracker,
         config: config.clone(),
         api_key,
+        debug_mode,
+        dlq,
+        circuit_breaker,
     });
 
     // Collector task: receives pipeline output and writes results into the tracker.
@@ -327,13 +483,18 @@ pub async fn start_server(
     let app = Router::new()
         .route("/api/v1/infer", post(infer_handler))
         .route("/api/v1/batch", post(batch_handler))
+        .route("/api/v1/batch/:job_id/progress", get(batch_progress_handler))
         .route("/api/v1/stream", post(sse_stream_handler))
         .route("/api/v1/status/:request_id", get(status_handler))
         .route("/api/v1/result/:request_id", get(result_handler))
+        .route("/api/v1/results", get(results_handler))
         .route("/api/v1/ws", get(websocket_handler))
         .route("/v1/stream", get(token_stream_ws_handler))
         .route("/api/v1/schema", get(schema_handler))
         .route("/api/v1/pipeline/status", get(pipeline_status_handler))
+        .route("/api/v1/debug/dlq", get(debug_dlq_handler))
+        .route("/api/v1/debug/dedup-index", get(debug_dedup_handler))
+        .route("/api/v1/debug/pipeline", get(debug_pipeline_handler))
         .route("/health", get(health_handler))
         .route("/metrics", get(metrics_handler))
         .layer(middleware::from_fn_with_state(
@@ -493,7 +654,12 @@ async fn auth_middleware(
 async fn infer_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<InferRequest>,
-) -> Result<Json<InferResponse>, AppError> {
+) -> Result<Response, AppError> {
+    // Field-level validation — returns HTTP 422 with structured errors.
+    if let Some(err) = validate_infer_request(&req) {
+        return Ok(err.into_response());
+    }
+
     let request_id = Uuid::new_v4().to_string();
     let session_id = req
         .session_id
@@ -506,15 +672,6 @@ async fn infer_handler(
         endpoint = "POST /api/v1/infer",
     )
     .entered();
-
-    // Validate per-request timeout if provided.
-    if let Some(t) = req.timeout_seconds {
-        if t == 0 || t > 3600 {
-            return Err(AppError::BadRequest(
-                "timeout_seconds must be between 1 and 3600".to_string(),
-            ));
-        }
-    }
 
     let deadline = req
         .deadline_secs
@@ -568,7 +725,8 @@ async fn infer_handler(
         status: RequestStatus::Processing,
         result: None,
         error: None,
-    }))
+    })
+    .into_response())
 }
 
 /// `GET /api/v1/status/{request_id}`  -  Check request status.
@@ -651,6 +809,12 @@ async fn sse_stream_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<InferRequest>,
 ) -> Result<Sse<impl futures::Stream<Item = Result<Event, std::convert::Infallible>>>, AppError> {
+    // Field-level validation — returns HTTP 422 with structured errors.
+    // Must happen before any field is moved out of `req`.
+    if let Some(err) = validate_infer_request(&req) {
+        return Err(AppError::ValidationError(err));
+    }
+
     let request_id = Uuid::new_v4().to_string();
     let session_id = req
         .session_id
@@ -663,15 +827,6 @@ async fn sse_stream_handler(
         endpoint = "POST /api/v1/stream",
     )
     .entered();
-
-    // Validate per-request timeout if provided.
-    if let Some(t) = req.timeout_seconds {
-        if t == 0 || t > 3600 {
-            return Err(AppError::BadRequest(
-                "timeout_seconds must be between 1 and 3600".to_string(),
-            ));
-        }
-    }
 
     let deadline = req
         .deadline_secs
@@ -806,11 +961,21 @@ async fn websocket_stream(socket: WebSocket, state: Arc<AppState>) {
                         }
                         msg_count += 1;
                         if msg_count > WS_RATE_LIMIT_PER_MIN {
+                            // Send a structured rate-limit error, then close the
+                            // connection with WebSocket close code 4029 (application-
+                            // defined; means "Too Many Requests").
                             let err_msg = serde_json::json!({
-                                "error": "Rate limit exceeded"
+                                "error": "RATE_LIMITED",
+                                "retry_after_ms": 1000
                             }).to_string();
                             let _ = ws_sink.send(Message::Text(err_msg)).await;
-                            continue;
+                            // Close with code 4029.
+                            let close_frame = axum::extract::ws::CloseFrame {
+                                code: 4029,
+                                reason: std::borrow::Cow::Borrowed("rate limit exceeded"),
+                            };
+                            let _ = ws_sink.send(Message::Close(Some(close_frame))).await;
+                            break;
                         }
 
                         //  Parse and process
@@ -1366,6 +1531,49 @@ struct BatchResponse {
     failed: usize,
 }
 
+/// `GET /api/v1/batch/:job_id/progress`  -  Poll batch job progress.
+///
+/// Returns the current completion counters for the given batch job.
+/// Status is `"in_progress"`, `"completed"`, or `"failed"` (all failed).
+///
+/// # Panics
+///
+/// This function never panics.
+#[cfg(feature = "web-api")]
+async fn batch_progress_handler(
+    State(state): State<Arc<AppState>>,
+    Path(job_id): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let job = state
+        .batch_tracker
+        .jobs
+        .get(&job_id)
+        .ok_or(AppError::NotFound)?;
+
+    let total = job.total;
+    let completed = job.completed.load(AtomicOrdering::Relaxed) as usize;
+    let failed = job.failed.load(AtomicOrdering::Relaxed) as usize;
+    let done = completed + failed;
+    let pending = total.saturating_sub(done);
+
+    let job_status = if done < total {
+        "in_progress"
+    } else if completed == 0 {
+        "failed"
+    } else {
+        "completed"
+    };
+
+    Ok(Json(serde_json::json!({
+        "job_id": job_id,
+        "total": total,
+        "completed": completed,
+        "failed": failed,
+        "pending": pending,
+        "status": job_status,
+    })))
+}
+
 /// `POST /api/v1/batch` — process multiple prompts concurrently.
 ///
 /// Accepts up to 100 prompts.  `max_concurrency` controls in-flight parallelism
@@ -1406,91 +1614,113 @@ async fn batch_handler(
     let item_timeout = Duration::from_secs(state.config.timeout_seconds.min(BATCH_TIMEOUT_SECS));
     let session_prefix = req.session_id.clone();
 
-    let futures_iter = req.prompts.into_iter().enumerate().map(|(i, prompt)| {
-        let state = Arc::clone(&state);
-        let session_prefix = session_prefix.clone();
-        let item_timeout = item_timeout;
-        async move {
-            let request_id = Uuid::new_v4().to_string();
-            let session_id = session_prefix
-                .map(|s| format!("{s}-{i}"))
-                .unwrap_or_else(|| format!("batch-{request_id}"));
+    // Pre-generate request IDs so they can be registered in the BatchJobTracker
+    // before the futures run.
+    let prompt_count = req.prompts.len();
+    let sub_request_ids: Vec<String> = (0..prompt_count)
+        .map(|_| Uuid::new_v4().to_string())
+        .collect();
 
-            state.tracker.status.insert(
-                request_id.clone(),
-                TrackedRequest {
-                    status: RequestStatus::Pending,
-                    result: None,
-                    error: None,
-                    completed_at: None,
-                },
-            );
+    // Register the job entry so `GET /api/v1/batch/:job_id/progress` works immediately.
+    state
+        .batch_tracker
+        .create(batch_id.clone(), prompt_count, sub_request_ids.clone());
 
-            let prompt_req = PromptRequest {
-                session: SessionId::new(session_id),
-                request_id: request_id.clone(),
-                input: prompt,
-                meta: HashMap::new(),
-                deadline: Some(std::time::Instant::now() + item_timeout),
-            };
+    let futures_iter = req
+        .prompts
+        .into_iter()
+        .enumerate()
+        .zip(sub_request_ids.into_iter())
+        .map(|((i, prompt), request_id)| {
+            let state = Arc::clone(&state);
+            let session_prefix = session_prefix.clone();
+            let item_timeout = item_timeout;
+            let batch_id = batch_id.clone();
+            async move {
+                let session_id = session_prefix
+                    .map(|s| format!("{s}-{i}"))
+                    .unwrap_or_else(|| format!("batch-{request_id}"));
 
-            match state.pipeline_tx.try_send(prompt_req) {
-                Ok(()) => {}
-                Err(_) => {
-                    state.tracker.status.remove(&request_id);
-                    return BatchItemResult {
-                        request_id,
-                        text: None,
-                        error: Some("pipeline_full_or_closed".to_string()),
-                    };
-                }
-            }
+                state.tracker.status.insert(
+                    request_id.clone(),
+                    TrackedRequest {
+                        status: RequestStatus::Pending,
+                        result: None,
+                        error: None,
+                        completed_at: None,
+                    },
+                );
 
-            let start = std::time::Instant::now();
-            loop {
-                if let Some(tracked) = state.tracker.status.get(&request_id) {
-                    match tracked.status {
-                        RequestStatus::Completed => {
-                            let text = tracked.result.clone();
-                            drop(tracked);
-                            state.tracker.status.remove(&request_id);
-                            return BatchItemResult {
-                                request_id,
-                                text,
-                                error: None,
-                            };
-                        }
-                        RequestStatus::Failed => {
-                            let err = tracked.error.clone();
-                            drop(tracked);
-                            state.tracker.status.remove(&request_id);
-                            return BatchItemResult {
-                                request_id,
-                                text: None,
-                                error: err.or_else(|| Some("inference_failed".to_string())),
-                            };
-                        }
-                        _ => {}
+                let prompt_req = PromptRequest {
+                    session: SessionId::new(session_id),
+                    request_id: request_id.clone(),
+                    input: prompt,
+                    meta: HashMap::new(),
+                    deadline: Some(std::time::Instant::now() + item_timeout),
+                };
+
+                match state.pipeline_tx.try_send(prompt_req) {
+                    Ok(()) => {}
+                    Err(_) => {
+                        state.tracker.status.remove(&request_id);
+                        state.batch_tracker.record_failed(&batch_id);
+                        return BatchItemResult {
+                            request_id,
+                            text: None,
+                            error: Some("pipeline_full_or_closed".to_string()),
+                        };
                     }
-                } else {
-                    return BatchItemResult {
-                        request_id,
-                        text: None,
-                        error: Some("request_lost".to_string()),
-                    };
                 }
-                if start.elapsed() > item_timeout {
-                    state.tracker.status.remove(&request_id);
-                    return BatchItemResult {
-                        request_id,
-                        text: None,
-                        error: Some("timeout".to_string()),
-                    };
+
+                let start = std::time::Instant::now();
+                loop {
+                    if let Some(tracked) = state.tracker.status.get(&request_id) {
+                        match tracked.status {
+                            RequestStatus::Completed => {
+                                let text = tracked.result.clone();
+                                drop(tracked);
+                                state.tracker.status.remove(&request_id);
+                                state.batch_tracker.record_completed(&batch_id);
+                                return BatchItemResult {
+                                    request_id,
+                                    text,
+                                    error: None,
+                                };
+                            }
+                            RequestStatus::Failed => {
+                                let err = tracked.error.clone();
+                                drop(tracked);
+                                state.tracker.status.remove(&request_id);
+                                state.batch_tracker.record_failed(&batch_id);
+                                return BatchItemResult {
+                                    request_id,
+                                    text: None,
+                                    error: err.or_else(|| Some("inference_failed".to_string())),
+                                };
+                            }
+                            _ => {}
+                        }
+                    } else {
+                        state.batch_tracker.record_failed(&batch_id);
+                        return BatchItemResult {
+                            request_id,
+                            text: None,
+                            error: Some("request_lost".to_string()),
+                        };
+                    }
+                    if start.elapsed() > item_timeout {
+                        state.tracker.status.remove(&request_id);
+                        state.batch_tracker.record_failed(&batch_id);
+                        return BatchItemResult {
+                            request_id,
+                            text: None,
+                            error: Some("timeout".to_string()),
+                        };
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
-                tokio::time::sleep(Duration::from_millis(100)).await;
             }
-        }
-    });
+        });
 
     use futures::StreamExt as _;
     let results: Vec<BatchItemResult> = futures::stream::iter(futures_iter)
@@ -1508,6 +1738,228 @@ async fn batch_handler(
         succeeded,
         failed,
     }))
+}
+
+// ============================================================================
+// Results Listing Handler
+// ============================================================================
+
+/// Query parameters accepted by `GET /api/v1/results`.
+#[cfg(feature = "web-api")]
+#[derive(Debug, Deserialize, Default)]
+struct ResultsQuery {
+    /// Filter by session ID.
+    session_id: Option<String>,
+    /// Filter by status: `"error"` (maps to Failed/Timeout), `"completed"`, or `"pending"`.
+    filter: Option<String>,
+    /// Max results to return (default 20, max 200).
+    limit: Option<usize>,
+}
+
+/// Summary of a single tracked request returned by `GET /api/v1/results`.
+#[cfg(feature = "web-api")]
+#[derive(Debug, Serialize)]
+struct ResultSummary {
+    request_id: String,
+    status: RequestStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// `GET /api/v1/results`  -  List tracked requests with optional filtering.
+///
+/// Query parameters:
+/// - `session_id` — filter by session (prefix match on stored session metadata is
+///   not yet possible; this performs a substring filter on the request_id for now)
+/// - `filter` — `"completed"`, `"error"`, or `"pending"`
+/// - `limit` — max results (default 20, max 200)
+///
+/// # Panics
+///
+/// This function never panics.
+#[cfg(feature = "web-api")]
+async fn results_handler(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<ResultsQuery>,
+) -> Json<Vec<ResultSummary>> {
+    let limit = params.limit.unwrap_or(20).min(200);
+
+    let summaries: Vec<ResultSummary> = state
+        .tracker
+        .status
+        .iter()
+        .filter(|entry| {
+            // Status filter
+            let status_ok = match params.filter.as_deref() {
+                Some("completed") => entry.value().status == RequestStatus::Completed,
+                Some("error") => matches!(
+                    entry.value().status,
+                    RequestStatus::Failed | RequestStatus::Timeout
+                ),
+                Some("pending") => matches!(
+                    entry.value().status,
+                    RequestStatus::Pending | RequestStatus::Processing
+                ),
+                _ => true,
+            };
+            // Session filter — match as substring of the request_id (request_ids are
+            // opaque UUIDs; a full session-keyed index would require a separate map).
+            let session_ok = params
+                .session_id
+                .as_deref()
+                .map(|s| entry.key().contains(s))
+                .unwrap_or(true);
+            status_ok && session_ok
+        })
+        .take(limit)
+        .map(|entry| ResultSummary {
+            request_id: entry.key().clone(),
+            status: entry.value().status.clone(),
+            result: entry.value().result.clone(),
+            error: entry.value().error.clone(),
+        })
+        .collect();
+
+    Json(summaries)
+}
+
+// ============================================================================
+// Debug Handlers
+// ============================================================================
+
+/// `GET /api/v1/debug/dlq`  -  Return last N entries from the dead-letter queue.
+///
+/// The DLQ is a ring buffer that captures requests dropped by backpressure or
+/// inference failure.  This endpoint does **not** drain the queue — it returns
+/// a snapshot.  Only available when `debug_mode` is `true`.
+///
+/// # Panics
+///
+/// This function never panics.
+#[cfg(feature = "web-api")]
+async fn debug_dlq_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if !state.debug_mode {
+        return Err(AppError::DebugDisabled);
+    }
+
+    // Peek without draining: collect entries from the queue and push them back.
+    let entries = state.dlq.drain();
+    let count = entries.len();
+    // Re-enqueue so the DLQ is not cleared by this inspection call.
+    for entry in &entries {
+        state.dlq.push(entry.clone());
+    }
+
+    let json_entries: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "request_id": e.request_id,
+                "session_id": e.session_id,
+                "reason": e.reason,
+                "dropped_at": e.dropped_at
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            })
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!({
+        "count": count,
+        "entries": json_entries,
+    })))
+}
+
+/// `GET /api/v1/debug/dedup-index`  -  Return dedup entry count and hashed keys.
+///
+/// Returns a point-in-time snapshot of deduplication state.  Keys are the
+/// already-hashed dedup keys (not raw prompts) so no PII is exposed.
+/// Only available when `debug_mode` is `true`.
+///
+/// # Panics
+///
+/// This function never panics.
+#[cfg(feature = "web-api")]
+async fn debug_dedup_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if !state.debug_mode {
+        return Err(AppError::DebugDisabled);
+    }
+
+    // The dedup state is not stored directly in AppState; return a note that
+    // the dedup index is not directly accessible from the web API layer without
+    // wiring it through.  In production, this would require passing an
+    // `Arc<Deduplicator>` into `AppState`.
+    Ok(Json(serde_json::json!({
+        "note": "Deduplicator not wired into web API state; integrate Arc<Deduplicator> in AppState to expose stats.",
+        "count": 0,
+        "keys": [],
+    })))
+}
+
+/// `GET /api/v1/debug/pipeline`  -  Pipeline queue depths and circuit breaker state.
+///
+/// Returns per-stage statistics including queue depths, circuit breaker status,
+/// and DLQ size.  Only available when `debug_mode` is `true`.
+///
+/// # Panics
+///
+/// This function never panics.
+#[cfg(feature = "web-api")]
+async fn debug_pipeline_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if !state.debug_mode {
+        return Err(AppError::DebugDisabled);
+    }
+
+    let cb_stats = state.circuit_breaker.stats().await;
+    let cb_status = format!("{:?}", cb_stats.status).to_lowercase();
+
+    let queue_capacity = state.pipeline_tx.capacity();
+    let queue_max = state.pipeline_tx.max_capacity();
+    let queue_len = queue_max - queue_capacity;
+
+    let pending_requests = state
+        .tracker
+        .status
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.value().status,
+                RequestStatus::Pending | RequestStatus::Processing
+            )
+        })
+        .count();
+
+    Ok(Json(serde_json::json!({
+        "pipeline_input_queue": {
+            "depth": queue_len,
+            "capacity": queue_capacity,
+            "max": queue_max,
+        },
+        "circuit_breaker": {
+            "status": cb_status,
+            "failures": cb_stats.failures,
+            "successes": cb_stats.successes,
+            "success_rate": cb_stats.success_rate,
+            "time_in_state_secs": cb_stats.time_in_current_state.as_secs(),
+        },
+        "dlq": {
+            "depth": state.dlq.len(),
+        },
+        "tracker": {
+            "pending_requests": pending_requests,
+            "total_tracked": state.tracker.status.len(),
+        },
+        "batch_jobs_tracked": state.batch_tracker.jobs.len(),
+    })))
 }
 
 // ============================================================================
@@ -1532,8 +1984,12 @@ enum AppError {
     Timeout,
     /// Pipeline input queue is full — client should retry after a backoff period.
     PipelineFull,
-    /// Request validation failed.
+    /// Request validation failed (HTTP 400).
     BadRequest(String),
+    /// Field-level validation error (HTTP 422).
+    ValidationError(ValidationErrorBody),
+    /// A debug endpoint was requested but debug mode is disabled.
+    DebugDisabled,
 }
 
 #[cfg(feature = "web-api")]
@@ -1574,6 +2030,12 @@ impl IntoResponse for AppError {
                 Json(serde_json::json!({"error": "bad_request", "message": msg})),
             )
                 .into_response(),
+            AppError::ValidationError(body) => body.into_response(),
+            AppError::DebugDisabled => (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "not_found", "message": "Debug endpoints are disabled"})),
+            )
+                .into_response(),
         }
     }
 }
@@ -1597,6 +2059,8 @@ pub async fn start_server(
     _config: ServerConfig,
     _pipeline_tx: tokio::sync::mpsc::Sender<crate::PromptRequest>,
     _output_rx: tokio::sync::mpsc::Receiver<crate::PostOutput>,
+    _dlq: std::sync::Arc<crate::DeadLetterQueue>,
+    _circuit_breaker: crate::enhanced::CircuitBreaker,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Err("Web API requires 'web-api' feature".into())
 }
@@ -1749,8 +2213,16 @@ mod tests {
             tracker: RequestTracker {
                 status: Arc::new(DashMap::new()),
             },
+            batch_tracker: BatchJobTracker::new(),
             config: ServerConfig::default(),
             api_key: key.map(|s| s.to_string()),
+            debug_mode: true,
+            dlq: Arc::new(crate::DeadLetterQueue::new(100)),
+            circuit_breaker: crate::enhanced::CircuitBreaker::new(
+                5,
+                0.8,
+                std::time::Duration::from_secs(60),
+            ),
         })
     }
 
