@@ -73,9 +73,10 @@
 //! a deadline expiry does not abort or restart the stage task.
 
 use crate::{
-    config::PipelineConfig, enhanced::CircuitBreaker, metrics, send_with_shed, AssembleOutput,
-    DeadLetterQueue, DroppedRequest, InferenceOutput, ModelWorker, PipelineStage, PostOutput,
-    PromptRequest, RagOutput, SendOutcome, SessionId,
+    config::PipelineConfig,
+    enhanced::{AdaptiveTimeout, CircuitBreaker},
+    metrics, send_with_shed, AssembleOutput, DeadLetterQueue, DroppedRequest, InferenceOutput,
+    ModelWorker, PipelineStage, PostOutput, PromptRequest, RagOutput, SendOutcome, SessionId,
 };
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -276,6 +277,7 @@ pub fn spawn_pipeline(worker: Arc<dyn ModelWorker>) -> PipelineHandles {
         circuit_breaker.clone(),
         DEFAULT_INFERENCE_TIMEOUT_SECS,
         Arc::clone(&dlq),
+        None, // adaptive timeout not used in the simple spawn_pipeline path
         cancel.child_token(),
     ));
     let post = tokio::spawn(post_stage(inference_rx, post_tx, Arc::clone(&dlq), cancel.child_token()));
@@ -391,7 +393,25 @@ pub fn spawn_pipeline_with_config(
         std::time::Duration::from_secs(r.circuit_breaker_timeout_s),
     );
     let dlq = Arc::new(DeadLetterQueue::new(1000));
-    let inference_timeout_secs = DEFAULT_INFERENCE_TIMEOUT_SECS;
+    let inference_timeout_secs = config
+        .stages
+        .inference
+        .timeout_ms
+        .map(|ms| ms / 1000)
+        .unwrap_or(DEFAULT_INFERENCE_TIMEOUT_SECS);
+
+    // Build the shared AdaptiveTimeout when enabled.  All pool workers share
+    // one instance so the P95 estimate reflects the full traffic distribution
+    // rather than a per-worker subset.
+    let adaptive_timeout: Option<Arc<std::sync::Mutex<AdaptiveTimeout>>> =
+        if config.stages.inference.adaptive_timeout_enabled {
+            let floor = std::time::Duration::from_millis(
+                config.stages.inference.adaptive_timeout_min_ms,
+            );
+            Some(Arc::new(std::sync::Mutex::new(AdaptiveTimeout::new(floor))))
+        } else {
+            None
+        };
 
     let cancel2 = CancellationToken::new();
     let rag = tokio::spawn(rag_stage(input_rx, rag_tx, Arc::clone(&dlq), cancel2.child_token()));
@@ -409,6 +429,7 @@ pub fn spawn_pipeline_with_config(
             circuit_breaker.clone(),
             inference_timeout_secs,
             Arc::clone(&dlq),
+            adaptive_timeout,
             cancel2.child_token(),
         ))
     } else {
@@ -428,6 +449,7 @@ pub fn spawn_pipeline_with_config(
                 inference_timeout_secs,
                 Arc::clone(&dlq),
                 id,
+                adaptive_timeout.as_ref().map(Arc::clone),
                 cancel2.child_token(),
             )));
         }
@@ -705,6 +727,7 @@ async fn inference_stage(
     breaker: CircuitBreaker,
     timeout_secs: u64,
     dlq: Arc<DeadLetterQueue>,
+    adaptive_timeout: Option<Arc<std::sync::Mutex<AdaptiveTimeout>>>,
     cancel: CancellationToken,
 ) {
     info!(target: "orchestrator::pipeline", "Inference stage started");
@@ -757,39 +780,51 @@ async fn inference_stage(
         }
 
         // Call model worker through the circuit breaker with a per-request timeout.
+        // When adaptive_timeout is enabled, use the P95-based dynamic timeout;
+        // otherwise fall back to the fixed timeout_secs value.
         // Prompt content is NOT logged.
+        let effective_timeout = adaptive_timeout
+            .as_ref()
+            .and_then(|at| at.lock().ok().map(|g| g.current_timeout()))
+            .unwrap_or_else(|| std::time::Duration::from_secs(timeout_secs));
         let prompt = assemble_output.prompt.clone();
         let w = Arc::clone(&worker);
         let infer_fut = breaker.call(|| async move { w.infer(&prompt).await });
-        let cb_result =
-            match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), infer_fut)
-                .await
-            {
-                Ok(result) => result,
-                Err(_elapsed) => {
-                    metrics::inc_inference_timeout();
-                    let _timeout_err = crate::OrchestratorError::InferenceTimeout { timeout_secs };
-                    metrics::inc_error("inference", "inference_timeout");
-                    warn!(
-                        target: "orchestrator::pipeline",
-                        session_id = %session_id,
-                        request_id = %request_id,
-                        timeout_secs = timeout_secs,
-                        "Inference timed out — dropping request into DLQ"
-                    );
-                    dlq.push(DroppedRequest {
-                        request_id: request_id.clone(),
-                        session_id: session_id.clone(),
-                        reason: format!("inference_timeout:{timeout_secs}s"),
-                        dropped_at: std::time::SystemTime::now(),
-                    });
-                    continue;
-                }
-            };
+        let cb_result = match tokio::time::timeout(effective_timeout, infer_fut).await {
+            Ok(result) => result,
+            Err(_elapsed) => {
+                metrics::inc_inference_timeout();
+                let timeout_secs_eff = effective_timeout.as_secs();
+                let _timeout_err =
+                    crate::OrchestratorError::InferenceTimeout { timeout_secs: timeout_secs_eff };
+                metrics::inc_error("inference", "inference_timeout");
+                warn!(
+                    target: "orchestrator::pipeline",
+                    session_id = %session_id,
+                    request_id = %request_id,
+                    timeout_secs = timeout_secs_eff,
+                    "Inference timed out — dropping request into DLQ"
+                );
+                dlq.push(DroppedRequest {
+                    request_id: request_id.clone(),
+                    session_id: session_id.clone(),
+                    reason: format!("inference_timeout:{timeout_secs_eff}s"),
+                    dropped_at: std::time::SystemTime::now(),
+                });
+                continue;
+            }
+        };
 
         match cb_result {
             Ok(tokens) => {
                 let elapsed = start.elapsed();
+                // Record elapsed duration into the adaptive timeout sampler so
+                // future calls use an up-to-date P95 estimate.
+                if let Some(at) = &adaptive_timeout {
+                    if let Ok(mut g) = at.lock() {
+                        g.record_duration(elapsed);
+                    }
+                }
                 metrics::record_stage_latency("inference", elapsed);
                 Span::current().record("duration_ms", elapsed.as_millis() as u64);
                 Span::current().record("outcome", "ok");
@@ -896,6 +931,7 @@ async fn inference_stage_pool_worker(
     timeout_secs: u64,
     dlq: Arc<DeadLetterQueue>,
     worker_id: usize,
+    adaptive_timeout: Option<Arc<std::sync::Mutex<AdaptiveTimeout>>>,
     cancel: CancellationToken,
 ) {
     info!(
@@ -958,38 +994,46 @@ async fn inference_stage_pool_worker(
             }
         }
 
+        let effective_timeout = adaptive_timeout
+            .as_ref()
+            .and_then(|at| at.lock().ok().map(|g| g.current_timeout()))
+            .unwrap_or_else(|| std::time::Duration::from_secs(timeout_secs));
         let prompt = assemble_output.prompt.clone();
         let w = Arc::clone(&worker);
         let infer_fut = breaker.call(|| async move { w.infer(&prompt).await });
-        let cb_result =
-            match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), infer_fut)
-                .await
-            {
-                Ok(result) => result,
-                Err(_elapsed) => {
-                    metrics::inc_inference_timeout();
-                    let _timeout_err = crate::OrchestratorError::InferenceTimeout { timeout_secs };
-                    metrics::inc_error("inference", "inference_timeout");
-                    warn!(
-                        target: "orchestrator::pipeline",
-                        session_id = %session_id,
-                        request_id = %request_id,
-                        timeout_secs = timeout_secs,
-                        "Inference pool worker timed out — dropping request into DLQ"
-                    );
-                    dlq.push(DroppedRequest {
-                        request_id: request_id.clone(),
-                        session_id: session_id.clone(),
-                        reason: format!("inference_timeout:{timeout_secs}s"),
-                        dropped_at: std::time::SystemTime::now(),
-                    });
-                    continue;
-                }
-            };
+        let cb_result = match tokio::time::timeout(effective_timeout, infer_fut).await {
+            Ok(result) => result,
+            Err(_elapsed) => {
+                metrics::inc_inference_timeout();
+                let timeout_secs_eff = effective_timeout.as_secs();
+                let _timeout_err =
+                    crate::OrchestratorError::InferenceTimeout { timeout_secs: timeout_secs_eff };
+                metrics::inc_error("inference", "inference_timeout");
+                warn!(
+                    target: "orchestrator::pipeline",
+                    session_id = %session_id,
+                    request_id = %request_id,
+                    timeout_secs = timeout_secs_eff,
+                    "Inference pool worker timed out — dropping request into DLQ"
+                );
+                dlq.push(DroppedRequest {
+                    request_id: request_id.clone(),
+                    session_id: session_id.clone(),
+                    reason: format!("inference_timeout:{timeout_secs_eff}s"),
+                    dropped_at: std::time::SystemTime::now(),
+                });
+                continue;
+            }
+        };
 
         match cb_result {
             Ok(tokens) => {
                 let elapsed = start.elapsed();
+                if let Some(at) = &adaptive_timeout {
+                    if let Ok(mut g) = at.lock() {
+                        g.record_duration(elapsed);
+                    }
+                }
                 metrics::record_stage_latency("inference", elapsed);
                 tracing::Span::current().record("duration_ms", elapsed.as_millis() as u64);
                 tracing::Span::current().record("outcome", "ok");

@@ -88,9 +88,9 @@ fn translate_key(key: KeyEvent) -> InputEvent {
 
     match key.code {
         KeyCode::Char('q') | KeyCode::Char('Q') => InputEvent::Quit,
-        KeyCode::Char('p') | KeyCode::Char('P') => InputEvent::Pause,
+        KeyCode::Char('p') | KeyCode::Char('P') | KeyCode::Char(' ') => InputEvent::Pause,
         KeyCode::Char('r') | KeyCode::Char('R') => InputEvent::Reset,
-        KeyCode::Char('h') | KeyCode::Char('H') => InputEvent::Help,
+        KeyCode::Char('h') | KeyCode::Char('H') | KeyCode::Char('?') => InputEvent::Help,
         KeyCode::Esc => InputEvent::Quit,
         KeyCode::Up => InputEvent::ScrollUp,
         KeyCode::Down => InputEvent::ScrollDown,
@@ -123,6 +123,12 @@ mod tests {
     #[test]
     fn test_translate_key_p_pauses() {
         let key = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
+        assert_eq!(translate_key(key), InputEvent::Pause);
+    }
+
+    #[test]
+    fn test_translate_key_space_pauses() {
+        let key = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
         assert_eq!(translate_key(key), InputEvent::Pause);
     }
 

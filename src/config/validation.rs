@@ -361,6 +361,9 @@ mod tests {
                     max_tokens: None,
                     temperature: None,
                     timeout_ms: None,
+                    inference_workers: 1,
+                    adaptive_timeout_enabled: false,
+                    adaptive_timeout_min_ms: 500,
                 },
                 post_process: PostProcessStageConfig {
                     enabled: true,

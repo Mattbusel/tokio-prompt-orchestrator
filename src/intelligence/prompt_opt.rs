@@ -11,6 +11,13 @@
 
 //! # Stage: Prompt Optimizer
 //! Applies learned transformations to prompts to reduce token use and improve quality.
+//!
+//! ⚠ NOTE: The `ExampleInjection` variant of [`OptimizationStrategy`] is **not yet
+//! implemented**.  When that strategy is enabled and no examples have been added to
+//! the retrieval store via [`PromptOptimizer::add_example`], the optimizer logs a
+//! warning and returns the system prompt **unchanged**.  Do not enable
+//! `ExampleInjection` in production until the few-shot retrieval backend is
+//! implemented.
 
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -40,12 +47,17 @@ pub enum OptimizationStrategy {
     InstructionReordering,
     /// Remove semantically redundant sentences from the user prompt.
     RedundancyRemoval,
-    /// Prepend the top-`k` most relevant few-shot examples (by Jaccard
-    /// word-overlap similarity) to the system prompt as a preamble.
+    /// **NOT YET IMPLEMENTED** — returns the system prompt unchanged when no examples
+    /// are present in the retrieval store.
     ///
-    /// Examples are retrieved from the optimizer's internal store via
-    /// [`PromptOptimizer::add_example`].  When the store is empty this
-    /// strategy is a no-op.
+    /// When this strategy is enabled and [`PromptOptimizer::add_example`] has been
+    /// called at least once, the top-3 most similar examples are retrieved by
+    /// Jaccard word-overlap and prepended to the system prompt.  If the example
+    /// store is empty a `warn!` is emitted and the prompt is passed through
+    /// unmodified.
+    ///
+    /// TODO: implement ExampleInjection by selecting and prepending relevant
+    /// few-shot examples from a retrieval store backed by a real embedding model.
     ExampleInjection,
 }
 
