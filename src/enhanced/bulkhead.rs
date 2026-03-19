@@ -1,39 +1,72 @@
-//! Bulkhead pattern — limits concurrent executions to prevent resource exhaustion.
+//! Bulkhead pattern — isolates concurrent execution pools to prevent cascade failures.
 //!
-//! A bulkhead isolates concurrent execution slots so that one overloaded
-//! consumer cannot starve others. Each [`Bulkhead`] wraps a semaphore; callers
-//! acquire a permit before starting work and the permit is automatically
-//! released when dropped.
+//! ## What is the bulkhead pattern?
+//!
+//! The bulkhead pattern (named after watertight compartments in a ship) isolates
+//! concurrent execution into separate, size-limited pools.  If one pool fills up —
+//! because a downstream service is slow or unavailable — only callers targeting
+//! that pool are rejected.  All other pools continue to operate normally,
+//! preventing a partial outage from cascading into a total system failure.
+//!
+//! Each [`Bulkhead`] wraps a `tokio` semaphore.  Callers acquire a permit before
+//! starting work; the permit is automatically released when it is dropped.
+//!
+//! ## When to use it
+//!
+//! Use a bulkhead when you need to:
+//!
+//! - **Protect a critical resource** — e.g. limit the number of concurrent
+//!   calls to an expensive GPU inference backend so it is never overwhelmed.
+//! - **Prevent cascade failures** — if the inference pool fills up, callers
+//!   receive an immediate error rather than queuing indefinitely; other subsystems
+//!   (RAG, post-processing) are unaffected.
+//! - **Enforce fairness** — give each tenant or request class its own pool so a
+//!   burst in one class cannot monopolise shared resources.
+//!
+//! ## How to size the semaphore
+//!
+//! A good starting point for `max_concurrent`:
+//!
+//! | Subsystem | Suggested starting value | Rationale |
+//! |-----------|--------------------------|-----------|
+//! | Local model inference (GPU) | `num_gpus × 2` | Leave headroom for batching. |
+//! | Cloud API (e.g. OpenAI) | `10–20` | Typical per-key rate-limit allows ~20 concurrent requests. |
+//! | RAG / retrieval | `50–100` | I/O-bound, can be higher. |
+//! | Post-processing | `100–200` | CPU-light, tolerate high concurrency. |
+//!
+//! Start conservatively and increase based on observed queue depth and error rate.
+//! A `max_concurrent` that is too large degrades the backend; too small wastes
+//! throughput.
 //!
 //! ## Behaviour
 //!
-//! - `acquire` is **non-blocking**: it uses `try_acquire` under the hood and
+//! - [`acquire`] is **non-blocking**: it uses `try_acquire` under the hood and
 //!   immediately returns `Err` if no permits are available.
 //! - The returned [`BulkheadPermit`] releases the semaphore slot on drop.
-//! - Multiple bulkheads can share different limits for different subsystems
-//!   (e.g. inference vs. RAG vs. post-processing).
+//! - Multiple independent bulkheads can coexist for different subsystems.
 //!
-//! ## Usage
+//! ## Example
 //!
 //! ```rust
 //! use tokio_prompt_orchestrator::enhanced::Bulkhead;
 //!
-//! # #[tokio::main]
-//! # async fn main() {
-//! let bulkhead = Bulkhead::new("inference", 4);
+//! // Allow at most 10 concurrent inference calls.
+//! let inference_bh = Bulkhead::new("inference", 10);
 //!
-//! match bulkhead.acquire() {
+//! match inference_bh.acquire() {
 //!     Ok(permit) => {
-//!         // Do guarded work here.
-//!         // `permit` releases the slot automatically on drop.
+//!         // Call the inference backend here.
+//!         // The slot is released automatically when `permit` is dropped.
 //!         drop(permit);
 //!     }
 //!     Err(e) => {
+//!         // All 10 slots are occupied; shed this request or return an error.
 //!         eprintln!("Bulkhead full: {e}");
 //!     }
 //! }
-//! # }
 //! ```
+//!
+//! [`acquire`]: Bulkhead::acquire
 
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};

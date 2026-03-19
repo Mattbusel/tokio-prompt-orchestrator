@@ -15,32 +15,76 @@
 //! Uses **lexical similarity** (hash-projection cosine + Jaccard word overlap)
 //! to detect near-duplicate prompts and avoid redundant LLM inference calls.
 //!
-//! ## Important caveat
+//! ## What lexical dedup does
+//!
+//! [`LexicalDedup`] maintains an in-memory index of previously seen prompts.
+//! Before dispatching a prompt to the inference backend, callers can query the
+//! index to check whether a sufficiently similar prompt has already been
+//! answered.  If the similarity score exceeds the configured threshold the
+//! cached response is returned, saving the cost and latency of a full
+//! inference round-trip.
+//!
+//! ## Why "lexical" and not "semantic"
 //!
 //! This module does **NOT** perform true semantic (meaning-based) similarity.
-//! For true semantic similarity, an embedding model endpoint would be required
-//! (e.g. text-embedding-3-small via the OpenAI Embeddings API).  That
-//! capability is intentionally deferred; the lexical approximation covers the
-//! common case of retry storms and near-identical prompts well enough in
-//! practice.
+//! True semantic similarity requires an embedding model, such as
+//! `text-embedding-3-small` via the OpenAI Embeddings API, which adds network
+//! latency, token cost, and an external dependency.  That capability is
+//! intentionally deferred.
 //!
-//! ## Primary algorithm (hash-projection cosine)
+//! Instead the module uses two purely lexical algorithms that require no
+//! external model weights:
+//!
+//! ### Primary algorithm — hash-projection cosine
 //! 1. Split prompt into whitespace-delimited words.
 //! 2. Hash each word with `DefaultHasher`.
-//! 3. Project each hash through sin/cos into a `dim`-dimensional vector.
+//! 3. Project each hash through sin/cos into a `dim`-dimensional vector
+//!    (default `dim = 64`).
 //! 4. Normalise to unit length (cosine similarity space).
 //! 5. Compare against stored entries using cosine similarity.
 //!
-//! ## Secondary algorithm (TF-IDF-style Jaccard word overlap)
-//! A second, complementary similarity measure is provided via
-//! [`LexicalDedup::jaccard_word_similarity`].  It tokenises both texts on
+//! ### Secondary algorithm — TF-IDF-style Jaccard word overlap
+//! [`LexicalDedup::jaccard_word_similarity`] tokenises both texts on
 //! whitespace (lowercased), computes the multi-set intersection / union of
-//! word frequencies (soft-TF Jaccard), and returns a score in [0, 1].  This
-//! is deterministic, requires no external files or model weights, and captures
-//! lexical overlap more intuitively than the hash-projection approach.
+//! word frequencies (soft-TF Jaccard), and returns a score in `[0, 1]`.
+//! [`LexicalDedup::lookup_jaccard`] uses this measure and can be used as a
+//! drop-in complement to the primary [`LexicalDedup::lookup`].
 //!
-//! [`LexicalDedup::lookup_jaccard`] uses this measure to search the index and
-//! can be used as a drop-in complement to the primary [`LexicalDedup::lookup`].
+//! **Implication**: two prompts that are semantically equivalent but use
+//! different words will *not* be collapsed.  This is intentional — false
+//! positives (answering the wrong question) are worse than false negatives
+//! (redundant inference).
+//!
+//! ## Similarity threshold and tuning
+//!
+//! The default threshold is **0.92** (`SemanticDedupConfig::similarity_threshold`).
+//!
+//! | Threshold | Effect |
+//! |-----------|--------|
+//! | `1.0` | Only byte-for-byte identical prompts are deduplicated (safe, minimal savings). |
+//! | `0.92` (default) | Near-identical prompts (typo fixes, punctuation changes) are collapsed. |
+//! | `0.80` | More aggressive — captures paraphrased prompts, but risks false positives. |
+//! | `< 0.70` | Not recommended; false positive rate becomes significant. |
+//!
+//! When tuning, monitor `hit_rate()` and `stats()`.  A hit rate above 50 % with
+//! a threshold below 0.85 is a signal to investigate whether responses are being
+//! served for semantically different prompts.
+//!
+//! ## Performance characteristics
+//!
+//! - **Insert**: O(n) index scan to detect duplicate keys, then O(1) push.
+//!   For the default `max_index_size = 10 000` this is fast in practice.
+//! - **Lookup**: O(n × d) where `n` is the index size and `d` is the
+//!   embedding dimension (default 64).  At 10 000 entries with `d = 64` each
+//!   lookup performs ~640 000 multiplications — sub-millisecond on modern hardware.
+//! - **Memory**: ~`n × d × 8` bytes for the embedding vectors plus overhead.
+//!   10 000 entries at `d = 64` uses ~5 MiB.
+//! - **Thread safety**: the index is protected by an `Arc<RwLock<Vec<_>>>`.
+//!   Concurrent lookups (read path) do not block each other; inserts briefly
+//!   acquire an exclusive write lock.
+//!
+//! [`LexicalDedup::lookup_jaccard`]: LexicalDedup::lookup_jaccard
+//! [`LexicalDedup::lookup`]: LexicalDedup::lookup
 
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;

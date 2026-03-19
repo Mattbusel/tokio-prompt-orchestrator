@@ -32,6 +32,12 @@ use tracing::debug;
 #[cfg(feature = "caching")]
 use tracing::warn;
 
+/// Maximum wall-clock time allowed for any single Redis operation (get, set,
+/// delete, clear, or connection acquisition).  Prevents the pipeline from
+/// blocking indefinitely when Redis becomes unavailable.
+#[cfg(feature = "caching")]
+const REMOTE_OP_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Cache entry with expiration
 #[derive(Clone)]
 struct CacheEntry {
@@ -161,6 +167,10 @@ impl CacheLayer {
     }
 
     /// Get cached value if exists and not expired
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
     pub async fn get(&self, key: &str) -> Option<String> {
         match &self.backend {
             CacheBackend::Memory(cache) => {
@@ -218,6 +228,10 @@ impl CacheLayer {
     }
 
     /// Set cached value with TTL in seconds
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
     pub async fn set(&self, key: impl Into<String>, value: impl Into<String>, ttl_secs: u64) {
         let key = key.into();
         let value = value.into();
@@ -267,6 +281,10 @@ impl CacheLayer {
     }
 
     /// Delete cached value
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
     pub async fn delete(&self, key: &str) {
         match &self.backend {
             CacheBackend::Memory(cache) => {
@@ -285,6 +303,10 @@ impl CacheLayer {
     }
 
     /// Clear all cached values
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
     pub async fn clear(&self) {
         match &self.backend {
             CacheBackend::Memory(cache) => {
@@ -303,6 +325,10 @@ impl CacheLayer {
     }
 
     /// Get cache statistics
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
     pub fn stats(&self) -> CacheStats {
         match &self.backend {
             CacheBackend::Memory(cache) => CacheStats {
@@ -327,8 +353,25 @@ impl CacheLayer {
 #[cfg(feature = "caching")]
 impl RedisCache {
     async fn get_redis(&self, key: &str) -> Result<Option<String>, redis::RedisError> {
-        let mut conn = self.client.get_multiplexed_async_connection().await?;
-        redis::cmd("GET").arg(key).query_async(&mut conn).await
+        let mut conn = tokio::time::timeout(
+            REMOTE_OP_TIMEOUT,
+            self.client.get_multiplexed_async_connection(),
+        )
+        .await
+        .map_err(|_| {
+            redis::RedisError::from(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "operation timed out",
+            ))
+        })??;
+        tokio::time::timeout(REMOTE_OP_TIMEOUT, redis::cmd("GET").arg(key).query_async(&mut conn))
+            .await
+            .map_err(|_| {
+                redis::RedisError::from(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "operation timed out",
+                ))
+            })?
     }
 
     async fn set_redis(
@@ -337,30 +380,101 @@ impl RedisCache {
         value: &str,
         ttl_secs: u64,
     ) -> Result<(), redis::RedisError> {
-        let mut conn = self.client.get_multiplexed_async_connection().await?;
-        redis::cmd("SETEX")
-            .arg(key)
-            .arg(ttl_secs)
-            .arg(value)
-            .query_async(&mut conn)
-            .await
+        let mut conn = tokio::time::timeout(
+            REMOTE_OP_TIMEOUT,
+            self.client.get_multiplexed_async_connection(),
+        )
+        .await
+        .map_err(|_| {
+            redis::RedisError::from(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "operation timed out",
+            ))
+        })??;
+        tokio::time::timeout(
+            REMOTE_OP_TIMEOUT,
+            redis::cmd("SETEX")
+                .arg(key)
+                .arg(ttl_secs)
+                .arg(value)
+                .query_async(&mut conn),
+        )
+        .await
+        .map_err(|_| {
+            redis::RedisError::from(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "operation timed out",
+            ))
+        })?
     }
 
     async fn delete_redis(&self, key: &str) -> Result<(), redis::RedisError> {
-        let mut conn = self.client.get_multiplexed_async_connection().await?;
-        redis::cmd("DEL").arg(key).query_async(&mut conn).await
+        let mut conn = tokio::time::timeout(
+            REMOTE_OP_TIMEOUT,
+            self.client.get_multiplexed_async_connection(),
+        )
+        .await
+        .map_err(|_| {
+            redis::RedisError::from(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "operation timed out",
+            ))
+        })??;
+        tokio::time::timeout(REMOTE_OP_TIMEOUT, redis::cmd("DEL").arg(key).query_async(&mut conn))
+            .await
+            .map_err(|_| {
+                redis::RedisError::from(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "operation timed out",
+                ))
+            })?
     }
 
     async fn clear_redis(&self) -> Result<(), redis::RedisError> {
-        let mut conn = self.client.get_multiplexed_async_connection().await?;
-        redis::cmd("FLUSHDB").query_async(&mut conn).await
+        let mut conn = tokio::time::timeout(
+            REMOTE_OP_TIMEOUT,
+            self.client.get_multiplexed_async_connection(),
+        )
+        .await
+        .map_err(|_| {
+            redis::RedisError::from(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "operation timed out",
+            ))
+        })??;
+        tokio::time::timeout(REMOTE_OP_TIMEOUT, redis::cmd("FLUSHDB").query_async(&mut conn))
+            .await
+            .map_err(|_| {
+                redis::RedisError::from(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "operation timed out",
+                ))
+            })?
     }
 
     /// Issue DBSIZE to get the number of keys in the current Redis database.
     #[allow(dead_code)]
     async fn dbsize_redis(&self) -> Result<usize, redis::RedisError> {
-        let mut conn = self.client.get_multiplexed_async_connection().await?;
-        let count: i64 = redis::cmd("DBSIZE").query_async(&mut conn).await?;
+        let mut conn = tokio::time::timeout(
+            REMOTE_OP_TIMEOUT,
+            self.client.get_multiplexed_async_connection(),
+        )
+        .await
+        .map_err(|_| {
+            redis::RedisError::from(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "operation timed out",
+            ))
+        })??;
+        let count: i64 =
+            tokio::time::timeout(REMOTE_OP_TIMEOUT, redis::cmd("DBSIZE").query_async(&mut conn))
+                .await
+                .map_err(|_| {
+                    redis::RedisError::from(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "operation timed out",
+                    ))
+                })??;
         Ok(count.max(0) as usize)
     }
 }
