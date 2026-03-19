@@ -11,6 +11,7 @@
 
 pub mod channels;
 pub mod circuit;
+pub mod cost;
 pub mod dedup;
 pub mod health;
 pub mod log;

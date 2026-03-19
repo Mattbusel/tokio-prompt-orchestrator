@@ -2,7 +2,8 @@
 //!
 //! ## Responsibility
 //! Renders the 5-stage pipeline flow diagram with boxes connected by arrows.
-//! Each box shows the stage name and current latency, color-coded against budget.
+//! Each box shows the stage name, current latency, and P50/P95/P99 percentiles,
+//! color-coded against budget.
 //!
 //! ## Guarantees
 //! - Green: within budget, Yellow: >80% of budget, Red: over budget
@@ -63,7 +64,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 
     // Vertical connector from INFER down to POST
     if inner.height > 4 {
-        let connector_y = top_row_y + 2;
+        let connector_y = top_row_y + 3;
         let connector_x = inner.x + estimate_stage_end_x(inner.width, 3, 2);
         let connector = Paragraph::new(Line::from(Span::styled(
             "\u{2502}", // │
@@ -74,7 +75,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 
     // Bottom row: STREAM ← POST (right to left)
     if inner.height > 5 {
-        let bot_row_y = top_row_y + 3;
+        let bot_row_y = top_row_y + 4;
         render_stage_row(
             f,
             inner.x,
@@ -103,7 +104,11 @@ fn render_stage_row(
     }
 
     let arrow_width: u16 = 3; // "──▶" or "◀──"
-    let box_width = ((total_width - (count - 1) * arrow_width) / count).min(12);
+    let box_width = ((total_width - (count - 1) * arrow_width) / count).min(14);
+
+    // Each box is now 4 rows tall: top border + name + latency + percentile row + bottom border = 5
+    // But we keep the outer rect height as 4 (3 content lines + borders).
+    let box_height: u16 = 4;
 
     let mut x = base_x;
     for (i, &stage_idx) in stage_indices.iter().enumerate() {
@@ -133,16 +138,47 @@ fn render_stage_row(
             format!("{:.1}ms", latency)
         };
 
+        // P50/P95/P99 percentile string (compact)
+        let p50 = if stage_idx < app.stage_latency_p50.len() {
+            app.stage_latency_p50[stage_idx]
+        } else {
+            0.0
+        };
+        let p95 = if stage_idx < app.stage_latency_p95.len() {
+            app.stage_latency_p95[stage_idx]
+        } else {
+            0.0
+        };
+        let p99 = if stage_idx < app.stage_latency_p99.len() {
+            app.stage_latency_p99[stage_idx]
+        } else {
+            0.0
+        };
+
+        let fmt_p = |v: f64| -> String {
+            if v >= 100.0 {
+                format!("{:.0}", v)
+            } else {
+                format!("{:.1}", v)
+            }
+        };
+        let pct_str = format!("{}/{}/{}", fmt_p(p50), fmt_p(p95), fmt_p(p99));
+
+        let inner_w = (box_width as usize).saturating_sub(2);
         let content = vec![
             Line::from(Span::styled(
-                center_text(name, box_width as usize - 2),
+                center_text(name, inner_w),
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(Span::styled(
-                center_text(&lat_str, box_width as usize - 2),
+                center_text(&lat_str, inner_w),
                 Style::default().fg(color),
+            )),
+            Line::from(Span::styled(
+                center_text(&pct_str, inner_w),
+                Style::default().fg(Color::DarkGray),
             )),
         ];
 
@@ -151,7 +187,7 @@ fn render_stage_row(
             .border_style(border_style);
         let para = Paragraph::new(content).block(stage_block);
 
-        let rect = Rect::new(x, y, box_width, 3);
+        let rect = Rect::new(x, y, box_width, box_height);
         f.render_widget(para, rect);
 
         x += box_width;
@@ -176,7 +212,7 @@ fn render_stage_row(
 /// Estimates the X position at the end of a stage box in a row.
 fn estimate_stage_end_x(total_width: u16, count: u16, target: u16) -> u16 {
     let arrow_width: u16 = 3;
-    let box_width = ((total_width - (count - 1) * arrow_width) / count).min(12);
+    let box_width = ((total_width - (count - 1) * arrow_width) / count).min(14);
     target * (box_width + arrow_width) + box_width / 2
 }
 

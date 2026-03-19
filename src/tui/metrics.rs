@@ -136,6 +136,13 @@ impl MockMetrics {
                 *lat = 0.1;
             }
         }
+
+        // Derive mock percentiles from the rolling average (p50 ~ avg, p95 ~ avg*1.5, p99 ~ avg*2)
+        for i in 0..5 {
+            app.stage_latency_p50[i] = app.stage_latencies[i] * 0.9;
+            app.stage_latency_p95[i] = app.stage_latencies[i] * 1.4;
+            app.stage_latency_p99[i] = app.stage_latencies[i] * 1.9;
+        }
     }
 
     /// Updates channel depths based on story phase.
@@ -480,14 +487,33 @@ impl LiveMetrics {
     /// # Returns
     /// `Ok(())` on success, or an error string on failure.
     pub async fn tick(&mut self, app: &mut App) -> Result<(), String> {
-        let body = reqwest::get(&self.metrics_url)
+        let result = reqwest::get(&self.metrics_url)
             .await
-            .map_err(|e| format!("HTTP error: {}", e))?
-            .text()
-            .await
-            .map_err(|e| format!("Body read error: {}", e))?;
+            .map_err(|e| format!("HTTP error: {}", e));
 
-        self.parse_metrics(&body, app);
+        match result {
+            Err(e) => {
+                app.metrics_fetch_error = true;
+                return Err(e);
+            }
+            Ok(resp) => {
+                let body = resp
+                    .text()
+                    .await
+                    .map_err(|e| format!("Body read error: {}", e));
+                match body {
+                    Err(e) => {
+                        app.metrics_fetch_error = true;
+                        return Err(e);
+                    }
+                    Ok(text) => {
+                        app.metrics_fetch_error = false;
+                        self.parse_metrics(&text, app);
+                    }
+                }
+            }
+        }
+
         app.tick_count += 1;
         app.uptime_secs += 1;
         Ok(())
@@ -507,14 +533,28 @@ impl LiveMetrics {
                 continue;
             }
 
-            // Parse stage durations
+            // Parse stage durations (mean/summary)
             if let Some(rest) = line.strip_prefix("orchestrator_stage_duration_seconds{stage=\"") {
                 self.parse_stage_duration(rest, app);
+            }
+
+            // Parse histogram quantile percentiles
+            // Format: orchestrator_stage_duration_seconds{stage="rag",quantile="0.5"} 0.004
+            if let Some(rest) =
+                line.strip_prefix("orchestrator_stage_duration_seconds{stage=\"")
+            {
+                self.parse_stage_percentile(rest, app);
             }
 
             // Parse queue depths
             if let Some(rest) = line.strip_prefix("orchestrator_queue_depth{queue=\"") {
                 self.parse_queue_depth(rest, app);
+            }
+
+            // Parse channel capacity gauge
+            // Format: orchestrator_channel_capacity{queue="rag_to_asm"} 512
+            if let Some(rest) = line.strip_prefix("orchestrator_channel_capacity{queue=\"") {
+                self.parse_channel_capacity(rest, app);
             }
 
             // Parse request totals
@@ -564,11 +604,47 @@ impl LiveMetrics {
                     self.prev_errors_total = current;
                 }
             }
+
+            // Parse circuit breaker states
+            // Format: orchestrator_circuit_breaker_state{worker="openai"} 0
+            if let Some(rest) = line.strip_prefix("orchestrator_circuit_breaker_state{worker=\"") {
+                self.parse_circuit_breaker(rest, app);
+            }
+
+            // Parse stage latency budget gauge
+            // Format: orchestrator_stage_latency_budget_ms{stage="rag"} 20.0
+            if let Some(rest) =
+                line.strip_prefix("orchestrator_stage_latency_budget_ms{stage=\"")
+            {
+                self.parse_stage_budget(rest, app);
+            }
+
+            // Parse per-worker inference cost
+            // Format: orchestrator_inference_cost_usd_total{worker="openai"} 0.0042
+            if let Some(rest) =
+                line.strip_prefix("orchestrator_inference_cost_usd_total{worker=\"")
+            {
+                self.parse_worker_cost(rest, app);
+            }
+
+            // Parse global inference cost (no worker label)
+            if let Some(rest) = line.strip_prefix("orchestrator_inference_cost_usd_total ") {
+                if let Ok(val) = rest.trim().parse::<f64>() {
+                    app.worker_costs
+                        .entry("total".to_string())
+                        .and_modify(|v| *v = val)
+                        .or_insert(val);
+                }
+            }
         }
     }
 
-    /// Parses a stage duration metric line.
+    /// Parses a stage duration metric line (mean value, no quantile label).
     fn parse_stage_duration(&self, rest: &str, app: &mut App) {
+        // Only match lines without a quantile label
+        if rest.contains("quantile") {
+            return;
+        }
         let stage_map = [
             ("rag\"}", 0),
             ("assemble\"}", 1),
@@ -580,6 +656,42 @@ impl LiveMetrics {
             if let Some(val_str) = rest.strip_prefix(suffix) {
                 if let Ok(secs) = val_str.trim().parse::<f64>() {
                     app.stage_latencies[*idx] = secs * 1000.0; // convert to ms
+                }
+            }
+        }
+    }
+
+    /// Parses a stage duration percentile line.
+    /// Expected format after stripping prefix `orchestrator_stage_duration_seconds{stage="`:
+    ///   `rag",quantile="0.5"} 0.004`
+    fn parse_stage_percentile(&self, rest: &str, app: &mut App) {
+        if !rest.contains("quantile") {
+            return;
+        }
+
+        let stage_map = [
+            ("rag\",quantile=\"", 0usize),
+            ("assemble\",quantile=\"", 1),
+            ("inference\",quantile=\"", 2),
+            ("post_process\",quantile=\"", 3),
+            ("stream\",quantile=\"", 4),
+        ];
+
+        for (prefix, idx) in &stage_map {
+            if let Some(after_stage) = rest.strip_prefix(prefix) {
+                // after_stage = `0.5"} 0.004`
+                if let Some(after_q) = after_stage.strip_prefix("0.5\"} ") {
+                    if let Ok(secs) = after_q.trim().parse::<f64>() {
+                        app.stage_latency_p50[*idx] = secs * 1000.0;
+                    }
+                } else if let Some(after_q) = after_stage.strip_prefix("0.95\"} ") {
+                    if let Ok(secs) = after_q.trim().parse::<f64>() {
+                        app.stage_latency_p95[*idx] = secs * 1000.0;
+                    }
+                } else if let Some(after_q) = after_stage.strip_prefix("0.99\"} ") {
+                    if let Ok(secs) = after_q.trim().parse::<f64>() {
+                        app.stage_latency_p99[*idx] = secs * 1000.0;
+                    }
                 }
             }
         }
@@ -597,6 +709,76 @@ impl LiveMetrics {
             if let Some(val_str) = rest.strip_prefix(suffix) {
                 if let Ok(depth) = val_str.trim().parse::<f64>() {
                     app.channel_depths[*idx].current = depth as usize;
+                }
+            }
+        }
+    }
+
+    /// Parses a channel capacity gauge line and updates app.channel_depths[idx].capacity.
+    fn parse_channel_capacity(&self, rest: &str, app: &mut App) {
+        let queue_map = [
+            ("rag_to_asm\"}", 0),
+            ("asm_to_inf\"}", 1),
+            ("inf_to_pst\"}", 2),
+            ("pst_to_str\"}", 3),
+        ];
+        for (suffix, idx) in &queue_map {
+            if let Some(val_str) = rest.strip_prefix(suffix) {
+                if let Ok(cap) = val_str.trim().parse::<f64>() {
+                    app.channel_depths[*idx].capacity = cap as usize;
+                }
+            }
+        }
+    }
+
+    /// Parses a circuit breaker state line and upserts into app.circuit_breakers.
+    /// State encoding: 0=Closed, 1=HalfOpen, 2=Open.
+    fn parse_circuit_breaker(&self, rest: &str, app: &mut App) {
+        // rest = `openai"} 0`
+        if let Some(end_quote) = rest.find('"') {
+            let name = &rest[..end_quote];
+            let after = &rest[end_quote..];
+            // after = `"} 0`
+            if let Some(val_str) = after.strip_prefix("\"} ") {
+                let state = match val_str.trim() {
+                    "0" => CircuitState::Closed,
+                    "1" => CircuitState::HalfOpen,
+                    "2" => CircuitState::Open,
+                    _ => return,
+                };
+                let idx = app.circuit_breaker_index_or_insert(name);
+                app.circuit_breakers[idx].state = state;
+            }
+        }
+    }
+
+    /// Parses a stage latency budget gauge line.
+    fn parse_stage_budget(&self, rest: &str, app: &mut App) {
+        let stage_map = [
+            ("rag\"}", 0usize),
+            ("assemble\"}", 1),
+            ("inference\"}", 2),
+            ("post_process\"}", 3),
+            ("stream\"}", 4),
+        ];
+        for (suffix, idx) in &stage_map {
+            if let Some(val_str) = rest.strip_prefix(suffix) {
+                if let Ok(ms) = val_str.trim().parse::<f64>() {
+                    app.latency_budgets.ms[*idx] = ms;
+                }
+            }
+        }
+    }
+
+    /// Parses a per-worker inference cost line.
+    fn parse_worker_cost(&self, rest: &str, app: &mut App) {
+        // rest = `openai"} 0.0042`
+        if let Some(end_quote) = rest.find('"') {
+            let name = &rest[..end_quote];
+            let after = &rest[end_quote..];
+            if let Some(val_str) = after.strip_prefix("\"} ") {
+                if let Ok(cost) = val_str.trim().parse::<f64>() {
+                    app.worker_costs.insert(name.to_string(), cost);
                 }
             }
         }
@@ -987,5 +1169,96 @@ orchestrator_stage_duration_seconds{stage="inference"} 0.287
         }
         assert!(saw_open, "llama.cpp CB never opened");
         assert!(saw_half, "llama.cpp CB never went half-open");
+    }
+
+    #[test]
+    fn test_live_metrics_parse_percentiles() {
+        let mut live = LiveMetrics::new("http://localhost:9090/metrics".into());
+        let mut app = App::new(Duration::from_secs(1));
+
+        let body = r#"orchestrator_stage_duration_seconds{stage="rag",quantile="0.5"} 0.003
+orchestrator_stage_duration_seconds{stage="rag",quantile="0.95"} 0.008
+orchestrator_stage_duration_seconds{stage="rag",quantile="0.99"} 0.015
+orchestrator_stage_duration_seconds{stage="inference",quantile="0.5"} 0.250
+"#;
+        live.parse_metrics(body, &mut app);
+
+        assert!((app.stage_latency_p50[0] - 3.0).abs() < 0.1, "p50 rag: {}", app.stage_latency_p50[0]);
+        assert!((app.stage_latency_p95[0] - 8.0).abs() < 0.1, "p95 rag: {}", app.stage_latency_p95[0]);
+        assert!((app.stage_latency_p99[0] - 15.0).abs() < 0.1, "p99 rag: {}", app.stage_latency_p99[0]);
+        assert!((app.stage_latency_p50[2] - 250.0).abs() < 0.1, "p50 infer: {}", app.stage_latency_p50[2]);
+    }
+
+    #[test]
+    fn test_live_metrics_parse_channel_capacity() {
+        let mut live = LiveMetrics::new("http://localhost:9090/metrics".into());
+        let mut app = App::new(Duration::from_secs(1));
+
+        let body = "orchestrator_channel_capacity{queue=\"rag_to_asm\"} 1024\n\
+                     orchestrator_channel_capacity{queue=\"inf_to_pst\"} 2048\n";
+        live.parse_metrics(body, &mut app);
+
+        assert_eq!(app.channel_depths[0].capacity, 1024);
+        assert_eq!(app.channel_depths[2].capacity, 2048);
+    }
+
+    #[test]
+    fn test_live_metrics_parse_circuit_breaker() {
+        let mut live = LiveMetrics::new("http://localhost:9090/metrics".into());
+        let mut app = App::new(Duration::from_secs(1));
+
+        let body = "orchestrator_circuit_breaker_state{worker=\"openai\"} 0\n\
+                     orchestrator_circuit_breaker_state{worker=\"llama.cpp\"} 2\n\
+                     orchestrator_circuit_breaker_state{worker=\"new-worker\"} 1\n";
+        live.parse_metrics(body, &mut app);
+
+        assert_eq!(app.circuit_breakers[0].state, CircuitState::Closed);
+        assert_eq!(app.circuit_breakers[2].state, CircuitState::Open);
+        // new-worker dynamically added
+        let new_cb = app.circuit_breakers.iter().find(|cb| cb.name == "new-worker");
+        assert!(new_cb.is_some());
+        assert_eq!(new_cb.unwrap().state, CircuitState::HalfOpen);
+    }
+
+    #[test]
+    fn test_live_metrics_parse_stage_budget() {
+        let mut live = LiveMetrics::new("http://localhost:9090/metrics".into());
+        let mut app = App::new(Duration::from_secs(1));
+
+        let body = "orchestrator_stage_latency_budget_ms{stage=\"rag\"} 50.0\n\
+                     orchestrator_stage_latency_budget_ms{stage=\"inference\"} 600.0\n";
+        live.parse_metrics(body, &mut app);
+
+        assert!((app.latency_budgets.ms[0] - 50.0).abs() < 0.01);
+        assert!((app.latency_budgets.ms[2] - 600.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_live_metrics_parse_worker_cost() {
+        let mut live = LiveMetrics::new("http://localhost:9090/metrics".into());
+        let mut app = App::new(Duration::from_secs(1));
+
+        let body = "orchestrator_inference_cost_usd_total{worker=\"openai\"} 0.0042\n\
+                     orchestrator_inference_cost_usd_total{worker=\"anthropic\"} 0.0021\n";
+        live.parse_metrics(body, &mut app);
+
+        assert!((app.worker_costs["openai"] - 0.0042).abs() < 0.0001);
+        assert!((app.worker_costs["anthropic"] - 0.0021).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_mock_metrics_percentiles_derived() {
+        let mock = MockMetrics::new();
+        let mut app = App::new(Duration::from_secs(1));
+        mock.tick(&mut app);
+
+        // p50 < p99 for non-zero latencies
+        for i in 0..5 {
+            assert!(
+                app.stage_latency_p50[i] <= app.stage_latency_p99[i],
+                "p50 should be <= p99 for stage {}",
+                i
+            );
+        }
     }
 }
