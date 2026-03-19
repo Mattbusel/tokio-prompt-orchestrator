@@ -233,12 +233,20 @@ impl CacheLayer {
             CacheBackend::Memory(cache) => {
                 // Evict if at capacity
                 if cache.max_entries > 0 && cache.store.len() >= cache.max_entries {
+                    // NOTE: eviction strategy — bounded O(n) linear scan capped at 1 000 entries.
+                    // We inspect at most the first 1 000 shards returned by the iterator and pick
+                    // the entry whose `expires_at` is nearest (i.e. soonest to expire).  This keeps
+                    // worst-case eviction cost constant regardless of cache size while still
+                    // preferring entries that are closest to natural expiry.  For workloads
+                    // exceeding tens of thousands of entries consider replacing this with a
+                    // dedicated LRU/TTL crate (e.g. `moka`) that maintains a separate min-heap.
+                    //
                     // Collect key first to release all DashMap read-guards
                     // before calling remove (avoids shard deadlock).
-                    // O(n) scan — acceptable for small caches; use an LRU crate for large deployments
                     let evict_key = cache
                         .store
                         .iter()
+                        .take(1000)
                         .min_by_key(|e| e.value().expires_at)
                         .map(|e| e.key().clone());
                     if let Some(key_to_evict) = evict_key {
