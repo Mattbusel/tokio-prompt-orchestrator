@@ -1,31 +1,61 @@
 //! Adaptive request timeout based on a rolling P95 of recent durations.
 //!
-//! ## Behaviour
+//! ## What is adaptive timeout?
 //!
-//! [`AdaptiveTimeout`] maintains a circular buffer of the last 100 request
-//! durations and computes the current timeout as:
+//! A fixed timeout works well when latency is stable, but real inference
+//! backends have variable latency that shifts over time (model load, batch
+//! size, GPU contention, network jitter).  [`AdaptiveTimeout`] tracks the
+//! empirical latency distribution and adjusts the timeout budget to match,
+//! preventing both spurious timeouts during high-load periods and
+//! unnecessarily long waits during periods of low latency.
 //!
-//! ```text
-//! timeout = max(config_min_timeout, p95 * 2.0)
-//! ```
+//! ## Algorithm
 //!
-//! When fewer than 2 samples are present the configured minimum is returned,
-//! ensuring the system starts conservatively.
+//! [`AdaptiveTimeout`] maintains a **circular buffer of the last 100 request
+//! durations** (nanosecond resolution).  On each call to [`current_timeout`]:
 //!
-//! ## Usage
+//! 1. The active window is copied and sorted in O(n log n).
+//! 2. The **P95** value is extracted (index `floor(0.95 * n)`, clamped to `n-1`).
+//! 3. The final timeout is `max(min_timeout_floor, p95 * 2.0)`.
+//!
+//! The `× 2.0` multiplier gives a comfortable margin above the observed tail
+//! latency.  Once the buffer contains 100 samples the oldest sample is
+//! overwritten (circular), so the estimate tracks recent behaviour rather than
+//! accumulating a lifetime average.
+//!
+//! When fewer than 2 samples are present the configured `min_timeout` floor is
+//! returned, ensuring the system starts conservatively.
+//!
+//! ## When to use adaptive timeout vs fixed timeout
+//!
+//! | Situation | Recommendation |
+//! |-----------|----------------|
+//! | Stable, well-characterised latency (e.g. fast in-process worker) | Fixed timeout — simpler and predictable. |
+//! | Variable latency (e.g. cloud LLM API, GPU model serving) | Adaptive — self-tunes without manual tuning. |
+//! | SLA with a hard deadline constraint | Adaptive with a generous `min_timeout` floor. |
+//! | Very bursty traffic with occasional cold-start outliers | Adaptive — P95 ignores the top-5% outliers. |
+//!
+//! ## Example
 //!
 //! ```rust
 //! use std::time::Duration;
 //! use tokio_prompt_orchestrator::enhanced::AdaptiveTimeout;
 //!
 //! let mut at = AdaptiveTimeout::new(Duration::from_secs(5));
-//! at.record_duration(Duration::from_millis(200));
-//! at.record_duration(Duration::from_millis(180));
 //!
-//! // Returns >= 5 s (the configured minimum)
+//! // Seed the buffer with observed durations from real requests.
+//! for _ in 0..50 {
+//!     at.record_duration(Duration::from_millis(120));
+//! }
+//! at.record_duration(Duration::from_millis(800)); // one outlier
+//!
+//! // Timeout adjusts upward to accommodate the tail latency while
+//! // never going below the 5 s floor.
 //! let timeout = at.current_timeout();
 //! assert!(timeout >= Duration::from_secs(5));
 //! ```
+//!
+//! [`current_timeout`]: AdaptiveTimeout::current_timeout
 
 use std::time::Duration;
 
@@ -71,6 +101,10 @@ impl AdaptiveTimeout {
     /// Records a completed request duration into the rolling buffer.
     ///
     /// Once the buffer is full the oldest sample is overwritten (circular).
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
     pub fn record_duration(&mut self, duration: Duration) {
         self.buffer[self.head] = duration.as_nanos() as u64;
         self.head = (self.head + 1) % BUFFER_CAPACITY;
@@ -83,6 +117,10 @@ impl AdaptiveTimeout {
     ///
     /// With fewer than 2 samples the configured `min_timeout` is returned.
     /// Otherwise: `max(min_timeout, p95 * 2.0)`.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
     pub fn current_timeout(&self) -> Duration {
         if self.count < 2 {
             return self.min_timeout;
@@ -96,6 +134,10 @@ impl AdaptiveTimeout {
     }
 
     /// Returns the number of samples currently recorded.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
     pub fn sample_count(&self) -> usize {
         self.count
     }

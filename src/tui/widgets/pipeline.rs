@@ -117,6 +117,8 @@ fn render_stage_row(
         } else {
             "???"
         };
+        // Safety: `stage_latencies` is `[f64; 5]` and `stage_idx` is checked
+        // against `app.stage_latencies.len()` (== 5) before indexing.
         let latency = if stage_idx < app.stage_latencies.len() {
             app.stage_latencies[stage_idx]
         } else {
@@ -138,7 +140,10 @@ fn render_stage_row(
             format!("{:.1}ms", latency)
         };
 
-        // P50/P95/P99 percentile string (compact)
+        // P50/P95/P99 percentile string (compact).
+        // Safety: `stage_latency_p50/p95/p99` are each `[f64; 5]`; the
+        // `stage_idx < *.len()` guards below (len == 5) prevent out-of-bounds
+        // access before the array index.
         let p50 = if stage_idx < app.stage_latency_p50.len() {
             app.stage_latency_p50[stage_idx]
         } else {

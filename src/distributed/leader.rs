@@ -24,6 +24,14 @@ use tracing::{debug, info, warn};
 
 use super::DistributedError;
 
+/// Maximum wall-clock time allowed for any single remote Redis operation.
+///
+/// If a `get_multiplexed_async_connection` or a Redis command does not complete
+/// within this window the operation is cancelled and an error is returned so
+/// the caller can take corrective action (retry, step down, etc.) rather than
+/// blocking indefinitely.
+const REMOTE_OP_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Describes the role of this node in the cluster.
 ///
 /// # Panics
@@ -138,25 +146,31 @@ impl LeaderElection {
     /// # Panics
     /// This function never panics.
     pub async fn try_elect(&self) -> Result<bool, DistributedError> {
-        let mut conn = self
-            .client
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|e| {
-                DistributedError::RedisConnection(format!("failed to get connection: {e}"))
-            })?;
+        let mut conn = tokio::time::timeout(
+            REMOTE_OP_TIMEOUT,
+            self.client.get_multiplexed_async_connection(),
+        )
+        .await
+        .map_err(|_| DistributedError::RedisConnection("operation timed out".into()))?
+        .map_err(|e| {
+            DistributedError::RedisConnection(format!("failed to get connection: {e}"))
+        })?;
 
-        let result: Option<String> = redis::cmd("SET")
-            .arg(&self.leader_key)
-            .arg(&self.node_id)
-            .arg("NX")
-            .arg("EX")
-            .arg(self.ttl_seconds)
-            .query_async(&mut conn)
-            .await
-            .map_err(|e| {
-                DistributedError::RedisOperation(format!("leader election SET NX failed: {e}"))
-            })?;
+        let result: Option<String> = tokio::time::timeout(
+            REMOTE_OP_TIMEOUT,
+            redis::cmd("SET")
+                .arg(&self.leader_key)
+                .arg(&self.node_id)
+                .arg("NX")
+                .arg("EX")
+                .arg(self.ttl_seconds)
+                .query_async(&mut conn),
+        )
+        .await
+        .map_err(|_| DistributedError::RedisOperation("operation timed out".into()))?
+        .map_err(|e| {
+            DistributedError::RedisOperation(format!("leader election SET NX failed: {e}"))
+        })?;
 
         match result {
             Some(ref s) if s == "OK" => {
@@ -166,11 +180,14 @@ impl LeaderElection {
             }
             _ => {
                 // Check who the current leader is
-                let current: Option<String> = redis::cmd("GET")
-                    .arg(&self.leader_key)
-                    .query_async(&mut conn)
-                    .await
-                    .unwrap_or(None);
+                let current: Option<String> = tokio::time::timeout(
+                    REMOTE_OP_TIMEOUT,
+                    redis::cmd("GET").arg(&self.leader_key).query_async(&mut conn),
+                )
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .flatten();
                 debug!(node = %self.node_id, current_leader = ?current, "election lost");
                 let _ = self.role_tx.send(LeaderRole::Follower(current));
                 Ok(false)
@@ -190,13 +207,15 @@ impl LeaderElection {
     /// # Panics
     /// This function never panics.
     pub async fn renew(&self) -> Result<bool, DistributedError> {
-        let mut conn = self
-            .client
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|e| {
-                DistributedError::RedisConnection(format!("failed to get connection: {e}"))
-            })?;
+        let mut conn = tokio::time::timeout(
+            REMOTE_OP_TIMEOUT,
+            self.client.get_multiplexed_async_connection(),
+        )
+        .await
+        .map_err(|_| DistributedError::RedisConnection("operation timed out".into()))?
+        .map_err(|e| {
+            DistributedError::RedisConnection(format!("failed to get connection: {e}"))
+        })?;
 
         // Atomic compare-and-extend: only renew if we still hold the lock
         let script = r#"
@@ -207,15 +226,19 @@ impl LeaderElection {
             end
         "#;
 
-        let result: i64 = redis::Script::new(script)
-            .key(&self.leader_key)
-            .arg(&self.node_id)
-            .arg(self.ttl_seconds)
-            .invoke_async(&mut conn)
-            .await
-            .map_err(|e| {
-                DistributedError::RedisOperation(format!("leader renewal script failed: {e}"))
-            })?;
+        let result: i64 = tokio::time::timeout(
+            REMOTE_OP_TIMEOUT,
+            redis::Script::new(script)
+                .key(&self.leader_key)
+                .arg(&self.node_id)
+                .arg(self.ttl_seconds)
+                .invoke_async(&mut conn),
+        )
+        .await
+        .map_err(|_| DistributedError::RedisOperation("operation timed out".into()))?
+        .map_err(|e| {
+            DistributedError::RedisOperation(format!("leader renewal script failed: {e}"))
+        })?;
 
         if result == 1 {
             debug!(node = %self.node_id, ttl = self.ttl_seconds, "leader lease renewed");
@@ -239,13 +262,15 @@ impl LeaderElection {
     /// # Panics
     /// This function never panics.
     pub async fn step_down(&self) -> Result<bool, DistributedError> {
-        let mut conn = self
-            .client
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|e| {
-                DistributedError::RedisConnection(format!("failed to get connection: {e}"))
-            })?;
+        let mut conn = tokio::time::timeout(
+            REMOTE_OP_TIMEOUT,
+            self.client.get_multiplexed_async_connection(),
+        )
+        .await
+        .map_err(|_| DistributedError::RedisConnection("operation timed out".into()))?
+        .map_err(|e| {
+            DistributedError::RedisConnection(format!("failed to get connection: {e}"))
+        })?;
 
         let script = r#"
             if redis.call("GET", KEYS[1]) == ARGV[1] then
@@ -255,14 +280,18 @@ impl LeaderElection {
             end
         "#;
 
-        let result: i64 = redis::Script::new(script)
-            .key(&self.leader_key)
-            .arg(&self.node_id)
-            .invoke_async(&mut conn)
-            .await
-            .map_err(|e| {
-                DistributedError::RedisOperation(format!("step down script failed: {e}"))
-            })?;
+        let result: i64 = tokio::time::timeout(
+            REMOTE_OP_TIMEOUT,
+            redis::Script::new(script)
+                .key(&self.leader_key)
+                .arg(&self.node_id)
+                .invoke_async(&mut conn),
+        )
+        .await
+        .map_err(|_| DistributedError::RedisOperation("operation timed out".into()))?
+        .map_err(|e| {
+            DistributedError::RedisOperation(format!("step down script failed: {e}"))
+        })?;
 
         if result == 1 {
             info!(node = %self.node_id, "stepped down from leadership");
@@ -284,19 +313,23 @@ impl LeaderElection {
     /// # Panics
     /// This function never panics.
     pub async fn current_leader(&self) -> Result<Option<String>, DistributedError> {
-        let mut conn = self
-            .client
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|e| {
-                DistributedError::RedisConnection(format!("failed to get connection: {e}"))
-            })?;
+        let mut conn = tokio::time::timeout(
+            REMOTE_OP_TIMEOUT,
+            self.client.get_multiplexed_async_connection(),
+        )
+        .await
+        .map_err(|_| DistributedError::RedisConnection("operation timed out".into()))?
+        .map_err(|e| {
+            DistributedError::RedisConnection(format!("failed to get connection: {e}"))
+        })?;
 
-        let leader: Option<String> = redis::cmd("GET")
-            .arg(&self.leader_key)
-            .query_async(&mut conn)
-            .await
-            .map_err(|e| DistributedError::RedisOperation(format!("GET leader failed: {e}")))?;
+        let leader: Option<String> = tokio::time::timeout(
+            REMOTE_OP_TIMEOUT,
+            redis::cmd("GET").arg(&self.leader_key).query_async(&mut conn),
+        )
+        .await
+        .map_err(|_| DistributedError::RedisOperation("operation timed out".into()))?
+        .map_err(|e| DistributedError::RedisOperation(format!("GET leader failed: {e}")))?;
 
         Ok(leader)
     }

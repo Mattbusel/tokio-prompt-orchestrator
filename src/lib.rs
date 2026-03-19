@@ -194,6 +194,10 @@ pub enum OrchestratorError {
 impl OrchestratorError {
     /// Return a stable lowercase string identifying the error variant,
     /// suitable for use as a metric label or structured log field.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
     pub fn error_kind(&self) -> &'static str {
         match self {
             Self::ChannelClosed         => "channel_closed",
@@ -214,11 +218,19 @@ pub struct SessionId(pub String);
 
 impl SessionId {
     /// Create a new `SessionId` from any string-like value.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
 
     /// Borrow the inner string slice.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -245,6 +257,11 @@ pub struct PromptRequest {
 impl PromptRequest {
     /// Builder-style helper that sets an absolute deadline `duration` from now.
     ///
+    /// This is an infallible convenience wrapper around [`try_with_deadline`].
+    /// It accepts any positive `Duration`; for validated input (e.g. user-supplied
+    /// values) prefer [`try_with_deadline`] which rejects zero or excessively large
+    /// timeouts at the call site.
+    ///
     /// # Example
     ///
     /// ```
@@ -263,10 +280,69 @@ impl PromptRequest {
     ///
     /// assert!(req.deadline.is_some());
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
     #[must_use]
     pub fn with_deadline(mut self, duration: std::time::Duration) -> Self {
         self.deadline = Some(std::time::Instant::now() + duration);
         self
+    }
+
+    /// Validated builder that sets an absolute deadline `timeout_seconds` from now.
+    ///
+    /// Accepts a timeout expressed as a whole number of seconds and validates it
+    /// before storing the deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(OrchestratorError::ConfigError(_))` when:
+    /// - `timeout_seconds` is `0` — a zero-second deadline expires immediately.
+    /// - `timeout_seconds` exceeds `3600` — unreasonably large timeouts are
+    ///   rejected to prevent accidental resource leaks.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use std::collections::HashMap;
+    /// use tokio_prompt_orchestrator::{PromptRequest, SessionId};
+    ///
+    /// let req = PromptRequest {
+    ///     session: SessionId::new("s1"),
+    ///     request_id: "r1".to_string(),
+    ///     input: "hello".to_string(),
+    ///     meta: HashMap::new(),
+    ///     deadline: None,
+    /// }
+    /// .try_with_deadline(30)
+    /// .expect("30s is a valid timeout");
+    ///
+    /// assert!(req.deadline.is_some());
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
+    pub fn try_with_deadline(
+        mut self,
+        timeout_seconds: u64,
+    ) -> Result<Self, OrchestratorError> {
+        if timeout_seconds == 0 {
+            return Err(OrchestratorError::ConfigError(
+                "timeout_seconds must be \u{2264} 3600".into(),
+            ));
+        }
+        if timeout_seconds > 3600 {
+            return Err(OrchestratorError::ConfigError(
+                "timeout_seconds must be \u{2264} 3600".into(),
+            ));
+        }
+        self.deadline = Some(
+            std::time::Instant::now()
+                + std::time::Duration::from_secs(timeout_seconds),
+        );
+        Ok(self)
     }
 }
 
@@ -342,6 +418,10 @@ fn fnv1a_hash(s: &str) -> u64 {
 ///
 /// Uses FNV-1a for stable hashing across process restarts so that the same
 /// session always routes to the same shard after a restart.
+///
+/// # Panics
+///
+/// This function does not panic.
 pub fn shard_session(session: &SessionId, shards: usize) -> usize {
     if shards == 0 {
         return 0;
@@ -378,6 +458,10 @@ pub struct DeadLetterQueue {
 
 impl DeadLetterQueue {
     /// Create a new `DeadLetterQueue` with the given ring-buffer capacity.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
     pub fn new(capacity: usize) -> Self {
         Self {
             inner: std::sync::Arc::new(std::sync::Mutex::new(
@@ -388,6 +472,11 @@ impl DeadLetterQueue {
     }
 
     /// Push a dropped request into the queue.  Evicts the oldest entry if full.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic. If the internal mutex is poisoned it is
+    /// recovered automatically and a warning is logged.
     pub fn push(&self, req: DroppedRequest) {
         // NOTE: std::sync::Mutex is safe here because the critical section is
         // extremely short (a deque push plus an optional pop_front) and there
@@ -406,6 +495,11 @@ impl DeadLetterQueue {
     }
 
     /// Drain all queued entries and return them, clearing the queue.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic. If the internal mutex is poisoned it is
+    /// recovered automatically and a warning is logged.
     pub fn drain(&self) -> Vec<DroppedRequest> {
         // NOTE: std::sync::Mutex is safe here because the critical section is
         // a single drain-and-collect with no `.await` inside the guard.  The
@@ -419,6 +513,11 @@ impl DeadLetterQueue {
     }
 
     /// Return the number of entries currently in the queue.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic. If the internal mutex is poisoned it is
+    /// recovered automatically and a warning is logged.
     pub fn len(&self) -> usize {
         self.inner
             .lock()
@@ -431,6 +530,11 @@ impl DeadLetterQueue {
     }
 
     /// Return `true` if the queue contains no entries.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic. If the internal mutex is poisoned it is
+    /// recovered automatically and a warning is logged.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -446,6 +550,10 @@ pub type OtelLayer = tracing_opentelemetry::OpenTelemetryLayer<
 >;
 
 /// Initialise tracing with env-filter support. Call once at binary startup.
+///
+/// # Panics
+///
+/// This function does not panic.
 ///
 /// ## Log format
 ///
@@ -599,6 +707,10 @@ pub enum PipelineStage {
 
 impl PipelineStage {
     /// Return the canonical lowercase ASCII name used in metrics labels.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Rag => "rag",
