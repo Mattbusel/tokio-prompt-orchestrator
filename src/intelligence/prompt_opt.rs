@@ -40,12 +40,12 @@ pub enum OptimizationStrategy {
     InstructionReordering,
     /// Remove semantically redundant sentences from the user prompt.
     RedundancyRemoval,
-    /// Placeholder: returns input unchanged. TODO: implement few-shot example retrieval.
+    /// Prepend the top-`k` most relevant few-shot examples (by Jaccard
+    /// word-overlap similarity) to the system prompt as a preamble.
     ///
-    /// This variant is a placeholder. Enabling it has no effect on the prompt.
-    // TODO: implement ExampleInjection by selecting and prepending relevant
-    // few-shot examples from a retrieval store.
-    #[doc = "Not yet implemented — returns input unchanged"]
+    /// Examples are retrieved from the optimizer's internal store via
+    /// [`PromptOptimizer::add_example`].  When the store is empty this
+    /// strategy is a no-op.
     ExampleInjection,
 }
 
@@ -427,7 +427,31 @@ mod tests {
     }
 
     #[test]
-    fn test_example_injection_is_noop() {
+    fn test_example_injection_prepends_examples() {
+        let config = PromptOptimizerConfig {
+            enabled_strategies: vec![OptimizationStrategy::ExampleInjection],
+            ..PromptOptimizerConfig::default()
+        };
+        let opt = PromptOptimizer::new(config);
+        // Add a few-shot example so ExampleInjection has something to inject.
+        opt.add_example("hello world", "hi there");
+        let sys = "be helpful";
+        let (out, _) = opt.optimize(sys, "hello world query").unwrap();
+        // The example preamble should be prepended to the system prompt.
+        assert!(
+            out.contains("### Few-shot examples"),
+            "expected example preamble in output, got: {out:?}"
+        );
+        assert!(
+            out.contains("be helpful"),
+            "original system prompt should still be present, got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn test_example_injection_no_examples_returns_unchanged() {
+        // When no examples have been added to the store, ExampleInjection
+        // should leave the system prompt unchanged (nothing to inject).
         let config = PromptOptimizerConfig {
             enabled_strategies: vec![OptimizationStrategy::ExampleInjection],
             ..PromptOptimizerConfig::default()

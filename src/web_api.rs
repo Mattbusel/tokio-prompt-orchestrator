@@ -48,7 +48,7 @@ async fn body_size_middleware(
     }
     // Slow path: buffer entire body up to max_size+1 bytes
     let (parts, body) = req.into_parts();
-    match axum::body::to_bytes(body, max_size + 1).await {
+    match axum::body::to_bytes(body, max_size.saturating_add(1)).await {
         Ok(bytes) if bytes.len() > max_size => {
             return (
                 StatusCode::PAYLOAD_TOO_LARGE,
@@ -156,6 +156,32 @@ impl Default for ServerConfig {
     }
 }
 
+#[cfg(feature = "web-api")]
+impl ServerConfig {
+    /// Validate the `ServerConfig` fields.
+    ///
+    /// - `max_request_size` must be at least 1 (not 0).
+    /// - `max_request_size` must be at most `usize::MAX / 2` to prevent
+    ///   overflow in `max_size.saturating_add(1)` and similar arithmetic.
+    ///
+    /// # Errors
+    ///
+    /// Returns a descriptive error string if any field is invalid.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.max_request_size == 0 {
+            return Err("max_request_size must be at least 1".to_string());
+        }
+        if self.max_request_size > usize::MAX / 2 {
+            return Err(format!(
+                "max_request_size ({}) must not exceed usize::MAX / 2 ({})",
+                self.max_request_size,
+                usize::MAX / 2
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// JSON body for `POST /api/v1/infer` and `POST /api/v1/stream`.
 ///
 /// # Panics
@@ -253,7 +279,7 @@ const TRACKER_RETENTION: Duration = Duration::from_secs(60 * 60); // 1 hour
 
 /// How often the cleanup task runs.
 #[cfg(feature = "web-api")]
-const TRACKER_CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 60); // 5 minutes
+const TRACKER_CLEANUP_INTERVAL: Duration = Duration::from_secs(60); // 1 minute
 
 // ============================================================================
 // Batch Job Tracker
@@ -363,6 +389,49 @@ fn validate_infer_request(req: &InferRequest) -> Option<ValidationErrorBody> {
         }
     }
 
+    if req.deadline_secs == Some(0) {
+        fields.push(FieldError {
+            field: "deadline_secs",
+            code: "ERR_OUT_OF_RANGE",
+            message: "deadline_secs must be greater than 0",
+        });
+    }
+
+    if req.deadline_secs > Some(86400 * 7) {
+        fields.push(FieldError {
+            field: "deadline_secs",
+            code: "ERR_OUT_OF_RANGE",
+            message: "deadline_secs must not exceed 7 days",
+        });
+    }
+
+    if req.metadata.len() > 50 {
+        fields.push(FieldError {
+            field: "metadata",
+            code: "ERR_TOO_MANY_ENTRIES",
+            message: "metadata must not exceed 50 key-value pairs",
+        });
+    }
+
+    for (k, v) in &req.metadata {
+        if k.len() > 128 {
+            fields.push(FieldError {
+                field: "metadata",
+                code: "ERR_KEY_TOO_LONG",
+                message: "metadata keys must not exceed 128 bytes",
+            });
+            break;
+        }
+        if v.len() > 1024 {
+            fields.push(FieldError {
+                field: "metadata",
+                code: "ERR_VALUE_TOO_LONG",
+                message: "metadata values must not exceed 1024 bytes",
+            });
+            break;
+        }
+    }
+
     if fields.is_empty() {
         None
     } else {
@@ -383,6 +452,13 @@ impl RequestTracker {
     fn new() -> Self {
         let status: Arc<DashMap<String, TrackedRequest>> = Arc::new(DashMap::new());
         let status_clone = Arc::clone(&status);
+        // Panic analysis: this task body is infallible.
+        //   - `interval.tick()` is cancel-safe and never panics.
+        //   - `Instant::now()` never panics.
+        //   - `DashMap::retain` never panics (closure has no unwrap).
+        //   - `i64::try_from` never panics (uses unwrap_or).
+        //   - `set_queue_depth` is a metrics call that never panics.
+        //   - `tracing::debug!` never panics.
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(TRACKER_CLEANUP_INTERVAL);
             interval.tick().await; // skip the immediate first tick
@@ -395,7 +471,10 @@ impl RequestTracker {
                         None => true, // still in-flight — keep
                     }
                 });
-                let remaining = status_clone.len() as i64;
+                // Safety: DashMap::len() returns usize; i64::MAX is 9.2e18,
+                // far exceeding any realistic tracker size, so this conversion
+                // is always safe in practice. We use try_from to be explicit.
+                let remaining = i64::try_from(status_clone.len()).unwrap_or(i64::MAX);
                 crate::metrics::set_queue_depth("tracker", remaining);
                 tracing::debug!(entries = remaining, "RequestTracker cleanup sweep complete");
             }
@@ -1088,7 +1167,7 @@ async fn websocket_stream(socket: WebSocket, state: Arc<AppState>) {
                             msg_count = 0;
                             window_start = std::time::Instant::now();
                         }
-                        msg_count += 1;
+                        msg_count = msg_count.saturating_add(1);
                         if msg_count > WS_RATE_LIMIT_PER_MIN {
                             // Send a structured rate-limit error, then close the
                             // connection with WebSocket close code 4029 (application-

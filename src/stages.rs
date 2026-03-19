@@ -320,12 +320,16 @@ where
 }
 
 fn validated_channel_size(value: usize, name: &str, default: usize) -> usize {
-    if !(1..=100_000).contains(&value) {
+    debug_assert!(
+        default > 0 && default <= 100_000,
+        "default channel size must be in [1, 100_000]"
+    );
+    if value == 0 || value > 100_000 {
         warn!(
-            channel = name,
-            value = value,
-            default = default,
-            "channel size out of valid range [1, 100_000]; using default"
+            config_field = name,
+            invalid_value = value,
+            fallback_value = default,
+            "channel capacity out of range [1, 100_000]; using default"
         );
         default
     } else {

@@ -127,6 +127,22 @@ pub fn validate(config: &PipelineConfig) -> Result<(), Vec<ConfigError>> {
     let mut errors = Vec::new();
 
     // ── Retry settings ───────────────────────────────────────────────
+    if config.resilience.retry_base_ms == 0 {
+        errors.push(ConfigError::InvalidField {
+            field: "resilience.retry_base_ms".into(),
+            value: "0".into(),
+            reason: "must be at least 1ms".into(),
+        });
+    }
+
+    if config.resilience.retry_max_ms == 0 {
+        errors.push(ConfigError::InvalidField {
+            field: "resilience.retry_max_ms".into(),
+            value: "0".into(),
+            reason: "must be at least 1ms".into(),
+        });
+    }
+
     if config.resilience.retry_base_ms > config.resilience.retry_max_ms {
         errors.push(ConfigError::InvalidField {
             field: "resilience.retry_base_ms".into(),
@@ -168,6 +184,17 @@ pub fn validate(config: &PipelineConfig) -> Result<(), Vec<ConfigError>> {
             value: "0".into(),
             reason: "must be at least 1 second".into(),
         });
+    }
+
+    // ── Inference timeout_ms ─────────────────────────────────────────
+    if let Some(tms) = config.stages.inference.timeout_ms {
+        if tms == 0 {
+            errors.push(ConfigError::InvalidField {
+                field: "stages.inference.timeout_ms".into(),
+                value: "0".into(),
+                reason: "must be at least 1ms".into(),
+            });
+        }
     }
 
     // ── Inference temperature ────────────────────────────────────────
