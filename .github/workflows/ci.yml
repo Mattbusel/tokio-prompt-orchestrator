@@ -22,7 +22,7 @@ jobs:
       - name: Run tests with coverage
         run: cargo llvm-cov --lib --lcov --output-path lcov.info
       - name: Per-module coverage report
-        run: cargo llvm-cov report --lib
+        run: cargo llvm-cov report
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
         with:
