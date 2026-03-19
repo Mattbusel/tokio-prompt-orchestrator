@@ -326,7 +326,7 @@ impl Deduplicator {
         self.shutdown.store(true, Ordering::Relaxed);
         let handle = self.cleanup_handle.lock().await.take();
         if let Some(h) = handle {
-            let _ = h.await;
+            h.abort();
         }
     }
 

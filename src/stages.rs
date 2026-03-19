@@ -1712,7 +1712,7 @@ mod tests {
     #[test]
     fn test_sink_error_display() {
         let e = SinkError::Transient("oops".to_owned());
-        assert_eq!(format!("{e}"), "oops");
+        assert_eq!(format!("{e}"), "transient sink error: oops");
     }
 
     #[test]
