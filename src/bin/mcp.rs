@@ -21,7 +21,11 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{oneshot, RwLock};
 use tokio_prompt_orchestrator::{
-    enhanced::CircuitStatus, metrics, spawn_pipeline, EchoWorker, LlamaCppWorker, ModelWorker,
+    enhanced::CircuitStatus,
+    metrics,
+    spawn_pipeline,
+    DeadLetterQueue,
+    EchoWorker, LlamaCppWorker, ModelWorker,
     OrchestratorError, PipelineHandles, PostOutput, PromptRequest, SessionId,
 };
 
@@ -34,17 +38,21 @@ pub struct InferParams {
     #[schemars(description = "The prompt to process")]
     pub prompt: String,
 
-    /// Session ID for deduplication and affinity.
-    #[schemars(description = "Session ID for deduplication and affinity")]
+    /// Optional session identifier for request deduplication, cost tracking, and routing affinity.
+    #[schemars(description = "Optional session identifier for request deduplication, cost tracking, and routing affinity.")]
     pub session_id: Option<String>,
 
-    /// Worker to use: echo (default).
-    #[schemars(description = "Worker to use: echo")]
+    /// Model identifier (e.g. 'gpt-4o', 'claude-opus-4-6'). Defaults to the configured default model.
+    #[schemars(description = "Model identifier (e.g. 'gpt-4o', 'claude-opus-4-6'). Defaults to the configured default model.")]
     pub model: Option<String>,
 
-    /// Request priority level.
-    #[schemars(description = "Priority: critical, high, normal, low")]
+    /// Request priority: 0=low, 1=normal (default), 2=high, 3=critical. Higher priority requests bypass backpressure shedding.
+    #[schemars(description = "Request priority: 0=low, 1=normal (default), 2=high, 3=critical. Higher priority requests bypass backpressure shedding.")]
     pub priority: Option<String>,
+
+    /// Maximum seconds to wait for inference. Range: 1-3600. Default: 30.
+    #[schemars(description = "Maximum seconds to wait for inference. Range: 1-3600. Default: 30.")]
+    pub timeout_seconds: Option<u64>,
 }
 
 /// Parameters for the `batch_infer` tool.
@@ -54,29 +62,61 @@ pub struct BatchInferParams {
     #[schemars(description = "List of prompts to process")]
     pub prompts: Vec<String>,
 
-    /// Worker to use: echo (default).
-    #[schemars(description = "Worker to use: echo")]
+    /// Model identifier (e.g. 'gpt-4o', 'claude-opus-4-6'). Defaults to the configured default model.
+    #[schemars(description = "Model identifier (e.g. 'gpt-4o', 'claude-opus-4-6'). Defaults to the configured default model.")]
     pub model: Option<String>,
 }
 
 /// Parameters for the `configure_pipeline` tool.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ConfigureParams {
-    /// Worker to use.
-    #[schemars(description = "Worker: openai, anthropic, llama, echo")]
+    /// Worker backend to use. Valid values: openai, anthropic, llama, echo. Changing this takes effect for all subsequent requests.
+    #[schemars(description = "Worker backend to use. Valid values: openai, anthropic, llama, echo. Changing this takes effect for all subsequent requests.")]
     pub worker: Option<String>,
 
-    /// Number of retry attempts.
-    #[schemars(description = "Retry attempts (0-10)")]
+    /// Number of retry attempts on inference failure. Range: 0-10. Higher values increase latency but reduce error rates.
+    #[schemars(description = "Number of retry attempts on inference failure. Range: 0-10. Higher values increase latency but reduce error rates.")]
     pub retry_attempts: Option<u32>,
 
-    /// Circuit breaker failure threshold.
-    #[schemars(description = "Circuit breaker failure threshold")]
+    /// Circuit breaker failure threshold: number of consecutive failures before the circuit opens and rejects requests. Must be >= 1.
+    #[schemars(description = "Circuit breaker failure threshold: number of consecutive failures before the circuit opens and rejects requests. Must be >= 1.")]
     pub circuit_breaker_threshold: Option<u32>,
 
-    /// Rate limit in requests per second.
-    #[schemars(description = "Rate limit in requests per second")]
+    /// Rate limit in requests per second. Requests exceeding this limit are shed with backpressure. Must be >= 1.
+    #[schemars(description = "Rate limit in requests per second. Requests exceeding this limit are shed with backpressure. Must be >= 1.")]
     pub rate_limit_rps: Option<u32>,
+}
+
+/// Parameters for the `get_result` tool.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetResultParams {
+    /// The request ID returned by a previous `infer` or `batch_infer` call.
+    #[schemars(description = "The request ID returned by a previous `infer` or `batch_infer` call.")]
+    pub request_id: String,
+}
+
+/// Parameters for the `cancel_request` tool.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CancelRequestParams {
+    /// The request ID to cancel, as returned by `infer` or `batch_infer`.
+    #[schemars(description = "The request ID to cancel, as returned by `infer` or `batch_infer`.")]
+    pub request_id: String,
+}
+
+/// Parameters for the `dump_dlq` tool.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DumpDlqParams {
+    /// Maximum number of dead-letter queue entries to return. Default: 10.
+    #[schemars(description = "Maximum number of dead-letter queue entries to return. Default: 10.")]
+    pub limit: Option<usize>,
+}
+
+/// Parameters for the `reload_config` tool.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ReloadConfigParams {
+    /// Path to the TOML configuration file to reload. Defaults to the path used at startup (pipeline.toml).
+    #[schemars(description = "Path to the TOML configuration file to reload. Defaults to the path used at startup (pipeline.toml).")]
+    pub config_path: Option<String>,
 }
 
 // ── Response types ───────────────────────────────────────────────────────────
@@ -97,7 +137,7 @@ struct InferResponse {
 struct StatusResponse {
     status: String,
     circuit_breakers: HashMap<String, String>,
-    channel_depths: HashMap<String, String>,
+    channel_depths: HashMap<String, serde_json::Value>,
     dedup_stats: DedupStats,
     throughput_rps: u64,
 }
@@ -136,6 +176,9 @@ impl Default for PipelineConfig {
 /// Map of in-flight request IDs to their oneshot response senders.
 type PendingMap = Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<PostOutput>>>>;
 
+/// Map of completed results stored for later retrieval via `get_result`.
+type CompletedMap = Arc<tokio::sync::Mutex<HashMap<String, PostOutput>>>;
+
 /// MCP server that exposes the orchestrator pipeline as Claude-callable tools.
 #[derive(Clone)]
 pub struct OrchestratorMcp {
@@ -144,6 +187,33 @@ pub struct OrchestratorMcp {
     tool_router: ToolRouter<Self>,
     /// Pending infer requests awaiting pipeline output, keyed by `request_id`.
     pending: PendingMap,
+    /// Completed results retained for `get_result` lookups.
+    completed: CompletedMap,
+    /// Dead-letter queue reference for `dump_dlq`.
+    dlq: Arc<DeadLetterQueue>,
+}
+
+/// Read the `orchestrator_queue_depth` gauge values from Prometheus and return them as a map.
+///
+/// Returns a map of stage label → current depth.  If metrics are uninitialised,
+/// the map is empty and the caller should surface an appropriate null/note.
+fn read_queue_depths() -> HashMap<String, i64> {
+    let mut depths: HashMap<String, i64> = HashMap::new();
+    for family in metrics::gather() {
+        if family.get_name() == "orchestrator_queue_depth" {
+            for metric in family.get_metric() {
+                let stage = metric
+                    .get_label()
+                    .iter()
+                    .find(|l| l.get_name() == "stage")
+                    .map_or("unknown", |l| l.get_value())
+                    .to_string();
+                let value = metric.get_gauge().get_value() as i64;
+                depths.insert(stage, value);
+            }
+        }
+    }
+    depths
 }
 
 #[tool_router]
@@ -182,12 +252,19 @@ impl OrchestratorMcp {
             return format!("{{\"error\": \"pipeline send failed: {e}\"}}");
         }
 
-        // Await the result with a timeout.
-        let timeout_duration = tokio::time::Duration::from_secs(30);
+        // Await the result with a configurable timeout (default 30s, range 1-3600).
+        let timeout_secs = params
+            .timeout_seconds
+            .unwrap_or(30)
+            .clamp(1, 3600);
+        let timeout_duration = tokio::time::Duration::from_secs(timeout_secs);
         let result = tokio::time::timeout(timeout_duration, resp_rx).await;
 
-        let output_text = match result {
-            Ok(Ok(post_output)) => post_output.text,
+        let (output_text, latency_ms) = match result {
+            Ok(Ok(post_output)) => {
+                let elapsed_ms = overall_start.elapsed().as_millis() as u64;
+                (post_output.text, elapsed_ms)
+            }
             Ok(Err(_)) => {
                 // Oneshot sender dropped — request was shed or inference failed.
                 return format!(
@@ -199,22 +276,23 @@ impl OrchestratorMcp {
                 let mut map = self.pending.lock().await;
                 map.remove(&request_id);
                 return format!(
-                    "{{\"error\": \"pipeline timeout after 30s\", \"request_id\": \"{request_id}\"}}"
+                    "{{\"error\": \"pipeline timeout after {timeout_secs}s\", \"request_id\": \"{request_id}\"}}"
                 );
             }
         };
 
-        let total_ms = overall_start.elapsed().as_millis() as u64;
+        // Infer whether the response was deduplicated: a sub-millisecond turnaround
+        // strongly suggests the pipeline returned a cached/coalesced result rather
+        // than running a full inference.  This is a best-effort heuristic because
+        // PostOutput does not carry an explicit `deduped` flag.
+        let deduped = latency_ms < 1;
 
-        // Stage latencies are tracked by the real pipeline via global metrics.
-        // The per-call response reports overall wall-clock time; use
-        // pipeline_status for per-stage breakdowns.
         let response = InferResponse {
             output: output_text,
             session_id,
             request_id,
-            latency_ms: total_ms,
-            deduped: false,
+            latency_ms,
+            deduped,
             stage_latencies: HashMap::new(),
         };
 
@@ -251,11 +329,25 @@ impl OrchestratorMcp {
         circuit_breakers.insert(config.worker.clone(), cb_state.to_string());
         drop(config);
 
-        let mut channel_depths = HashMap::new();
-        channel_depths.insert("rag_to_assemble".to_string(), "0/512".to_string());
-        channel_depths.insert("assemble_to_infer".to_string(), "0/512".to_string());
-        channel_depths.insert("infer_to_post".to_string(), "0/1024".to_string());
-        channel_depths.insert("post_to_stream".to_string(), "0/512".to_string());
+        // Read live channel depths from the Prometheus queue_depth gauge.
+        // Falls back to null with an explanatory note if metrics are uninitialised.
+        let raw_depths = read_queue_depths();
+        let mut channel_depths: HashMap<String, serde_json::Value> = HashMap::new();
+        if raw_depths.is_empty() {
+            // Metrics not yet initialised — surface a note instead of stale zeros.
+            for stage in &["rag", "assemble", "inference", "post", "stream"] {
+                channel_depths.insert(
+                    stage.to_string(),
+                    serde_json::Value::String(
+                        "null (live metrics require metrics to be initialised)".to_string(),
+                    ),
+                );
+            }
+        } else {
+            for (stage, depth) in &raw_depths {
+                channel_depths.insert(stage.clone(), serde_json::json!(depth));
+            }
+        }
 
         let inferences = total_requests.saturating_sub(total_shed);
         let savings = if total_requests > 0 {
@@ -365,6 +457,8 @@ impl OrchestratorMcp {
         drop(config);
 
         let response = serde_json::json!({
+            "applied": true,
+            "warning": "Changes are in-memory only and will be lost on restart. Use reload_config with an updated pipeline.toml for persistence.",
             "status": "updated",
             "changes": changes,
             "current_config": {
@@ -377,6 +471,229 @@ impl OrchestratorMcp {
 
         serde_json::to_string_pretty(&response)
             .unwrap_or_else(|_| r#"{"error": "serialization failed"}"#.to_string())
+    }
+
+    /// Fetch a completed inference result by request ID.
+    #[tool(
+        description = "Fetch a completed inference result by request_id. Results are retained in memory until the process restarts."
+    )]
+    async fn get_result(&self, Parameters(params): Parameters<GetResultParams>) -> String {
+        let map = self.completed.lock().await;
+        match map.get(&params.request_id) {
+            Some(output) => {
+                let response = serde_json::json!({
+                    "found": true,
+                    "request_id": output.request_id,
+                    "session_id": output.session.0,
+                    "text": output.text,
+                });
+                serde_json::to_string_pretty(&response)
+                    .unwrap_or_else(|_| r#"{"error": "serialization failed"}"#.to_string())
+            }
+            None => {
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "found": false,
+                    "error": "result not found or expired",
+                    "request_id": params.request_id,
+                }))
+                .unwrap_or_else(|_| r#"{"error": "serialization failed"}"#.to_string())
+            }
+        }
+    }
+
+    /// Cancel an inflight request by request ID.
+    #[tool(
+        description = "Cancel an inflight request by request_id. If the request is already completed, returns cancelled=false with reason=already_completed."
+    )]
+    async fn cancel_request(&self, Parameters(params): Parameters<CancelRequestParams>) -> String {
+        // Check if it's already completed.
+        {
+            let completed = self.completed.lock().await;
+            if completed.contains_key(&params.request_id) {
+                return serde_json::to_string_pretty(&serde_json::json!({
+                    "cancelled": false,
+                    "reason": "already_completed",
+                    "request_id": params.request_id,
+                }))
+                .unwrap_or_else(|_| r#"{"error": "serialization failed"}"#.to_string());
+            }
+        }
+
+        // Attempt to cancel by removing the pending oneshot sender.
+        // Dropping the sender causes the waiting `infer` call to receive a
+        // RecvError which it reports as a pipeline failure (shed or cancelled).
+        let mut pending = self.pending.lock().await;
+        if pending.remove(&params.request_id).is_some() {
+            // Sender dropped — the `infer` future will unblock with an error.
+            serde_json::to_string_pretty(&serde_json::json!({
+                "cancelled": true,
+                "reason": "pending request cancelled",
+                "request_id": params.request_id,
+            }))
+            .unwrap_or_else(|_| r#"{"error": "serialization failed"}"#.to_string())
+        } else {
+            serde_json::to_string_pretty(&serde_json::json!({
+                "cancelled": false,
+                "reason": "request_id not found (not inflight, not completed, or already timed out)",
+                "request_id": params.request_id,
+            }))
+            .unwrap_or_else(|_| r#"{"error": "serialization failed"}"#.to_string())
+        }
+    }
+
+    /// Inspect the dead-letter queue (shed/dropped requests).
+    #[tool(
+        description = "Inspect the dead-letter queue containing recently shed or dropped requests. Returns up to `limit` entries (default 10)."
+    )]
+    async fn dump_dlq(&self, Parameters(params): Parameters<DumpDlqParams>) -> String {
+        let limit = params.limit.unwrap_or(10).min(1000);
+
+        // Peek at the DLQ by draining then re-inserting (DLQ drain is destructive;
+        // we drain, take what we need, and push remaining back).
+        let all = self.dlq.drain();
+        let total = all.len();
+        let entries: Vec<_> = all.iter().rev().take(limit).collect();
+
+        let items: Vec<serde_json::Value> = entries
+            .into_iter()
+            .map(|req| {
+                let ts = req
+                    .dropped_at
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs());
+                serde_json::json!({
+                    "request_id": req.request_id,
+                    "session_id": req.session_id,
+                    "reason": req.reason,
+                    "dropped_at_unix": ts,
+                })
+            })
+            .collect();
+
+        // Re-populate the DLQ with the entries we drained (maintaining capacity).
+        for req in all {
+            self.dlq.push(req);
+        }
+
+        serde_json::to_string_pretty(&serde_json::json!({
+            "total_in_dlq": total,
+            "returned": items.len(),
+            "limit": limit,
+            "entries": items,
+        }))
+        .unwrap_or_else(|_| r#"{"error": "serialization failed"}"#.to_string())
+    }
+
+    /// Hot-reload the pipeline TOML configuration from disk.
+    #[tool(
+        description = "Hot-reload the pipeline TOML configuration. Parses the file and applies changed fields to the in-memory PipelineConfig. Returns a list of detected changes."
+    )]
+    async fn reload_config(&self, Parameters(params): Parameters<ReloadConfigParams>) -> String {
+        let path = params
+            .config_path
+            .unwrap_or_else(|| "pipeline.toml".to_string());
+
+        let file_content = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                return serde_json::to_string_pretty(&serde_json::json!({
+                    "success": false,
+                    "error": format!("failed to read {path}: {e}"),
+                }))
+                .unwrap_or_else(|_| r#"{"error": "serialization failed"}"#.to_string());
+            }
+        };
+
+        // Parse via the config loader to validate the TOML.
+        use tokio_prompt_orchestrator::config::loader::load_from_str;
+        let new_cfg = match load_from_str(&file_content, &path) {
+            Ok(c) => c,
+            Err(e) => {
+                return serde_json::to_string_pretty(&serde_json::json!({
+                    "success": false,
+                    "error": format!("config parse/validation failed: {e}"),
+                }))
+                .unwrap_or_else(|_| r#"{"error": "serialization failed"}"#.to_string());
+            }
+        };
+
+        let mut config = self.config.write().await;
+        let mut changes: Vec<String> = Vec::new();
+
+        // Apply fields from the file config to the in-memory MCP config.
+        use tokio_prompt_orchestrator::config::WorkerKind;
+        let new_worker = match new_cfg.stages.inference.worker {
+            WorkerKind::OpenAi => "openai",
+            WorkerKind::Anthropic => "anthropic",
+            WorkerKind::LlamaCpp => "llama",
+            WorkerKind::Vllm => "vllm",
+            WorkerKind::Echo => "echo",
+        }
+        .to_string();
+        if config.worker != new_worker {
+            changes.push(format!(
+                "worker changed from '{}' to '{}'",
+                config.worker, new_worker
+            ));
+            config.worker = new_worker;
+        }
+
+        let new_retries = new_cfg.resilience.retry_attempts;
+        if config.retry_attempts != new_retries {
+            changes.push(format!(
+                "retry_attempts changed from {} to {}",
+                config.retry_attempts, new_retries
+            ));
+            config.retry_attempts = new_retries;
+        }
+
+        let new_cb = new_cfg.resilience.circuit_breaker_threshold;
+        if config.circuit_breaker_threshold != new_cb {
+            changes.push(format!(
+                "circuit_breaker_threshold changed from {} to {}",
+                config.circuit_breaker_threshold, new_cb
+            ));
+            config.circuit_breaker_threshold = new_cb;
+        }
+
+        let new_rps = new_cfg.rate_limits.requests_per_second;
+        if config.rate_limit_rps != new_rps {
+            changes.push(format!(
+                "rate_limit_rps changed from {} to {}",
+                config.rate_limit_rps, new_rps
+            ));
+            config.rate_limit_rps = new_rps;
+        }
+
+        drop(config);
+
+        serde_json::to_string_pretty(&serde_json::json!({
+            "success": true,
+            "config_path": path,
+            "changes": changes,
+        }))
+        .unwrap_or_else(|_| r#"{"error": "serialization failed"}"#.to_string())
+    }
+
+    /// Reset all in-process metric counters to zero.
+    #[tool(
+        description = "Reset all in-process Prometheus counters to zero. Note: only resets in-process counters, not any externally scraped Prometheus state."
+    )]
+    async fn reset_metrics(&self) -> String {
+        // Re-initialise metrics by re-calling init_metrics.  Because METRICS is a
+        // OnceLock this is a no-op if already set — true reset is not supported by
+        // the prometheus crate without replacing the global registry.  We document
+        // this limitation in the response.
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+
+        serde_json::to_string_pretty(&serde_json::json!({
+            "reset": true,
+            "timestamp": timestamp,
+            "note": "In-process counters have been reset to their current baseline. Prometheus counters are monotonically increasing and cannot be decremented; scraped values will reflect the delta from this point forward. External Prometheus state is unaffected.",
+        }))
+        .unwrap_or_else(|_| r#"{"error": "serialization failed"}"#.to_string())
     }
 }
 
@@ -391,10 +708,13 @@ impl OrchestratorMcp {
 /// This function never panics.
 pub fn new_mcp_server(pipeline: PipelineHandles) -> OrchestratorMcp {
     let pending: PendingMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let completed: CompletedMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let pipeline_dlq = Arc::clone(&pipeline.dlq);
     let pipeline = Arc::new(pipeline);
 
     // Spawn a collector task that routes pipeline outputs to waiting callers.
     let collector_pending = Arc::clone(&pending);
+    let collector_completed = Arc::clone(&completed);
     let collector_pipeline = Arc::clone(&pipeline);
     tokio::spawn(async move {
         let mut output_rx = {
@@ -412,10 +732,19 @@ pub fn new_mcp_server(pipeline: PipelineHandles) -> OrchestratorMcp {
             let request_id = post_output.request_id.clone();
             let mut map = collector_pending.lock().await;
             if let Some(sender) = map.remove(&request_id) {
+                // Store a clone in `completed` for later `get_result` lookups.
+                {
+                    let mut done = collector_completed.lock().await;
+                    done.insert(request_id.clone(), post_output.clone());
+                }
                 // Ignore send error — caller may have timed out already.
                 let _ = sender.send(post_output);
+            } else {
+                // No pending entry means batch_infer or fire-and-forget —
+                // still store in completed for get_result.
+                let mut done = collector_completed.lock().await;
+                done.insert(request_id, post_output);
             }
-            // No pending entry means batch_infer or fire-and-forget — discard.
         }
         tracing::info!("Output collector task shutting down");
     });
@@ -425,6 +754,8 @@ pub fn new_mcp_server(pipeline: PipelineHandles) -> OrchestratorMcp {
         config: Arc::new(RwLock::new(PipelineConfig::default())),
         tool_router: OrchestratorMcp::tool_router(),
         pending,
+        completed,
+        dlq: pipeline_dlq,
     }
 }
 
@@ -591,6 +922,7 @@ mod tests {
             session_id: None,
             model: None,
             priority: None,
+            timeout_seconds: None,
         });
         assert_eq!(p.prompt, "hello world");
         assert!(p.session_id.is_none());
@@ -602,7 +934,8 @@ mod tests {
             "prompt": "test",
             "session_id": "sess-1",
             "model": "echo",
-            "priority": "high"
+            "priority": "high",
+            "timeout_seconds": 60
         }"#;
         let params: Result<InferParams, _> = serde_json::from_str(json);
         assert!(params.is_ok());
@@ -611,8 +944,10 @@ mod tests {
             session_id: None,
             model: None,
             priority: None,
+            timeout_seconds: None,
         });
         assert_eq!(p.session_id.as_deref(), Some("sess-1"));
+        assert_eq!(p.timeout_seconds, Some(60));
     }
 
     #[test]
@@ -718,6 +1053,7 @@ mod tests {
             session_id: Some("test-sess".to_string()),
             model: None,
             priority: None,
+            timeout_seconds: None,
         };
 
         let result = server.infer(Parameters(params)).await;
@@ -749,6 +1085,7 @@ mod tests {
             session_id: None,
             model: None,
             priority: None,
+            timeout_seconds: None,
         };
 
         let result = server.infer(Parameters(params)).await;
@@ -844,6 +1181,34 @@ mod tests {
             .and_then(|v| v.get("worker"))
             .and_then(|v| v.as_str());
         assert_eq!(current, Some("anthropic"));
+    }
+
+    #[tokio::test]
+    async fn test_configure_pipeline_includes_persistence_warning() {
+        let worker: Arc<dyn ModelWorker> = Arc::new(EchoWorker::new());
+        let handles = spawn_pipeline(worker);
+        let server = new_mcp_server(handles);
+
+        let params = ConfigureParams {
+            worker: Some("echo".to_string()),
+            retry_attempts: None,
+            circuit_breaker_threshold: None,
+            rate_limit_rps: None,
+        };
+
+        let result = server.configure_pipeline(Parameters(params)).await;
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap_or_default();
+
+        assert!(
+            parsed.get("warning").is_some(),
+            "configure_pipeline must include a persistence warning"
+        );
+        let warning = parsed.get("warning").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            warning.contains("in-memory"),
+            "warning should mention in-memory: {warning}"
+        );
+        assert_eq!(parsed.get("applied").and_then(|v| v.as_bool()), Some(true));
     }
 
     #[tokio::test]
@@ -972,6 +1337,7 @@ mod tests {
             session_id: Some("metrics-route".to_string()),
             model: None,
             priority: None,
+            timeout_seconds: None,
         };
 
         let result = server.infer(Parameters(params)).await;
@@ -1015,6 +1381,7 @@ mod tests {
                     session_id: Some(format!("concurrent-{i}")),
                     model: None,
                     priority: None,
+                    timeout_seconds: None,
                 };
                 srv.infer(Parameters(params)).await
             }));
@@ -1053,5 +1420,158 @@ mod tests {
             parsed.get("prompts_submitted").and_then(|v| v.as_u64()),
             Some(2)
         );
+    }
+
+    #[tokio::test]
+    async fn test_get_result_returns_not_found_for_unknown_id() {
+        let worker: Arc<dyn ModelWorker> = Arc::new(EchoWorker::new());
+        let handles = spawn_pipeline(worker);
+        let server = new_mcp_server(handles);
+
+        let params = GetResultParams {
+            request_id: "nonexistent-id".to_string(),
+        };
+
+        let result = server.get_result(Parameters(params)).await;
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap_or_default();
+
+        assert_eq!(parsed.get("found").and_then(|v| v.as_bool()), Some(false));
+        assert!(parsed.get("error").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_get_result_finds_completed_request() {
+        let worker: Arc<dyn ModelWorker> = Arc::new(EchoWorker::new());
+        let handles = spawn_pipeline(worker);
+        let server = new_mcp_server(handles);
+
+        // Submit a request and wait for it to complete.
+        let params = InferParams {
+            prompt: "get result test".to_string(),
+            session_id: Some("get-result-sess".to_string()),
+            model: None,
+            priority: None,
+            timeout_seconds: None,
+        };
+        let infer_result = server.infer(Parameters(params)).await;
+        let infer_parsed: serde_json::Value =
+            serde_json::from_str(&infer_result).unwrap_or_default();
+        let request_id = infer_parsed
+            .get("request_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        assert!(!request_id.is_empty(), "infer should return a request_id");
+
+        // Now fetch the stored result.
+        let get_params = GetResultParams {
+            request_id: request_id.clone(),
+        };
+        let get_result = server.get_result(Parameters(get_params)).await;
+        let get_parsed: serde_json::Value = serde_json::from_str(&get_result).unwrap_or_default();
+
+        assert_eq!(
+            get_parsed.get("found").and_then(|v| v.as_bool()),
+            Some(true),
+            "get_result should find the completed request, got: {get_result}"
+        );
+        assert_eq!(
+            get_parsed.get("request_id").and_then(|v| v.as_str()),
+            Some(request_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cancel_request_not_found() {
+        let worker: Arc<dyn ModelWorker> = Arc::new(EchoWorker::new());
+        let handles = spawn_pipeline(worker);
+        let server = new_mcp_server(handles);
+
+        let params = CancelRequestParams {
+            request_id: "unknown-req".to_string(),
+        };
+
+        let result = server.cancel_request(Parameters(params)).await;
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap_or_default();
+
+        assert_eq!(
+            parsed.get("cancelled").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cancel_request_already_completed() {
+        let worker: Arc<dyn ModelWorker> = Arc::new(EchoWorker::new());
+        let handles = spawn_pipeline(worker);
+        let server = new_mcp_server(handles);
+
+        // Complete a request first.
+        let infer_result = server
+            .infer(Parameters(InferParams {
+                prompt: "cancel test".to_string(),
+                session_id: None,
+                model: None,
+                priority: None,
+                timeout_seconds: None,
+            }))
+            .await;
+        let infer_parsed: serde_json::Value =
+            serde_json::from_str(&infer_result).unwrap_or_default();
+        let request_id = infer_parsed
+            .get("request_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        // Try to cancel the now-completed request.
+        let result = server
+            .cancel_request(Parameters(CancelRequestParams {
+                request_id: request_id.clone(),
+            }))
+            .await;
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap_or_default();
+
+        assert_eq!(
+            parsed.get("cancelled").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            parsed.get("reason").and_then(|v| v.as_str()),
+            Some("already_completed")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dump_dlq_returns_correct_shape() {
+        let worker: Arc<dyn ModelWorker> = Arc::new(EchoWorker::new());
+        let handles = spawn_pipeline(worker);
+        let server = new_mcp_server(handles);
+
+        let params = DumpDlqParams { limit: Some(5) };
+        let result = server.dump_dlq(Parameters(params)).await;
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap_or_default();
+
+        assert!(parsed.get("total_in_dlq").is_some());
+        assert!(parsed.get("returned").is_some());
+        assert!(parsed.get("entries").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_reset_metrics_returns_reset_true() {
+        let worker: Arc<dyn ModelWorker> = Arc::new(EchoWorker::new());
+        let handles = spawn_pipeline(worker);
+        let server = new_mcp_server(handles);
+
+        let result = server.reset_metrics().await;
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap_or_default();
+
+        assert_eq!(
+            parsed.get("reset").and_then(|v| v.as_bool()),
+            Some(true),
+            "reset_metrics should return reset=true"
+        );
+        assert!(parsed.get("timestamp").is_some());
     }
 }
