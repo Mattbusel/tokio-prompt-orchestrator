@@ -406,13 +406,33 @@ pub type OtelLayer = tracing_opentelemetry::OpenTelemetryLayer<
 
 /// Initialise tracing with env-filter support. Call once at binary startup.
 ///
+/// ## Log format
+///
 /// If `RUST_LOG_FORMAT=json` is set the subscriber emits newline-delimited
 /// JSON suitable for log aggregation pipelines.  Otherwise the human-readable
 /// `fmt` pretty format is used for local development.
 ///
-/// An OpenTelemetry layer is added when `OTEL_EXPORTER_OTLP_ENDPOINT` or
-/// `JAEGER_ENDPOINT` is present in the environment; otherwise the OTel layer
-/// is omitted so the binary runs without a collector.
+/// ## OpenTelemetry OTLP export
+///
+/// If the environment variable `OTEL_EXPORTER_OTLP_ENDPOINT` (or the legacy
+/// `JAEGER_ENDPOINT`) is set to a valid OTLP collector URL (e.g.
+/// `http://localhost:4318`), spans are exported via OTLP HTTP to that endpoint
+/// using a batch exporter on the Tokio runtime.
+///
+/// If neither variable is set (the common case in local development), the OTel
+/// layer is **silently omitted** — no error is printed and the binary starts
+/// normally.  All other tracing output (stdout / log files) is unaffected.
+///
+/// A startup `info!` log is emitted either way so operators can confirm the
+/// observability configuration at a glance:
+///
+/// - `"OpenTelemetry OTLP export enabled, sending to <endpoint>"`
+/// - `"OpenTelemetry OTLP disabled (set OTEL_EXPORTER_OTLP_ENDPOINT to enable)"`
+///
+/// ## Calling requirement
+///
+/// This function **must** be called after the Tokio runtime has started because
+/// the OTLP batch exporter uses `rt-tokio` internally.
 pub fn init_tracing() {
     use tracing_subscriber::{fmt, layer::SubscriberExt, EnvFilter, Layer, Registry};
 
@@ -464,9 +484,25 @@ pub fn try_build_otel_layer() -> Option<
     use opentelemetry::global;
     use opentelemetry_otlp::WithExportConfig;
 
-    let endpoint = std::env::var("JAEGER_ENDPOINT")
-        .or_else(|_| std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT"))
-        .ok()?;
+    let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .or_else(|_| std::env::var("JAEGER_ENDPOINT"))
+        .ok();
+
+    let endpoint = match endpoint {
+        Some(ep) => {
+            tracing::info!(
+                endpoint = ep.as_str(),
+                "OpenTelemetry OTLP export enabled, sending to {ep}"
+            );
+            ep
+        }
+        None => {
+            tracing::info!(
+                "OpenTelemetry OTLP disabled (set OTEL_EXPORTER_OTLP_ENDPOINT to enable)"
+            );
+            return None;
+        }
+    };
 
     let exporter = match opentelemetry_otlp::SpanExporter::builder()
         .with_http()

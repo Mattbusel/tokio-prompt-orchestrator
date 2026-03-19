@@ -733,6 +733,7 @@ async fn inference_stage(
                     "Inference failed"
                 );
                 metrics::inc_error("inference", "inference_failure");
+                metrics::inc_worker_error("unknown");
                 dlq.push(DroppedRequest {
                     request_id: request_id.clone(),
                     session_id: session_id.clone(),
@@ -918,6 +919,7 @@ async fn inference_stage_pool_worker(
                     "Inference pool worker: inference failed"
                 );
                 metrics::inc_error("inference", "inference_failure");
+                metrics::inc_worker_error("unknown");
                 dlq.push(DroppedRequest {
                     request_id: request_id.clone(),
                     session_id: session_id.clone(),
@@ -1383,6 +1385,7 @@ async fn inference_stage_with_intelligence(
                     "Inference failed"
                 );
                 metrics::inc_error("inference", "inference_failure");
+                metrics::inc_worker_error(&worker_name);
             }
         }
     }

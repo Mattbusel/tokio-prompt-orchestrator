@@ -29,6 +29,7 @@ use governor::{
 #[cfg(feature = "rate-limiting")]
 use std::num::NonZeroU32;
 
+use crate::metrics;
 use dashmap::DashMap;
 use std::sync::Arc;
 use tracing::{debug, warn};
@@ -207,10 +208,13 @@ impl SimpleRateLimiter {
                 limit = self.max_requests,
                 "rate limit exceeded"
             );
+            metrics::set_rate_limiter_tokens(session_id, 0.0);
             return false;
         }
 
         entry.count += 1;
+        let remaining = self.max_requests.saturating_sub(entry.count) as f64;
+        metrics::set_rate_limiter_tokens(session_id, remaining);
         debug!(
             session_id = session_id,
             count = entry.count,
