@@ -222,6 +222,11 @@ pub struct AssembleStageConfig {
     pub channel_capacity: usize,
 }
 
+/// Default number of concurrent inference workers (1 = backward-compatible single worker).
+fn default_inference_workers() -> usize {
+    1
+}
+
 /// Inference stage configuration.
 ///
 /// Specifies the worker backend, model, and generation parameters.
@@ -243,6 +248,11 @@ pub struct InferenceStageConfig {
     pub temperature: Option<f32>,
     /// Inference timeout in milliseconds. `None` uses no explicit timeout.
     pub timeout_ms: Option<u64>,
+    /// Number of concurrent inference worker tasks reading from the same
+    /// input channel.  Default 1 (backward-compatible).  Increase to add
+    /// parallelism for high-throughput deployments.
+    #[serde(default = "default_inference_workers")]
+    pub inference_workers: usize,
 }
 
 /// Supported model worker backends.

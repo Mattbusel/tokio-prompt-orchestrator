@@ -30,7 +30,7 @@
 use std::{
     collections::VecDeque,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -311,6 +311,8 @@ struct BusInner {
     publish_errors: AtomicU64,
     /// External pressure signal injected from HelixRouter (stored as pressure*1000 as u64).
     external_pressure_milli: AtomicU64,
+    /// Set to `true` by [`TelemetryBus::shutdown`] to stop the sampling loop.
+    shutdown: AtomicBool,
 }
 
 impl std::fmt::Debug for BusInner {
@@ -368,6 +370,7 @@ impl TelemetryBus {
                 started_at: Instant::now(),
                 publish_errors: AtomicU64::new(0),
                 external_pressure_milli: AtomicU64::new(0),
+                shutdown: AtomicBool::new(false),
             }),
         }
     }
@@ -401,6 +404,9 @@ impl TelemetryBus {
 
             loop {
                 interval.tick().await;
+                if inner.shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
                 let snap = Self::collect(&inner).await;
                 debug!(
                     elapsed_secs = snap.elapsed_secs,
@@ -424,6 +430,21 @@ impl TelemetryBus {
                 }
             }
         });
+    }
+
+    /// Stop the telemetry bus.
+    ///
+    /// Sets the shutdown flag so the background sampling loop exits on its
+    /// next tick, and clears all rolling-window state.  Subsequent calls to
+    /// [`tick_now`](Self::tick_now) still work; only the autonomous loop
+    /// stops.
+    pub async fn shutdown(&self) {
+        self.inner.shutdown.store(true, Ordering::Relaxed);
+        // Clear all rolling windows so no stale snapshots are returned.
+        let mut ws = self.inner.windows.lock().await;
+        for w in ws.iter_mut() {
+            w.snapshots.clear();
+        }
     }
 
     /// Force an immediate snapshot collection and broadcast (useful in tests).
@@ -1011,5 +1032,19 @@ mod tests {
             "expected 0.5, got {}",
             snap.pressure
         );
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_does_not_hang() {
+        let bus = make_bus();
+        bus.start();
+        // Push some snapshots so there is rolling-window state.
+        bus.tick_now().await;
+        // shutdown() must return promptly.
+        tokio::time::timeout(std::time::Duration::from_secs(5), bus.shutdown())
+            .await
+            .expect("shutdown() must complete within 5 s");
+        // After shutdown, rolling windows are cleared.
+        assert!(bus.window_1m().await.is_empty(), "windows should be cleared after shutdown");
     }
 }

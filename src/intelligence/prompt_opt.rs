@@ -16,7 +16,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 #[derive(Debug, Error)]
 pub enum PromptOptimizerError {
@@ -267,7 +267,10 @@ impl PromptOptimizer {
                         );
                         self.record_transform(strategy.clone(), orig, sys.len());
                     } else {
-                        debug!("ExampleInjection: no examples in store, skipping");
+                        warn!(
+                            "prompt_opt: ExampleInjection enabled but no examples in store \
+                             (few-shot retrieval not yet implemented) — returning input unchanged"
+                        );
                     }
                 }
             }

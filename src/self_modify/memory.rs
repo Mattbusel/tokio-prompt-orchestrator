@@ -529,6 +529,22 @@ impl AgentMemory {
             })
             .unwrap_or_default()
     }
+
+    /// Flush any pending state and clear all in-memory records.
+    ///
+    /// After this call the memory store is empty.  Any persistence file is
+    /// left on disk (it will be overwritten on the next
+    /// [`insert_modification`](Self::insert_modification) call).
+    pub fn shutdown(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.modifications.clear();
+            inner.modification_ids.clear();
+            inner.patterns.clear();
+            inner.dependency_graph.clear();
+            inner.baselines.clear();
+            inner.dead_ends.clear();
+        }
+    }
 }
 
 /// Counts of records in each memory category.
@@ -1458,5 +1474,25 @@ mod redis_tests {
         assert_eq!(mods[0].id, "pre-existing");
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_shutdown_clears_state_and_does_not_hang() {
+        let mem = AgentMemory::new(100);
+        mem.insert_modification(ModificationRecord::new("id-1", "desc", vec![])).unwrap();
+        mem.record_pattern(CodePattern {
+            name: "pat".into(),
+            module: "m".into(),
+            description: "d".into(),
+            verdict: PatternVerdict::Success,
+            observation_count: 1,
+            last_seen_secs: 0,
+        }).unwrap();
+        assert_eq!(mem.modifications().len(), 1);
+        mem.shutdown();
+        // All state should be cleared.
+        let summary = mem.summary();
+        assert_eq!(summary.modification_count, 0);
+        assert_eq!(summary.pattern_count, 0);
     }
 }
