@@ -372,7 +372,7 @@ mod tests {
     #[test]
     fn test_validate_valid_config_passes() {
         let config = valid_config();
-        assert!(validate(&config).is_ok());
+        assert!(validate(&config).is_ok(), "a fully valid config must pass validation");
     }
 
     // ── Retry validation ────────────────────────────────────────────
@@ -385,7 +385,7 @@ mod tests {
         let errors = validate(&config).unwrap_err();
         assert!(errors.iter().any(|e| {
             matches!(e, ConfigError::InvalidField { field, .. } if field == "resilience.retry_base_ms")
-        }));
+        }), "expected InvalidField error for resilience.retry_base_ms when base > max");
     }
 
     #[test]
@@ -393,7 +393,7 @@ mod tests {
         let mut config = valid_config();
         config.resilience.retry_base_ms = 5000;
         config.resilience.retry_max_ms = 5000;
-        assert!(validate(&config).is_ok());
+        assert!(validate(&config).is_ok(), "retry_base_ms == retry_max_ms must be valid (equal is allowed)");
     }
 
     #[test]
@@ -403,7 +403,7 @@ mod tests {
         let errors = validate(&config).unwrap_err();
         assert!(errors.iter().any(|e| {
             matches!(e, ConfigError::InvalidField { field, .. } if field == "resilience.retry_attempts")
-        }));
+        }), "expected InvalidField error for resilience.retry_attempts when set to 0");
     }
 
     // ── Circuit breaker validation ──────────────────────────────────
@@ -416,7 +416,7 @@ mod tests {
         assert!(errors.iter().any(|e| {
             matches!(e, ConfigError::InvalidField { field, .. }
                 if field == "resilience.circuit_breaker_success_rate")
-        }));
+        }), "expected InvalidField error for circuit_breaker_success_rate > 1.0");
     }
 
     #[test]
@@ -427,21 +427,21 @@ mod tests {
         assert!(errors.iter().any(|e| {
             matches!(e, ConfigError::InvalidField { field, .. }
                 if field == "resilience.circuit_breaker_success_rate")
-        }));
+        }), "expected InvalidField error for circuit_breaker_success_rate < 0.0");
     }
 
     #[test]
     fn test_validate_cb_success_rate_zero_passes() {
         let mut config = valid_config();
         config.resilience.circuit_breaker_success_rate = 0.0;
-        assert!(validate(&config).is_ok());
+        assert!(validate(&config).is_ok(), "circuit_breaker_success_rate = 0.0 is at the lower bound and must be valid");
     }
 
     #[test]
     fn test_validate_cb_success_rate_one_passes() {
         let mut config = valid_config();
         config.resilience.circuit_breaker_success_rate = 1.0;
-        assert!(validate(&config).is_ok());
+        assert!(validate(&config).is_ok(), "circuit_breaker_success_rate = 1.0 is at the upper bound and must be valid");
     }
 
     #[test]
@@ -452,7 +452,7 @@ mod tests {
         assert!(errors.iter().any(|e| {
             matches!(e, ConfigError::InvalidField { field, .. }
                 if field == "resilience.circuit_breaker_threshold")
-        }));
+        }), "expected InvalidField error for circuit_breaker_threshold = 0");
     }
 
     #[test]
@@ -463,7 +463,7 @@ mod tests {
         assert!(errors.iter().any(|e| {
             matches!(e, ConfigError::InvalidField { field, .. }
                 if field == "resilience.circuit_breaker_timeout_s")
-        }));
+        }), "expected InvalidField error for circuit_breaker_timeout_s = 0");
     }
 
     // ── Temperature validation ──────────────────────────────────────
@@ -476,7 +476,7 @@ mod tests {
         assert!(errors.iter().any(|e| {
             matches!(e, ConfigError::InvalidField { field, .. }
                 if field == "stages.inference.temperature")
-        }));
+        }), "expected InvalidField error for temperature = -0.1 (below 0.0 lower bound)");
     }
 
     #[test]
@@ -487,28 +487,28 @@ mod tests {
         assert!(errors.iter().any(|e| {
             matches!(e, ConfigError::InvalidField { field, .. }
                 if field == "stages.inference.temperature")
-        }));
+        }), "expected InvalidField error for temperature = 2.1 (above 2.0 upper bound)");
     }
 
     #[test]
     fn test_validate_temperature_zero_passes() {
         let mut config = valid_config();
         config.stages.inference.temperature = Some(0.0);
-        assert!(validate(&config).is_ok());
+        assert!(validate(&config).is_ok(), "temperature = 0.0 is at the lower bound and must be valid");
     }
 
     #[test]
     fn test_validate_temperature_two_passes() {
         let mut config = valid_config();
         config.stages.inference.temperature = Some(2.0);
-        assert!(validate(&config).is_ok());
+        assert!(validate(&config).is_ok(), "temperature = 2.0 is at the upper bound and must be valid");
     }
 
     #[test]
     fn test_validate_temperature_none_passes() {
         let mut config = valid_config();
         config.stages.inference.temperature = None;
-        assert!(validate(&config).is_ok());
+        assert!(validate(&config).is_ok(), "temperature = None (omitted) must be valid — it uses the worker default");
     }
 
     // ── Name/version validation ─────────────────────────────────────
@@ -521,7 +521,7 @@ mod tests {
         assert!(errors.iter().any(|e| {
             matches!(e, ConfigError::InvalidField { field, .. }
                 if field == "stages.inference.model")
-        }));
+        }), "expected InvalidField error for stages.inference.model when set to whitespace-only");
     }
 
     #[test]
@@ -532,7 +532,7 @@ mod tests {
         assert!(errors.iter().any(|e| {
             matches!(e, ConfigError::InvalidField { field, .. }
                 if field == "pipeline.name")
-        }));
+        }), "expected InvalidField error for pipeline.name when empty");
     }
 
     #[test]
@@ -543,7 +543,7 @@ mod tests {
         assert!(errors.iter().any(|e| {
             matches!(e, ConfigError::InvalidField { field, .. }
                 if field == "pipeline.version")
-        }));
+        }), "expected InvalidField error for pipeline.version when whitespace-only");
     }
 
     // ── RAG constraints ─────────────────────────────────────────────
@@ -557,7 +557,7 @@ mod tests {
         assert!(errors.iter().any(|e| {
             matches!(e, ConfigError::InvalidField { field, .. }
                 if field == "stages.rag.timeout_ms")
-        }));
+        }), "expected InvalidField error for stages.rag.timeout_ms = 0 when RAG is enabled");
     }
 
     #[test]
@@ -565,7 +565,7 @@ mod tests {
         let mut config = valid_config();
         config.stages.rag.enabled = false;
         config.stages.rag.timeout_ms = 0;
-        assert!(validate(&config).is_ok());
+        assert!(validate(&config).is_ok(), "stages.rag.timeout_ms = 0 must be valid when RAG is disabled");
     }
 
     #[test]
@@ -577,7 +577,7 @@ mod tests {
         assert!(errors.iter().any(|e| {
             matches!(e, ConfigError::InvalidField { field, .. }
                 if field == "stages.rag.max_context_tokens")
-        }));
+        }), "expected InvalidField error for stages.rag.max_context_tokens = 0 when RAG is enabled");
     }
 
     // ── Channel capacity ────────────────────────────────────────────
@@ -590,7 +590,7 @@ mod tests {
         assert!(errors.iter().any(|e| {
             matches!(e, ConfigError::InvalidField { field, .. }
                 if field == "stages.rag.channel_capacity")
-        }));
+        }), "expected InvalidField error for stages.rag.channel_capacity = Some(0)");
     }
 
     #[test]
@@ -601,7 +601,7 @@ mod tests {
         assert!(errors.iter().any(|e| {
             matches!(e, ConfigError::InvalidField { field, .. }
                 if field == "stages.assemble.channel_capacity")
-        }));
+        }), "expected InvalidField error for stages.assemble.channel_capacity = 0");
     }
 
     #[test]
@@ -612,7 +612,7 @@ mod tests {
         assert!(errors.iter().any(|e| {
             matches!(e, ConfigError::InvalidField { field, .. }
                 if field == "stages.post_process.channel_capacity")
-        }));
+        }), "expected InvalidField error for stages.post_process.channel_capacity = 0");
     }
 
     #[test]
@@ -623,7 +623,7 @@ mod tests {
         assert!(errors.iter().any(|e| {
             matches!(e, ConfigError::InvalidField { field, .. }
                 if field == "stages.stream.channel_capacity")
-        }));
+        }), "expected InvalidField error for stages.stream.channel_capacity = 0");
     }
 
     // ── Dedup constraints ───────────────────────────────────────────
@@ -637,7 +637,7 @@ mod tests {
         assert!(errors.iter().any(|e| {
             matches!(e, ConfigError::InvalidField { field, .. }
                 if field == "deduplication.window_s")
-        }));
+        }), "expected InvalidField error for deduplication.window_s = 0 when dedup is enabled");
     }
 
     #[test]
@@ -645,7 +645,7 @@ mod tests {
         let mut config = valid_config();
         config.deduplication.enabled = false;
         config.deduplication.window_s = 0;
-        assert!(validate(&config).is_ok());
+        assert!(validate(&config).is_ok(), "deduplication.window_s = 0 must be valid when dedup is disabled");
     }
 
     #[test]
@@ -664,7 +664,7 @@ mod tests {
     fn test_validate_dedup_max_entries_at_limit_passes() {
         let mut config = valid_config();
         config.deduplication.max_entries = 1_000_000;
-        assert!(validate(&config).is_ok());
+        assert!(validate(&config).is_ok(), "deduplication.max_entries = 1_000_000 is at the limit and must be valid");
     }
 
     #[test]
@@ -676,7 +676,7 @@ mod tests {
         assert!(errors.iter().any(|e| {
             matches!(e, ConfigError::InvalidField { field, .. }
                 if field == "deduplication.max_entries")
-        }));
+        }), "expected InvalidField error for deduplication.max_entries = 0 when dedup is enabled");
     }
 
     // ── Metrics port ────────────────────────────────────────────────
@@ -689,14 +689,14 @@ mod tests {
         assert!(errors.iter().any(|e| {
             matches!(e, ConfigError::InvalidField { field, .. }
                 if field == "observability.metrics_port")
-        }));
+        }), "expected InvalidField error for observability.metrics_port = Some(0)");
     }
 
     #[test]
     fn test_validate_metrics_port_none_passes() {
         let mut config = valid_config();
         config.observability.metrics_port = None;
-        assert!(validate(&config).is_ok());
+        assert!(validate(&config).is_ok(), "observability.metrics_port = None (disabled) must be valid");
     }
 
     // ── Multiple errors collected ───────────────────────────────────
@@ -728,7 +728,7 @@ mod tests {
             source: toml_err,
         };
         let msg = err.to_string();
-        assert!(msg.contains("test.toml"));
+        assert!(msg.contains("test.toml"), "parse error display must include the file name");
     }
 
     #[test]
@@ -739,14 +739,14 @@ mod tests {
             reason: "must be \u{2264} retry_max_ms".into(),
         };
         let msg = err.to_string();
-        assert!(msg.contains("resilience.retry_base_ms"));
-        assert!(msg.contains("99999"));
+        assert!(msg.contains("resilience.retry_base_ms"), "InvalidField display must include the field path");
+        assert!(msg.contains("99999"), "InvalidField display must include the invalid value");
     }
 
     #[test]
     fn test_config_error_validation_display() {
         let err = ConfigError::Validation("multiple issues".into());
-        assert!(err.to_string().contains("multiple issues"));
+        assert!(err.to_string().contains("multiple issues"), "Validation error display must include the error message");
     }
 
     #[test]
@@ -756,6 +756,6 @@ mod tests {
             source: std::io::Error::new(std::io::ErrorKind::NotFound, "not found"),
         };
         let msg = err.to_string();
-        assert!(msg.contains("missing.toml"));
+        assert!(msg.contains("missing.toml"), "IO error display must include the file name");
     }
 }

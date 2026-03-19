@@ -184,8 +184,8 @@ mod tests {
     fn test_initial_returns_min_timeout() {
         let min = Duration::from_secs(10);
         let at = AdaptiveTimeout::new(min);
-        assert_eq!(at.current_timeout(), min);
-        assert_eq!(at.sample_count(), 0);
+        assert_eq!(at.current_timeout(), min, "initial timeout must equal the configured min_timeout floor");
+        assert_eq!(at.sample_count(), 0, "initial sample count must be 0");
     }
 
     #[test]
@@ -193,7 +193,7 @@ mod tests {
         let min = Duration::from_secs(10);
         let mut at = AdaptiveTimeout::new(min);
         at.record_duration(Duration::from_millis(50));
-        assert_eq!(at.current_timeout(), min);
+        assert_eq!(at.current_timeout(), min, "with only 1 sample the min_timeout floor must still be returned");
     }
 
     #[test]
@@ -253,7 +253,7 @@ mod tests {
         }
 
         // After overwrite, p95 * 2 should be tiny, so min_timeout wins.
-        assert_eq!(at.current_timeout(), min);
+        assert_eq!(at.current_timeout(), min, "after overwriting all large values with tiny ones, min_timeout floor must win");
     }
 
     #[test]
@@ -262,7 +262,7 @@ mod tests {
         for i in 0..200 {
             at.record_duration(Duration::from_millis(i as u64));
         }
-        assert_eq!(at.sample_count(), BUFFER_CAPACITY);
+        assert_eq!(at.sample_count(), BUFFER_CAPACITY, "sample count must saturate at BUFFER_CAPACITY even after 200 inserts");
     }
 
     #[test]
@@ -277,6 +277,6 @@ mod tests {
 
         // P95 of [1..100] ms = 95ms; timeout = max(1ms, 95ms * 2) = 190ms.
         let timeout = at.current_timeout();
-        assert_eq!(timeout, Duration::from_millis(190));
+        assert_eq!(timeout, Duration::from_millis(190), "P95 of 1..100ms is 95ms; timeout should be 95ms * 2 = 190ms");
     }
 }

@@ -653,6 +653,11 @@ mod redis_memory {
             }
         }
 
+        /// Retrieve a value from Redis by key.
+        ///
+        /// Symmetric counterpart to `redis_set`; used by diagnostic tooling and
+        /// future self-improvement read-back paths.  Not yet called from
+        /// production logic but kept to maintain a complete Redis read/write pair.
         #[allow(dead_code)]
         async fn redis_get(&self, key: &str) -> Option<String> {
             if let Some(mut conn) = self.redis.clone() {
