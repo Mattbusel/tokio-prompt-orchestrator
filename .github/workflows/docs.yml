@@ -28,13 +28,14 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-docs-
 
       - name: Build rustdoc
-        run: cargo doc --no-deps --all-features
+        run: cargo doc --no-deps
         env:
           RUSTDOCFLAGS: "--cfg docsrs"
 
       # GitHub Pages expects the site in a directory; add a redirect at the root.
       - name: Add redirect index
         run: |
+          mkdir -p target/doc
           cat > target/doc/index.html << 'HTML'
           <!DOCTYPE html>
           <html>
