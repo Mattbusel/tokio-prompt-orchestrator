@@ -242,6 +242,10 @@ pub struct Deduplicator {
     shutdown: Arc<AtomicBool>,
     /// Handle to the background cleanup task, used by [`shutdown`](Self::shutdown).
     cleanup_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// Optional embedding store for semantic (cosine-similarity) deduplication.
+    embeddings: Arc<DashMap<String, Vec<f32>>>,
+    /// Minimum cosine similarity score to treat a new prompt as a duplicate.
+    similarity_threshold: f32,
 }
 
 impl Deduplicator {
@@ -273,6 +277,8 @@ impl Deduplicator {
             cache_duration,
             shutdown: shutdown.clone(),
             cleanup_handle: cleanup_handle.clone(),
+            embeddings: Arc::new(DashMap::new()),
+            similarity_threshold: 1.0, // disabled by default: exact match only
         };
 
         // Start cleanup task; checks `shutdown` flag each iteration so it
@@ -292,6 +298,15 @@ impl Deduplicator {
         *cleanup_handle.try_lock().expect("cleanup_handle uncontested at construction") = Some(handle);
 
         dedup
+    }
+
+    /// Signal the background cleanup task to stop without waiting for it.
+    ///
+    /// Sets the shutdown `AtomicBool` to `true`.  The cleanup loop exits on its
+    /// next wake-up.  Call [`shutdown`](Self::shutdown) if you need to await
+    /// completion.
+    pub fn signal_shutdown(&self) {
+        self.shutdown.store(true, Ordering::Relaxed);
     }
 
     /// Gracefully shut down the background cleanup task.
@@ -542,6 +557,76 @@ impl Deduplicator {
         self.requests.clear();
         debug!("deduplication cache cleared");
     }
+
+    /// Enable semantic (embedding-based) deduplication.
+    ///
+    /// When enabled, [`check_and_register_with_embedding`](Self::check_and_register_with_embedding)
+    /// compares new embeddings against all stored embeddings using cosine similarity.
+    /// Any stored embedding with similarity ≥ `threshold` is treated as a cache hit.
+    ///
+    /// # Arguments
+    ///
+    /// * `threshold` — Cosine similarity score in `[0.0, 1.0]`.  `1.0` requires
+    ///   exact vector match (default); `0.95` catches near-paraphrases.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use tokio_prompt_orchestrator::enhanced::Deduplicator;
+    ///
+    /// let dedup = Deduplicator::new(Duration::from_secs(300))
+    ///     .with_semantic(0.95);
+    /// ```
+    pub fn with_semantic(mut self, threshold: f32) -> Self {
+        self.similarity_threshold = threshold;
+        self
+    }
+
+    /// Like [`check_and_register`](Self::check_and_register) but also performs
+    /// a semantic similarity scan against previously registered embeddings.
+    ///
+    /// If `embedding` is `Some` and semantic deduplication is enabled (threshold < 1.0),
+    /// all stored embeddings are scanned.  The first match whose cosine similarity
+    /// meets the threshold is returned as [`DeduplicationResult::Cached`] with an
+    /// empty string (the caller should use `wait_for_result` with the matched key
+    /// to obtain the actual cached value).
+    ///
+    /// Falls back to exact-key lookup when `embedding` is `None` or the threshold
+    /// equals `1.0`.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` — Exact cache key for this request.
+    /// * `embedding` — Optional dense vector embedding of the prompt.
+    pub async fn check_and_register_with_embedding(
+        &self,
+        key: &str,
+        embedding: Option<Vec<f32>>,
+    ) -> DeduplicationResult {
+        // Semantic scan first (only when an embedding is provided and threshold < 1.0)
+        if let Some(ref emb) = embedding {
+            if self.similarity_threshold < 1.0 {
+                for entry in self.embeddings.iter() {
+                    let sim = cosine_similarity(emb, entry.value());
+                    if sim >= self.similarity_threshold {
+                        debug!(
+                            key = key,
+                            matched_key = entry.key().as_str(),
+                            similarity = sim,
+                            "semantic duplicate detected"
+                        );
+                        crate::metrics::inc_dedup_hit();
+                        return DeduplicationResult::Cached(String::new());
+                    }
+                }
+                // No semantic match — store embedding for future lookups.
+                self.embeddings.insert(key.to_string(), emb.clone());
+            }
+        }
+
+        self.check_and_register(key).await
+    }
 }
 
 impl Drop for Deduplicator {
@@ -551,6 +636,25 @@ impl Drop for Deduplicator {
         if Arc::strong_count(&self.shutdown) == 1 {
             self.shutdown.store(true, Ordering::Relaxed);
         }
+    }
+}
+
+/// Compute the cosine similarity between two dense vectors.
+///
+/// Returns a value in `[-1.0, 1.0]`.  Returns `0.0` if either vector has zero norm
+/// so that zero-length embeddings never falsely match.
+///
+/// # Panics
+///
+/// Does not panic.  Mismatched lengths are handled by iterating the shorter vector.
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 {
+        0.0
+    } else {
+        dot / (norm_a * norm_b)
     }
 }
 
