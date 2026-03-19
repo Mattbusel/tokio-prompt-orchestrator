@@ -24,6 +24,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [dependencies]
 # Core
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-std", "signal"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "registry"] }
 tracing-futures = "0.2"
@@ -70,6 +71,9 @@ redis = { version = "0.24", optional = true, features = ["tokio-comp", "connecti
 dashmap = "5.5"
 governor = { version = "0.6", optional = true }
 nonzero_ext = { version = "0.3", optional = true }
+
+# Optional core affinity pinning
+core_affinity = { version = "0.8", optional = true }
 
 # Self-tuning dependencies
 parking_lot = "0.12"
@@ -158,6 +162,9 @@ distributed = ["redis", "async-nats"]
 # schema: JSON Schema export for PipelineConfig.
 # Used by the gen_schema binary to produce pipeline.schema.json for IDE validation.
 schema = ["schemars"]
+
+# core-pinning: Pin pipeline stage tasks to specific CPU cores.
+core-pinning = ["core_affinity"]
 
 [dev-dependencies]
 tokio-test = "0.4"

@@ -1,5 +1,4 @@
 #![allow(
-    missing_docs,
     clippy::too_many_arguments,
     clippy::needless_range_loop,
     clippy::redundant_closure,
@@ -18,18 +17,28 @@ use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
+/// Errors returned by [`PromptOptimizer`] transformation methods.
 #[derive(Debug, Error)]
 pub enum PromptOptimizerError {
+    /// A specific transformation step failed; the inner string describes the cause.
     #[error("transform failed: {0}")]
     TransformFailed(String),
+    /// The history store could not persist a transform record.
     #[error("failed to store transform record")]
     StoreFailed,
 }
 
+/// Learned prompt transformation strategies.
+///
+/// Each variant describes a distinct rewrite that the [`PromptOptimizer`] can
+/// apply to reduce token count or improve response quality.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum OptimizationStrategy {
+    /// Truncate or compress the system prompt to stay under a token budget.
     SystemPromptCompression,
+    /// Reorder instructions to improve model instruction-following.
     InstructionReordering,
+    /// Remove semantically redundant sentences from the user prompt.
     RedundancyRemoval,
     /// Placeholder: returns input unchanged. TODO: implement few-shot example retrieval.
     ///
@@ -40,19 +49,29 @@ pub enum OptimizationStrategy {
     ExampleInjection,
 }
 
+/// A record of a single prompt transformation, used to track effectiveness.
 #[derive(Debug, Clone)]
 pub struct TransformRecord {
+    /// Which strategy produced this record.
     pub strategy: OptimizationStrategy,
+    /// Byte length of the prompt before transformation.
     pub original_len: usize,
+    /// Byte length of the prompt after transformation.
     pub optimized_len: usize,
+    /// Estimated quality change (positive = better, negative = worse).
     pub quality_delta: f64,
+    /// Number of times this strategy has been applied in this session.
     pub applied_count: u64,
 }
 
+/// Configuration for the [`PromptOptimizer`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptOptimizerConfig {
+    /// Maximum byte length of the system prompt before compression is applied.
     pub max_system_prompt_len: usize,
+    /// Similarity score above which a sentence is considered redundant (0.0–1.0).
     pub redundancy_threshold: f64,
+    /// Which strategies are active for this optimizer instance.
     pub enabled_strategies: Vec<OptimizationStrategy>,
 }
 impl Default for PromptOptimizerConfig {

@@ -17,6 +17,57 @@
 //! ### WebSocket
 //! - `WS /api/v1/ws`  -  Real-time streaming inference
 
+/// Rejects oversized request bodies with 413.
+///
+/// Handles both Content-Length header and chunked bodies.
+///
+/// # Panics
+///
+/// This function never panics.
+#[cfg(feature = "web-api")]
+async fn body_size_middleware(
+    State(state): State<Arc<AppState>>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    let max_size = state.config.max_request_size;
+    // Fast path: Content-Length header present
+    if let Some(length) = req
+        .headers()
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<usize>().ok())
+    {
+        if length > max_size {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(serde_json::json!({"error": "Request body too large"})),
+            )
+                .into_response();
+        }
+    }
+    // Slow path: buffer entire body up to max_size+1 bytes
+    let (parts, body) = req.into_parts();
+    match axum::body::to_bytes(body, max_size + 1).await {
+        Ok(bytes) if bytes.len() > max_size => {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(serde_json::json!({"error": "Request body too large"})),
+            )
+                .into_response();
+        }
+        Ok(bytes) => {
+            let req = Request::from_parts(parts, Body::from(bytes));
+            next.run(req).await
+        }
+        Err(_) => (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({"error": "Request body too large"})),
+        )
+            .into_response(),
+    }
+}
+
 #[cfg(feature = "web-api")]
 use axum::{
     body::Body,
@@ -232,6 +283,10 @@ struct AppState {
     config: ServerConfig,
     /// Optional API key.  `None` means authentication is disabled (startup warning emitted).
     api_key: Option<String>,
+    /// Optional circuit breaker reference for health status.
+    circuit_breaker: Option<crate::enhanced::CircuitBreaker>,
+    /// Optional metrics scrape API key (separate from the main API key).
+    metrics_key: Option<String>,
 }
 
 // ============================================================================
@@ -304,12 +359,18 @@ pub async fn start_server(
     };
 
     let tracker = RequestTracker::new();
+    let metrics_key = match std::env::var("METRICS_API_KEY") {
+        Ok(k) if !k.is_empty() => Some(k),
+        _ => None,
+    };
 
     let state = Arc::new(AppState {
         pipeline_tx,
         tracker,
         config: config.clone(),
         api_key,
+        circuit_breaker: None,
+        metrics_key,
     });
 
     // Collector task: receives pipeline output and writes results into the tracker.
@@ -338,11 +399,15 @@ pub async fn start_server(
         .route("/metrics", get(metrics_handler))
         .layer(middleware::from_fn_with_state(
             state.clone(),
+            metrics_auth_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
             auth_middleware,
         ))
         .layer(middleware::from_fn(request_id_middleware))
         .layer(middleware::from_fn_with_state(
-            config.max_request_size,
+            state.clone(),
             body_size_middleware,
         ))
         .layer(cors)
@@ -386,35 +451,6 @@ async fn request_id_middleware(req: Request<Body>, next: Next) -> Response {
     response
 }
 
-/// Rejects requests whose `Content-Length` exceeds `max_size` with 413.
-///
-/// # Panics
-///
-/// This function never panics.
-#[cfg(feature = "web-api")]
-async fn body_size_middleware(
-    State(max_size): State<usize>,
-    req: Request<Body>,
-    next: Next,
-) -> Response {
-    if let Some(content_length) = req
-        .headers()
-        .get(header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<usize>().ok())
-    {
-        if content_length > max_size {
-            return (
-                StatusCode::PAYLOAD_TOO_LARGE,
-                Json(serde_json::json!({"error": "Request body too large"})),
-            )
-                .into_response();
-        }
-    }
-
-    next.run(req).await
-}
-
 /// Bearer token authentication middleware.
 ///
 /// Protects all inference endpoints (`/infer`, `/stream`, `/ws`, `/result`,
@@ -435,7 +471,7 @@ async fn auth_middleware(
 ) -> Response {
     // Public endpoints that do not require authentication.
     let req_path = req.uri().path().to_owned();
-    let is_public = req_path == "/health" || req_path == "/metrics" || req_path == "/api/v1/schema";
+    let is_public = req_path == "/health" || req_path == "/api/v1/schema";
     if is_public {
         return next.run(req).await;
     }
@@ -456,6 +492,59 @@ async fn auth_middleware(
             // timing side-channels.  Tokens of different lengths are compared
             // as equal-length byte slices (zero-padded to the longer length)
             // so the branch on length mismatch is eliminated.
+            let token_bytes = token.as_bytes();
+            let expected_bytes = expected_key.as_bytes();
+            let max_len = token_bytes.len().max(expected_bytes.len());
+            let mut t = vec![0u8; max_len];
+            let mut e = vec![0u8; max_len];
+            t[..token_bytes.len()].copy_from_slice(token_bytes);
+            e[..expected_bytes.len()].copy_from_slice(expected_bytes);
+            t.as_slice().ct_eq(e.as_slice()).into()
+        })
+        .unwrap_or(false);
+
+    if token_valid {
+        next.run(req).await
+    } else {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "unauthorized"})),
+        )
+            .into_response()
+    }
+}
+
+/// Bearer token authentication middleware for the `/metrics` scrape endpoint.
+///
+/// Checks the `METRICS_API_KEY` environment variable (loaded at startup into
+/// `state.metrics_key`).  When the key is set, requests missing a matching
+/// `Authorization: Bearer <key>` header are rejected with 401.  When the key
+/// is not set, the endpoint is publicly accessible.
+///
+/// # Panics
+///
+/// This function never panics.
+#[cfg(feature = "web-api")]
+async fn metrics_auth_middleware(
+    State(state): State<Arc<AppState>>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    // Only applies to the /metrics path.
+    if req.uri().path() != "/metrics" {
+        return next.run(req).await;
+    }
+
+    let Some(ref expected_key) = state.metrics_key else {
+        return next.run(req).await;
+    };
+
+    let token_valid = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|token| {
             let token_bytes = token.as_bytes();
             let expected_bytes = expected_key.as_bytes();
             let max_len = token_bytes.len().max(expected_bytes.len());
@@ -1158,11 +1247,21 @@ async fn pipeline_status_handler(State(state): State<Arc<AppState>>) -> Json<ser
 ///
 /// This function never panics.
 #[cfg(feature = "web-api")]
-async fn health_handler() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "status": "healthy",
-        "version": env!("CARGO_PKG_VERSION"),
-    }))
+async fn health_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let cb_open = if let Some(ref cb) = state.circuit_breaker {
+        cb.is_open_sync()
+    } else {
+        false
+    };
+    if cb_open {
+        (StatusCode::SERVICE_UNAVAILABLE,
+         Json(serde_json::json!({"status":"degraded","reason":"circuit_breaker_open","version":env!("CARGO_PKG_VERSION")})))
+            .into_response()
+    } else {
+        (StatusCode::OK,
+         Json(serde_json::json!({"status":"healthy","version":env!("CARGO_PKG_VERSION")})))
+            .into_response()
+    }
 }
 
 /// `GET /metrics`  -  Prometheus metrics endpoint.

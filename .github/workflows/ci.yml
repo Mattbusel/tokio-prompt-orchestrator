@@ -1,5 +1,6 @@
 name: CI
 on: [push, pull_request]
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -8,17 +9,43 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo check
 
-  bench-regression:
+  test-coverage:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      # Run benchmarks and save output; compare against the committed baseline.
-      # The baseline file is .bench_baseline.txt in the repo root.
-      # To update the baseline after intentional performance improvements, run:
-      #   ./scripts/check_bench_regression.sh --save-baseline
-      # and commit the updated .bench_baseline.txt.
-      - name: Run benchmarks and check for regressions
+        with:
+          components: llvm-tools-preview
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Run tests with coverage
+        run: cargo llvm-cov --lib --lcov --output-path lcov.info
+      - name: Per-module coverage report
+        run: cargo llvm-cov report --lib
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
+
+  bench:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run benchmarks
         run: |
-          chmod +x scripts/check_bench_regression.sh
-          ./scripts/check_bench_regression.sh
+          cargo bench --bench pipeline \
+            -- --output-format bencher | tee bench_output.txt
+      - name: Store / compare benchmark results
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: Pipeline Benchmarks
+          tool: cargo
+          output-file-path: bench_output.txt
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          alert-threshold: "120%"
+          comment-on-alert: true
+          fail-on-alert: true

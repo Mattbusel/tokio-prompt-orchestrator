@@ -321,3 +321,42 @@ log_format = "pretty"
         assert!(result.is_err());
     }
 }
+
+    #[tokio::test]
+    async fn hot_reload_concurrent_writes_no_invalid_config_broadcast() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().expect("test: create tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, VALID_TOML).expect("test: initial write");
+
+        let (_watcher, mut rx) = ConfigWatcher::new(path.clone()).expect("test: create watcher");
+
+        let cfg_a = VALID_TOML.replace("watcher-test", "config-a");
+        let cfg_b = VALID_TOML.replace("watcher-test", "config-b");
+        let cfg_a_bytes = cfg_a.as_bytes().to_vec();
+        let cfg_b_bytes = cfg_b.as_bytes().to_vec();
+
+        let path_a = path.clone();
+        let path_b = path.clone();
+        let h1 = tokio::spawn(async move {
+            for _ in 0..5 {
+                std::fs::write(&path_a, &cfg_a_bytes).ok();
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            }
+        });
+        let h2 = tokio::spawn(async move {
+            for _ in 0..5 {
+                std::fs::write(&path_b, &cfg_b_bytes).ok();
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            }
+        });
+        let _ = tokio::join!(h1, h2);
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let mut received = 0usize;
+        while let Ok(_cfg) = rx.try_recv() {
+            received += 1;
+        }
+        // At least one reload must have been observed
+        assert!(received > 0, "expected at least one hot-reload event");
+    }

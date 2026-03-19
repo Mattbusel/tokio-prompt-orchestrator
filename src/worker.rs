@@ -321,6 +321,11 @@ impl ModelWorker for OpenAiWorker {
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_else(|_| String::new());
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN
+            {
+                return Err(OrchestratorError::AuthFailed(format!("HTTP {status}")));
+            }
             return Err(OrchestratorError::Inference(format!(
                 "OpenAI API error {}: {}",
                 status, error_text
@@ -410,6 +415,11 @@ impl ModelWorker for OpenAiWorker {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN
+            {
+                return Err(OrchestratorError::AuthFailed(format!("HTTP {status}")));
+            }
             return Err(OrchestratorError::Inference(format!(
                 "OpenAI stream error {status}: {body}"
             )));
@@ -585,6 +595,11 @@ impl ModelWorker for AnthropicWorker {
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_else(|_| String::new());
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN
+            {
+                return Err(OrchestratorError::AuthFailed(format!("HTTP {status}")));
+            }
             return Err(OrchestratorError::Inference(format!(
                 "Anthropic API error {}: {}",
                 status, error_text
@@ -680,6 +695,11 @@ impl ModelWorker for AnthropicWorker {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN
+            {
+                return Err(OrchestratorError::AuthFailed(format!("HTTP {status}")));
+            }
             return Err(OrchestratorError::Inference(format!(
                 "Anthropic stream error {status}: {body}"
             )));
@@ -849,6 +869,11 @@ impl ModelWorker for LlamaCppWorker {
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_else(|_| String::new());
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN
+            {
+                return Err(OrchestratorError::AuthFailed(format!("HTTP {status}")));
+            }
             return Err(OrchestratorError::Inference(format!(
                 "llama.cpp error {}: {}",
                 status, error_text
@@ -993,6 +1018,11 @@ impl ModelWorker for VllmWorker {
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_else(|_| String::new());
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN
+            {
+                return Err(OrchestratorError::AuthFailed(format!("HTTP {status}")));
+            }
             return Err(OrchestratorError::Inference(format!(
                 "vLLM error {}: {}",
                 status, error_text
@@ -1052,6 +1082,16 @@ pub struct LoadBalancedWorker {
     rr_counter: std::sync::atomic::AtomicUsize,
     /// Per-worker in-flight request counts (strategy = LeastLoaded).
     in_flight: Vec<std::sync::atomic::AtomicUsize>,
+    /// Optional human-readable names for each worker, used in metrics labels.
+    names: Vec<String>,
+}
+
+/// RAII guard that decrements the in-flight counter when dropped.
+struct InFlightGuard<'a>(&'a std::sync::atomic::AtomicUsize);
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 impl LoadBalancedWorker {
@@ -1070,6 +1110,7 @@ impl LoadBalancedWorker {
             in_flight: (0..n)
                 .map(|_| std::sync::atomic::AtomicUsize::new(0))
                 .collect(),
+            names: Vec::new(),
         }
     }
 
@@ -1102,7 +1143,16 @@ impl LoadBalancedWorker {
             in_flight: (0..n)
                 .map(|_| std::sync::atomic::AtomicUsize::new(0))
                 .collect(),
+            names: Vec::new(),
         }
+    }
+
+    /// Attach human-readable names to each worker slot for metrics labels.
+    ///
+    /// If `names` is shorter than the pool, unnamed workers default to `"unknown"`.
+    pub fn with_names(mut self, names: Vec<String>) -> Self {
+        self.names = names;
+        self
     }
 
     /// Return the number of workers in the pool.
@@ -1139,9 +1189,17 @@ impl ModelWorker for LoadBalancedWorker {
     async fn infer(&self, prompt: &str) -> Result<Vec<String>, OrchestratorError> {
         let idx = self.pick();
         self.in_flight[idx].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let result = self.workers[idx].infer(prompt).await;
-        self.in_flight[idx].fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        result
+        let _guard = InFlightGuard(&self.in_flight[idx]);
+        let label = self
+            .names
+            .get(idx)
+            .map(String::as_str)
+            .unwrap_or("unknown");
+        crate::metrics::set_queue_depth(
+            label,
+            self.in_flight[idx].load(std::sync::atomic::Ordering::Relaxed) as i64,
+        );
+        self.workers[idx].infer(prompt).await
     }
 
     async fn infer_stream(&self, prompt: &str) -> Result<TokenStream, OrchestratorError> {

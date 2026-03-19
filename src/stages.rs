@@ -41,6 +41,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn, Span};
 
 /// Default timeout for a single inference call (seconds).
@@ -99,14 +100,22 @@ pub trait OutputSink: Send + Sync {
 
 /// Error type returned by [`OutputSink::emit`].
 ///
-/// Carries a human-readable message for logging; the pipeline never
-/// propagates these errors to callers.
+/// Use `Transient` for recoverable errors (the pipeline logs and continues).
+/// Use `Fatal` for unrecoverable errors (the pipeline stage stops).
 #[derive(Debug)]
-pub struct SinkError(pub String);
+pub enum SinkError {
+    /// Transient failure — the pipeline will log and continue.
+    Transient(String),
+    /// Fatal failure — the pipeline stage will stop.
+    Fatal(String),
+}
 
 impl std::fmt::Display for SinkError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        match self {
+            Self::Transient(msg) => write!(f, "transient sink error: {msg}"),
+            Self::Fatal(msg) => write!(f, "fatal sink error: {msg}"),
+        }
     }
 }
 
@@ -162,6 +171,25 @@ pub struct PipelineHandles {
     ///
     /// Callers can call `dlq.drain()` to inspect dropped requests for debugging or replay.
     pub dlq: Arc<DeadLetterQueue>,
+    /// Cancellation token used to signal graceful shutdown to all stage tasks.
+    cancellation_token: CancellationToken,
+}
+
+impl PipelineHandles {
+    /// Signal all pipeline stages to stop gracefully.
+    ///
+    /// In-flight requests will complete; no new requests will be accepted.
+    /// Await the `join_handles` after calling this to ensure clean shutdown.
+    pub fn shutdown(&self) {
+        self.cancellation_token.cancel();
+    }
+
+    /// Take ownership of the pipeline output receiver.
+    ///
+    /// Returns `Some` the first time; subsequent calls return `None`.
+    pub async fn take_output_rx(&self) -> Option<mpsc::Receiver<PostOutput>> {
+        self.output_rx.lock().await.take()
+    }
 }
 
 /// Spawn the complete 5-stage pipeline
@@ -198,6 +226,7 @@ pub fn spawn_pipeline(worker: Arc<dyn ModelWorker>) -> PipelineHandles {
 
     // Spawn each stage
     let rag = tokio::spawn(rag_stage(input_rx, rag_tx, Arc::clone(&dlq)));
+    let cancel = CancellationToken::new();
     let assemble = tokio::spawn(assemble_stage(rag_rx, assemble_tx, Arc::clone(&dlq)));
     let inference = tokio::spawn(inference_stage(
         assemble_rx,
@@ -220,6 +249,7 @@ pub fn spawn_pipeline(worker: Arc<dyn ModelWorker>) -> PipelineHandles {
         output_rx: tokio::sync::Mutex::new(Some(output_rx)),
         circuit_breaker,
         dlq,
+        cancellation_token: cancel,
     }
 }
 
@@ -232,6 +262,21 @@ pub fn spawn_pipeline(worker: Arc<dyn ModelWorker>) -> PipelineHandles {
 /// # Panics
 ///
 /// This function never panics.
+#[cfg(feature = "core-pinning")]
+fn spawn_on_core<F>(core_id: usize, f: F) -> tokio::task::JoinHandle<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(async move {
+        if let Some(cores) = core_affinity::get_core_ids() {
+            if let Some(core) = cores.get(core_id % cores.len()) {
+                core_affinity::set_for_current(*core);
+            }
+        }
+        f.await
+    })
+}
+
 fn validated_channel_size(value: usize, name: &str, default: usize) -> usize {
     if !(1..=100_000).contains(&value) {
         warn!(
@@ -305,6 +350,7 @@ pub fn spawn_pipeline_with_config(
     let rag = tokio::spawn(rag_stage(input_rx, rag_tx, Arc::clone(&dlq)));
     let assemble = tokio::spawn(assemble_stage(rag_rx, assemble_tx, Arc::clone(&dlq)));
 
+    let cancel2 = CancellationToken::new();
     // Multi-worker pool: spawn N inference tasks that all read from the same
     // shared receiver.  When inference_workers == 1 (default) the behaviour is
     // identical to a single direct tokio::spawn, preserving backward compat.
@@ -345,8 +391,14 @@ pub fn spawn_pipeline_with_config(
         })
     };
 
+    #[cfg(not(feature = "core-pinning"))]
     let post = tokio::spawn(post_stage(inference_rx, post_tx, Arc::clone(&dlq)));
+    #[cfg(feature = "core-pinning")]
+    let post = spawn_on_core(3, post_stage(inference_rx, post_tx, Arc::clone(&dlq)));
+    #[cfg(not(feature = "core-pinning"))]
     let stream = tokio::spawn(stream_stage(post_rx, output_tx, Arc::new(LogSink)));
+    #[cfg(feature = "core-pinning")]
+    let stream = spawn_on_core(4, stream_stage(post_rx, output_tx, Arc::new(LogSink)));
 
     PipelineHandles {
         rag,
@@ -358,6 +410,7 @@ pub fn spawn_pipeline_with_config(
         output_rx: tokio::sync::Mutex::new(Some(output_rx)),
         circuit_breaker,
         dlq,
+        cancellation_token: cancel2,
     }
 }
 
@@ -633,7 +686,8 @@ async fn inference_stage(
                 Ok(result) => result,
                 Err(_elapsed) => {
                     metrics::inc_inference_timeout();
-                    metrics::inc_error("inference", "timeout");
+                    let _timeout_err = crate::OrchestratorError::InferenceTimeout { timeout_secs };
+                    metrics::inc_error("inference", "inference_timeout");
                     warn!(
                         target: "orchestrator::pipeline",
                         session_id = %session_id,
@@ -827,7 +881,8 @@ async fn inference_stage_pool_worker(
                 Ok(result) => result,
                 Err(_elapsed) => {
                     metrics::inc_inference_timeout();
-                    metrics::inc_error("inference", "timeout");
+                    let _timeout_err = crate::OrchestratorError::InferenceTimeout { timeout_secs };
+                    metrics::inc_error("inference", "inference_timeout");
                     warn!(
                         target: "orchestrator::pipeline",
                         session_id = %session_id,
@@ -1054,16 +1109,30 @@ async fn stream_stage(
 
         metrics::inc_request("stream");
 
-        // Delegate to the pluggable sink  -  errors are soft-logged, never fatal.
-        if let Err(e) = sink.emit(&post_output.session, &post_output.text).await {
-            warn!(
-                target: "orchestrator::pipeline",
-                session_id = %session_id,
-                request_id = %request_id,
-                error = %e,
-                "OutputSink::emit returned error, continuing"
-            );
-            Span::current().record("error_kind", "sink_error");
+        // Delegate to the pluggable sink — Transient errors are logged, Fatal errors break the loop.
+        match sink.emit(&post_output.session, &post_output.text).await {
+            Ok(()) => {}
+            Err(SinkError::Transient(ref msg)) => {
+                warn!(
+                    target: "orchestrator::pipeline",
+                    session_id = %session_id,
+                    request_id = %request_id,
+                    error = %msg,
+                    "OutputSink::emit transient error, continuing"
+                );
+                Span::current().record("error_kind", "sink_error_transient");
+            }
+            Err(SinkError::Fatal(ref msg)) => {
+                tracing::error!(
+                    target: "orchestrator::pipeline",
+                    session_id = %session_id,
+                    request_id = %request_id,
+                    error = %msg,
+                    "OutputSink::emit fatal error — stopping stream stage"
+                );
+                Span::current().record("error_kind", "sink_error_fatal");
+                break;
+            }
         }
 
         let elapsed = start.elapsed();
@@ -1122,6 +1191,7 @@ pub fn spawn_pipeline_with_intelligence(
     let dlq = Arc::new(DeadLetterQueue::new(1000));
 
     // Shared request counter for RPS estimation.
+    let cancel3 = CancellationToken::new();
     let req_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     let rag = {
@@ -1155,6 +1225,7 @@ pub fn spawn_pipeline_with_intelligence(
         output_rx: tokio::sync::Mutex::new(Some(output_rx)),
         circuit_breaker,
         dlq,
+        cancellation_token: cancel3,
     }
 }
 
@@ -1432,7 +1503,7 @@ mod tests {
     #[async_trait]
     impl OutputSink for FailSink {
         async fn emit(&self, _session: &SessionId, _text: &str) -> Result<(), SinkError> {
-            Err(SinkError("injected test failure".to_owned()))
+            Err(SinkError::Transient("injected test failure".to_owned()))
         }
     }
 
@@ -1472,13 +1543,13 @@ mod tests {
 
     #[test]
     fn test_sink_error_display() {
-        let e = SinkError("oops".to_owned());
+        let e = SinkError::Transient("oops".to_owned());
         assert_eq!(format!("{e}"), "oops");
     }
 
     #[test]
     fn test_sink_error_debug() {
-        let e = SinkError("debug".to_owned());
+        let e = SinkError::Transient("debug".to_owned());
         let d = format!("{e:?}");
         assert!(d.contains("debug"), "debug repr: {d}");
     }

@@ -79,7 +79,6 @@ use thiserror::Error;
 
 pub mod config;
 pub mod coordination;
-// pub mod momentum; // module removed — C++ SIMD momentum is in crates/
 #[cfg(feature = "distributed")]
 pub mod distributed;
 pub mod enhanced;
@@ -170,9 +169,43 @@ pub enum OrchestratorError {
         limit: f64,
     },
 
+    /// Provider rejected the request due to an authentication failure.
+    ///
+    /// Returned when the provider returns HTTP 401 or 403.
+    /// Not retryable without a credential rotation.
+    #[error("authentication failed: {0}")]
+    AuthFailed(String),
+
+    /// The inference call exceeded the configured timeout and was cancelled.
+    ///
+    /// The `timeout_secs` field reflects the timeout that was breached.
+    /// Retryable with a longer timeout or by shedding the request.
+    #[error("inference timed out after {timeout_secs}s")]
+    InferenceTimeout {
+        /// Configured timeout that was exceeded.
+        timeout_secs: u64,
+    },
+
     /// A catch-all error variant for errors that do not fit the other categories.
     #[error("{0}")]
     Other(String),
+}
+
+impl OrchestratorError {
+    /// Return a stable lowercase string identifying the error variant,
+    /// suitable for use as a metric label or structured log field.
+    pub fn error_kind(&self) -> &'static str {
+        match self {
+            Self::ChannelClosed         => "channel_closed",
+            Self::Inference(_)          => "inference",
+            Self::ConfigError(_)        => "config_error",
+            Self::RateLimited { .. }    => "rate_limited",
+            Self::BudgetExceeded { .. } => "budget_exceeded",
+            Self::AuthFailed(_)         => "auth_failed",
+            Self::InferenceTimeout { .. } => "inference_timeout",
+            Self::Other(_)              => "other",
+        }
+    }
 }
 
 /// Unique session identifier for request tracking and affinity
