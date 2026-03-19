@@ -423,6 +423,11 @@ impl SelfImprovingLoop {
 
     /// Run the PID controller and log any adjustments.
     pub fn step_controller(h: &SubsystemHandles, snap: &TelemetrySnapshot) {
+        // NOTE: parking_lot::Mutex is safe here because the critical section
+        // is a single synchronous PID computation with no `.await` inside the
+        // guard.  parking_lot never blocks the Tokio runtime thread longer
+        // than the time to run `process(snap)`, which is a pure arithmetic
+        // operation measured in microseconds.
         let adjustments = h.controller.lock().process(snap);
         if !adjustments.is_empty() {
             info!(count = adjustments.len(), "PID controller made adjustments");
@@ -477,6 +482,9 @@ impl SelfImprovingLoop {
         // Collect current parameter values from controller
         let params: HashMap<String, f64> = {
             use crate::self_tune::controller::ParameterId;
+            // NOTE: parking_lot::Mutex is safe here because the guard is
+            // dropped at the end of this block before any `.await` point.
+            // The critical section only reads parameter values via `ctrl.get`.
             let ctrl = h.controller.lock();
             ParameterId::all()
                 .iter()

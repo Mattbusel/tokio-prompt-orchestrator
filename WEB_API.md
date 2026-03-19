@@ -360,6 +360,99 @@ curl http://localhost:8080/api/v1/stream/$REQUEST_ID
 
 ---
 
+---
+
+## Batch API
+
+### POST /api/v1/batch
+
+Process multiple prompts concurrently in a single request. Up to 100 prompts
+are accepted per call. The handler fans them out to the pipeline in parallel
+and returns when all items are resolved.
+
+**Request:**
+
+```json
+{
+  "prompts": ["What is Rust?", "Explain backpressure.", "Define zero-copy I/O."],
+  "session_id": "my-batch-session",
+  "max_concurrency": 4
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `prompts` | `string[]` | Yes | 1–100 prompts to process |
+| `session_id` | `string` | No | Shared session ID prefix (unique suffix added per item) |
+| `max_concurrency` | `integer` | No | Max parallel in-flight requests (1–16, default 4) |
+
+**Response:**
+
+```json
+{
+  "results": [
+    { "request_id": "550e8400-...", "text": "Rust is a systems language..." },
+    { "request_id": "550e8401-...", "text": "Backpressure is a mechanism..." },
+    { "request_id": "550e8402-...", "error": "inference timeout" }
+  ],
+  "total": 3,
+  "succeeded": 2,
+  "failed": 1
+}
+```
+
+**Status Codes:**
+- `200 OK` — All items processed (check `failed` count for partial failures)
+- `400 Bad Request` — Zero prompts or more than 100 prompts
+- `429 Too Many Requests` — Pipeline at capacity
+
+**curl example:**
+
+```bash
+curl -X POST http://localhost:8080/api/v1/batch \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompts": ["What is Rust?", "Explain backpressure."],
+    "max_concurrency": 2
+  }'
+```
+
+---
+
+### GET /api/v1/batch/:job_id/progress
+
+Poll the progress of a running batch job. The `job_id` is logged by the server
+immediately after the batch is registered; it is also present in server logs
+under the `batch_id` field.
+
+**Response:**
+
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "total": 10,
+  "completed": 7,
+  "failed": 1,
+  "pending": 2,
+  "status": "in_progress"
+}
+```
+
+`status` is one of:
+- `"in_progress"` — some items are still pending
+- `"completed"` — all items finished, at least one succeeded
+- `"failed"` — all items finished, none succeeded
+
+**curl example:**
+
+```bash
+# Poll until status != "in_progress"
+JOB_ID="550e8400-e29b-41d4-a716-446655440000"
+curl http://localhost:8080/api/v1/batch/$JOB_ID/progress
+```
+
+---
+
 ## Authentication (Coming Soon)
 
 Future versions will support:

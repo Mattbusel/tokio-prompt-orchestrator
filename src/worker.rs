@@ -141,6 +141,26 @@ pub struct EchoWorker {
 
 impl EchoWorker {
     /// Create a new `EchoWorker` with a default 10 ms simulated delay.
+    ///
+    /// The echo worker requires no API keys or external services. It splits the
+    /// prompt on whitespace and returns each word as a token, making it ideal
+    /// for pipeline smoke tests and local development.
+    ///
+    /// # Errors
+    ///
+    /// This constructor never returns an error.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tokio_prompt_orchestrator::worker::EchoWorker;
+    /// use std::sync::Arc;
+    ///
+    /// # tokio_test::block_on(async {
+    /// let worker = Arc::new(EchoWorker::new());
+    /// // Use worker with spawn_pipeline or directly
+    /// # });
+    /// ```
     pub fn new() -> Self {
         Self { delay_ms: 10 }
     }
@@ -235,13 +255,38 @@ pub struct OpenAiWorker {
 }
 
 impl OpenAiWorker {
-    /// Create a new OpenAI worker.
+    /// Create a new `OpenAiWorker` for the given model.
     ///
-    /// Reads the API key from the `OPENAI_API_KEY` environment variable.
+    /// Reads the API key from the `OPENAI_API_KEY` environment variable and
+    /// constructs an HTTP client configured for the OpenAI chat/completions
+    /// endpoint. Default settings: 256 max tokens, temperature 0.7, 30 s
+    /// timeout. All defaults are overridable via the builder methods.
+    ///
+    /// # Environment Variables
+    ///
+    /// | Variable | Required | Description |
+    /// |----------|----------|-------------|
+    /// | `OPENAI_API_KEY` | Yes | Bearer token sent with every request |
     ///
     /// # Errors
     ///
-    /// Returns `Err(OrchestratorError::ConfigError)` if `OPENAI_API_KEY` is not set.
+    /// Returns [`OrchestratorError::ConfigError`] if `OPENAI_API_KEY` is not
+    /// set in the environment.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tokio_prompt_orchestrator::OpenAiWorker;
+    /// use std::sync::Arc;
+    ///
+    /// // OPENAI_API_KEY must be set in the environment.
+    /// let worker = Arc::new(
+    ///     OpenAiWorker::new("gpt-4o")
+    ///         .expect("OPENAI_API_KEY must be set")
+    ///         .with_max_tokens(512)
+    ///         .with_temperature(0.7),
+    /// );
+    /// ```
     pub fn new(model: impl Into<String>) -> Result<Self, OrchestratorError> {
         let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| {
             OrchestratorError::ConfigError("OPENAI_API_KEY environment variable not set".into())
@@ -509,13 +554,38 @@ pub struct AnthropicWorker {
 }
 
 impl AnthropicWorker {
-    /// Create a new Anthropic worker.
+    /// Create a new `AnthropicWorker` for the given model.
     ///
-    /// Reads the API key from the `ANTHROPIC_API_KEY` environment variable.
+    /// Reads the API key from the `ANTHROPIC_API_KEY` environment variable and
+    /// constructs an HTTP client configured for the Anthropic Messages API.
+    /// Default settings: 1024 max tokens, temperature 1.0, 60 s timeout. All
+    /// defaults are overridable via the builder methods.
+    ///
+    /// # Environment Variables
+    ///
+    /// | Variable | Required | Description |
+    /// |----------|----------|-------------|
+    /// | `ANTHROPIC_API_KEY` | Yes | API key sent via `x-api-key` header |
     ///
     /// # Errors
     ///
-    /// Returns `Err(OrchestratorError::ConfigError)` if `ANTHROPIC_API_KEY` is not set.
+    /// Returns [`OrchestratorError::ConfigError`] if `ANTHROPIC_API_KEY` is
+    /// not set in the environment.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tokio_prompt_orchestrator::AnthropicWorker;
+    /// use std::sync::Arc;
+    ///
+    /// // ANTHROPIC_API_KEY must be set in the environment.
+    /// let worker = Arc::new(
+    ///     AnthropicWorker::new("claude-3-5-sonnet-20241022")
+    ///         .expect("ANTHROPIC_API_KEY must be set")
+    ///         .with_max_tokens(1024)
+    ///         .with_temperature(1.0),
+    /// );
+    /// ```
     pub fn new(model: impl Into<String>) -> Result<Self, OrchestratorError> {
         let api_key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| {
             OrchestratorError::ConfigError("ANTHROPIC_API_KEY environment variable not set".into())
@@ -800,10 +870,37 @@ pub struct LlamaCppWorker {
 }
 
 impl LlamaCppWorker {
-    /// Create a new llama.cpp worker
+    /// Create a new `LlamaCppWorker` pointing at a llama.cpp HTTP server.
     ///
-    /// Reads server URL from LLAMA_CPP_URL environment variable,
-    /// or defaults to http://localhost:8080
+    /// Reads the server URL from the `LLAMA_CPP_URL` environment variable. If
+    /// the variable is not set the worker falls back to
+    /// `http://localhost:8080`. Default settings: 256 max tokens, temperature
+    /// 0.8, 30 s timeout.
+    ///
+    /// # Environment Variables
+    ///
+    /// | Variable | Required | Description |
+    /// |----------|----------|-------------|
+    /// | `LLAMA_CPP_URL` | No | llama.cpp server base URL (default: `http://localhost:8080`) |
+    ///
+    /// # Errors
+    ///
+    /// This constructor never returns an error. Network errors are deferred
+    /// until [`ModelWorker::infer`] is called.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tokio_prompt_orchestrator::LlamaCppWorker;
+    /// use std::sync::Arc;
+    ///
+    /// // Optionally set LLAMA_CPP_URL=http://gpu-host:8080 in the environment.
+    /// let worker = Arc::new(
+    ///     LlamaCppWorker::new()
+    ///         .with_max_tokens(512)
+    ///         .with_temperature(0.8),
+    /// );
+    /// ```
     pub fn new() -> Self {
         let url =
             std::env::var("LLAMA_CPP_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
@@ -945,10 +1042,37 @@ pub struct VllmWorker {
 }
 
 impl VllmWorker {
-    /// Create a new vLLM worker
+    /// Create a new `VllmWorker` pointing at a vLLM inference server.
     ///
-    /// Reads server URL from VLLM_URL environment variable,
-    /// or defaults to http://localhost:8000
+    /// Reads the server URL from the `VLLM_URL` environment variable. If the
+    /// variable is not set the worker falls back to `http://localhost:8000`.
+    /// Default settings: 512 max tokens, temperature 0.7, top_p 0.95, 60 s
+    /// timeout.
+    ///
+    /// # Environment Variables
+    ///
+    /// | Variable | Required | Description |
+    /// |----------|----------|-------------|
+    /// | `VLLM_URL` | No | vLLM server base URL (default: `http://localhost:8000`) |
+    ///
+    /// # Errors
+    ///
+    /// This constructor never returns an error. Network errors are deferred
+    /// until [`ModelWorker::infer`] is called.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tokio_prompt_orchestrator::VllmWorker;
+    /// use std::sync::Arc;
+    ///
+    /// // Optionally set VLLM_URL=http://gpu-host:8000 in the environment.
+    /// let worker = Arc::new(
+    ///     VllmWorker::new()
+    ///         .with_max_tokens(1024)
+    ///         .with_temperature(0.5),
+    /// );
+    /// ```
     pub fn new() -> Self {
         let url = std::env::var("VLLM_URL").unwrap_or_else(|_| "http://localhost:8000".to_string());
 

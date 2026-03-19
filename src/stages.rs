@@ -30,6 +30,47 @@
 //! - Inference → Post: 1024
 //! - Post → Stream: 512
 //! - Stream output: 256
+//!
+//! ## Timeout Semantics
+//!
+//! There are four distinct timeout scopes in the pipeline; they are
+//! independent and interact as described below.
+//!
+//! ### 1. `DEFAULT_INFERENCE_TIMEOUT_SECS` (per-worker call)
+//!
+//! The constant [`DEFAULT_INFERENCE_TIMEOUT_SECS`] (120 s) caps each
+//! individual call to [`ModelWorker::infer`]. If the model backend does not
+//! respond within this window the inference future is cancelled and an error
+//! is returned to the stage. This default is overridden by
+//! `stages.inference.timeout_ms` in the TOML config.
+//!
+//! ### 2. Per-request deadline (`PromptRequest.deadline`)
+//!
+//! Each [`PromptRequest`] may carry an absolute deadline set via
+//! [`PromptRequest::with_deadline`]. The inference stage checks this field
+//! before dispatching to the worker. If the deadline has already elapsed the
+//! request is dropped immediately and routed to the dead-letter queue without
+//! consuming any worker capacity.
+//!
+//! ### 3. Circuit-breaker timeout (`resilience.circuit_breaker_timeout_s`)
+//!
+//! This timeout is **entirely independent** of inference latency. It controls
+//! the minimum time the circuit breaker remains in the OPEN state before
+//! transitioning to HALF-OPEN for a probe attempt. It does not affect how
+//! long a single inference call may run.
+//!
+//! ### 4. Stage-level timeouts
+//!
+//! Stage-level timeouts (e.g. `stages.rag.timeout_ms`) apply to the entire
+//! processing time of one pass through that stage — including any I/O, channel
+//! waits, and downstream sends — not only to the underlying inference call.
+//!
+//! ### Interaction between per-request deadline and stage timeout
+//!
+//! If a per-request deadline expires **before** the stage-level timeout fires,
+//! the request is dropped from the pipeline and written to the dead-letter
+//! queue. The stage itself continues processing subsequent requests normally;
+//! a deadline expiry does not abort or restart the stage task.
 
 use crate::{
     config::PipelineConfig, enhanced::CircuitBreaker, metrics, send_with_shed, AssembleOutput,
