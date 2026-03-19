@@ -15,6 +15,8 @@
 //!
 //! All types are `Clone` and `Send + Sync`, suitable for sharing across Tokio tasks.
 
+pub mod adaptive_timeout;
+pub mod bulkhead;
 pub mod cache;
 pub mod circuit_breaker;
 pub mod dedup;
@@ -23,6 +25,8 @@ pub mod rate_limit;
 pub mod retry;
 
 // Re-exports
+pub use adaptive_timeout::AdaptiveTimeout;
+pub use bulkhead::{Bulkhead, BulkheadPermit};
 pub use cache::{cache_key, CacheLayer};
 pub use circuit_breaker::{CircuitBreaker, CircuitStatus};
 pub use dedup::{dedup_key, DeduplicationResult, Deduplicator};

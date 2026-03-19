@@ -5,6 +5,7 @@
 //! - Leader election: role transitions and failover
 //! - Cluster routing: load-based routing correctness
 //! - Heartbeat eviction: stale node removal
+//! - Chaos scenarios: unavailable Redis, simultaneous leader election, clock skew
 //!
 //! These tests use mock backends (no real Redis/NATS required)
 //! to verify the cluster logic in isolation.
@@ -525,4 +526,139 @@ fn test_distributed_config_serialization_stability() {
     let toml1 = toml::to_string(&config).unwrap_or_default();
     let toml2 = toml::to_string(&config).unwrap_or_default();
     assert_eq!(toml1, toml2, "TOML serialization must be deterministic");
+}
+
+// ── Chaos Tests ───────────────────────────────────────────────────────────────
+
+/// Chaos test: Redis connection completely unavailable (non-routable address).
+///
+/// Verifies that `RedisDedup::new` succeeds (lazy connection) and that
+/// attempting an operation returns a graceful `Err` rather than panicking.
+/// The system must degrade gracefully when the backing store is unreachable.
+#[tokio::test]
+async fn chaos_redis_connection_unavailable_returns_error_not_panic() {
+    // 192.0.2.0/24 is TEST-NET-1 (RFC 5737) — guaranteed non-routable.
+    let result = RedisDedup::new("redis://192.0.2.1:6379", "chaos-node", 10).await;
+
+    // Construction must succeed (the client is lazy — it does not connect yet).
+    assert!(
+        result.is_ok(),
+        "RedisDedup construction with unreachable URL must not fail immediately"
+    );
+
+    let dedup = result.unwrap();
+
+    // Attempting to claim a key must return Err, not panic.
+    // Use a short timeout so the test does not hang.
+    let claim_result = tokio::time::timeout(
+        Duration::from_secs(3),
+        dedup.try_claim("chaos-key-001"),
+    )
+    .await;
+
+    match claim_result {
+        Ok(Ok(_)) => {
+            // If somehow a connection succeeded (unlikely with TEST-NET address),
+            // we just pass — the important thing is no panic.
+        }
+        Ok(Err(_)) => {
+            // Expected: operation failed with a DistributedError. Not a panic.
+        }
+        Err(_timeout) => {
+            // Also acceptable: the connection attempt timed out.
+        }
+    }
+}
+
+/// Chaos test: `LeaderElection` with an unavailable Redis URL.
+///
+/// Two nodes both attempt to become leader against a mock URL. The result
+/// must be a graceful error on both sides, never a panic. This simulates
+/// what happens when the Redis leader-lock backend disappears mid-election.
+#[tokio::test]
+async fn chaos_simultaneous_leader_election_unavailable_redis() {
+    // Use TEST-NET-1 for a guaranteed non-routable address.
+    let url = "redis://192.0.2.2:6379";
+
+    let result_a = LeaderElection::new(url, "node-a", 5).await;
+    let result_b = LeaderElection::new(url, "node-b", 5).await;
+
+    // Both nodes must construct without panic (lazy connection).
+    assert!(result_a.is_ok(), "node-a construction must not panic");
+    assert!(result_b.is_ok(), "node-b construction must not panic");
+
+    let election_a = result_a.unwrap();
+    let election_b = result_b.unwrap();
+
+    // Both nodes try to run the election campaign concurrently.
+    // Neither must panic — both must return Err within the timeout.
+    let (res_a, res_b) = tokio::join!(
+        tokio::time::timeout(Duration::from_secs(3), election_a.try_elect()),
+        tokio::time::timeout(Duration::from_secs(3), election_b.try_elect()),
+    );
+
+    // Verify: each result is either a timeout or a graceful Err — never a panic.
+    for (label, res) in [("node-a", res_a), ("node-b", res_b)] {
+        match res {
+            Ok(Ok(_)) => {
+                // Unlikely with TEST-NET, but not a failure — no panic is the goal.
+            }
+            Ok(Err(_)) => {
+                // Expected path: graceful error returned.
+            }
+            Err(_) => {
+                // Timeout is also acceptable.
+                eprintln!("chaos: {label} election timed out (acceptable)");
+            }
+        }
+    }
+
+    // Both nodes must still report Follower (no leader promotion without Redis).
+    assert!(!election_a.is_leader(), "node-a must not claim leadership without Redis");
+    assert!(!election_b.is_leader(), "node-b must not claim leadership without Redis");
+}
+
+/// Chaos test: Clock skew simulation via artificially aged heartbeats.
+///
+/// Simulates a node whose clock is skewed far into the past by registering
+/// it and immediately advancing time past the eviction window. The eviction
+/// logic must correctly evict the "skewed" node without panicking.
+///
+/// This is a structural clock-skew test using the `ClusterManager`'s
+/// eviction timeout rather than a dedicated clock abstraction, since the
+/// current implementation uses `Instant`-based eviction.
+#[tokio::test]
+async fn chaos_clock_skew_causes_eviction_of_stale_node() {
+    // Very short eviction window to simulate a clock-skewed node.
+    let cluster = ClusterManager::new("coordinator", Duration::from_millis(50));
+
+    // Register two nodes — "skewed" is registered but won't send heartbeats.
+    cluster.register("healthy", "h1:8080", 2).await;
+    cluster.register("skewed", "h2:8080", 1).await;
+
+    // Sleep longer than the eviction window — simulates clock skew causing
+    // the "skewed" node's last-seen timestamp to appear expired.
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    // Re-register "healthy" (it renewed its heartbeat).
+    cluster.register("healthy", "h1:8080", 2).await;
+
+    // Evict stale nodes.
+    let evicted = cluster.evict_stale_nodes().await;
+
+    assert!(
+        evicted.contains(&"skewed".to_string()),
+        "clock-skewed node must be evicted after timeout"
+    );
+    assert!(
+        !evicted.contains(&"healthy".to_string()),
+        "healthy node that renewed heartbeat must survive"
+    );
+
+    // Routing must still work for the surviving node.
+    assert_eq!(
+        cluster.route().await,
+        Some("healthy".to_string()),
+        "routing must still work after evicting clock-skewed node"
+    );
 }

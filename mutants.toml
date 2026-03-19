@@ -1,0 +1,38 @@
+# cargo-mutants configuration
+# https://mutants.rs/configuration.html
+#
+# Run mutation testing with:   cargo mutants
+# Install cargo-mutants with:  cargo install cargo-mutants
+
+# Focus mutation testing on the core production modules.
+# Generated code, binaries, and scaffolding are excluded.
+examine_globs = [
+    "src/enhanced/*.rs",
+    "src/stages.rs",
+    "src/worker.rs",
+    "src/routing/**/*.rs",
+    "src/coordination/**/*.rs",
+    "src/config/**/*.rs",
+]
+
+# Exclude files that are generated, mostly scaffolding, or not worth mutating.
+exclude_globs = [
+    "src/bin/**",
+    "src/metrics.rs",
+    "src/metrics_server.rs",
+    "src/self_tune/**",
+    "src/self_modify/**",
+    "src/intelligence/**",
+    "src/evolution/**",
+    "src/self_improve*.rs",
+    "src/tui/**",
+    "src/web_api.rs",
+]
+
+# Exclude test modules themselves from mutation (we mutate production code only).
+exclude_re = [
+    "#\\[cfg\\(test\\)\\]",
+]
+
+# Timeout per mutant test run (seconds). Increase if your test suite is slow.
+timeout_multiplier = 3.0

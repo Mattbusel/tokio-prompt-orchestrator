@@ -7,3 +7,18 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo check
+
+  bench-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # Run benchmarks and save output; compare against the committed baseline.
+      # The baseline file is .bench_baseline.txt in the repo root.
+      # To update the baseline after intentional performance improvements, run:
+      #   ./scripts/check_bench_regression.sh --save-baseline
+      # and commit the updated .bench_baseline.txt.
+      - name: Run benchmarks and check for regressions
+        run: |
+          chmod +x scripts/check_bench_regression.sh
+          ./scripts/check_bench_regression.sh

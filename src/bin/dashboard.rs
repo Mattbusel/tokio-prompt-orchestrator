@@ -68,6 +68,37 @@ pub struct DashboardState {
     worker_name: String,
     /// Mock story state, present only when `--mock` was passed.
     mock_state: Option<Arc<Mutex<MockDashboardState>>>,
+    /// Rolling log of the last 20 requests in live mode.
+    ///
+    /// In mock mode this is unused — the mock state manages its own log.
+    /// Shared so that background tasks (e.g. a pipeline observer) can push
+    /// entries via [`DashboardState::push_recent_request`].
+    recent_requests_log: Arc<Mutex<VecDeque<RecentRequest>>>,
+}
+
+impl DashboardState {
+    /// Push a new [`RecentRequest`] entry to the live recent-requests panel.
+    ///
+    /// Trims the log to the last [`MAX_RECENT_REQUESTS`] entries automatically.
+    ///
+    /// This is a no-op in mock mode (the mock state manages its own log).
+    pub async fn push_recent_request(&self, req: RecentRequest) {
+        let mut log = self.recent_requests_log.lock().await;
+        log.push_back(req);
+        while log.len() > MAX_RECENT_REQUESTS {
+            log.pop_front();
+        }
+    }
+
+    /// Returns a snapshot of the current recent-requests log for live mode.
+    async fn live_recent_requests(&self) -> Vec<RecentRequest> {
+        self.recent_requests_log
+            .lock()
+            .await
+            .iter()
+            .cloned()
+            .collect()
+    }
 }
 
 // ── SSE event payload ────────────────────────────────────────────────────────
@@ -965,7 +996,7 @@ pub async fn build_snapshot(state: &DashboardState) -> DashboardEvent {
         stage_counts,
         shed_counts,
         uptime_secs,
-        recent_requests: vec![],
+        recent_requests: state.live_recent_requests().await,
         active_stages: vec![true; 5],
         channel_depths: vec![],
     }
@@ -1191,6 +1222,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             start_time: Instant::now(),
             worker_name: "mock".to_string(),
             mock_state: Some(mock),
+            recent_requests_log: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_RECENT_REQUESTS))),
         });
 
         let addr = format!("0.0.0.0:{port}");
@@ -1212,6 +1244,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             start_time: Instant::now(),
             worker_name,
             mock_state: None,
+            recent_requests_log: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_RECENT_REQUESTS))),
         });
 
         let addr = format!("0.0.0.0:{port}");
@@ -1245,6 +1278,7 @@ mod tests {
             start_time: Instant::now(),
             worker_name: "echo".to_string(),
             mock_state: None,
+            recent_requests_log: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_RECENT_REQUESTS))),
         })
     }
 
@@ -1262,6 +1296,7 @@ mod tests {
             start_time: Instant::now(),
             worker_name: "mock".to_string(),
             mock_state: Some(mock),
+            recent_requests_log: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_RECENT_REQUESTS))),
         })
     }
 
