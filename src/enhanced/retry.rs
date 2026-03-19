@@ -278,9 +278,11 @@ impl RetryPolicy {
                 multiplier,
             } => {
                 let max_ms = max_delay.as_millis() as f64;
-                let delay_ms = (initial_delay.as_millis() as f64
-                    * multiplier.powi((attempt - 1) as i32))
-                .min(max_ms);
+                // saturating_sub prevents underflow when attempt == 0 (would give powi(-1) = decay).
+                // The cap at 62 prevents f64 overflow for very large attempt counts.
+                let exp = attempt.saturating_sub(1).min(62) as i32;
+                let delay_ms = (initial_delay.as_millis() as f64 * multiplier.powi(exp))
+                    .min(max_ms);
                 Duration::from_millis(delay_ms as u64)
             }
             RetryStrategy::Linear {
@@ -462,7 +464,10 @@ where
                     return Err(e);
                 }
                 // Exponential backoff for all other transient errors.
-                let delay_ms = (base_delay.as_millis() as f64 * 2_f64.powi(attempt as i32 - 1))
+                // saturating_sub prevents underflow when attempt == 0 (would give powi(-1) = decay).
+                // The cap at 62 prevents f64 overflow for very large attempt counts.
+                let exp = attempt.saturating_sub(1).min(62) as i32;
+                let delay_ms = (base_delay.as_millis() as f64 * 2_f64.powi(exp))
                     .min(60_000.0) as u64;
                 let delay = with_jitter(Duration::from_millis(delay_ms));
                 warn!(attempt, delay_ms = delay.as_millis(), error = %e, "transient error — retrying");

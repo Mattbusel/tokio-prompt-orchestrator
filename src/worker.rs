@@ -106,16 +106,19 @@ pub fn stream_worker(
     prompt: String,
 ) -> tokio::sync::mpsc::Receiver<Result<String, OrchestratorError>> {
     let (tx, rx) = tokio::sync::mpsc::channel(64);
-    tokio::spawn(async move {
+    // Task is intentionally fire-and-forget; errors are logged above.
+    let _stream_task = tokio::spawn(async move {
         match worker.infer(&prompt).await {
             Ok(tokens) => {
                 for token in tokens {
                     if tx.send(Ok(token)).await.is_err() {
+                        // Receiver was dropped; stop sending.
                         break;
                     }
                 }
             }
             Err(e) => {
+                tracing::error!(error = %e, "stream_worker: inference failed");
                 let _ = tx.send(Err(e)).await;
             }
         }
