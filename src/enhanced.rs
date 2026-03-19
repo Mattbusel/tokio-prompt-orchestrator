@@ -25,7 +25,7 @@ pub mod retry;
 // Re-exports
 pub use cache::{cache_key, CacheLayer};
 pub use circuit_breaker::{CircuitBreaker, CircuitStatus};
-pub use dedup::{dedup_key, DeduplicationResult, Deduplicator};
+pub use dedup::{dedup_key, DeduplicationResult, DeduplicationToken, Deduplicator, DEDUP_CANCELLED_SENTINEL};
 pub use priority::{Priority, PriorityQueue};
 pub use rate_limit::RateLimiter;
 pub use retry::RetryPolicy;

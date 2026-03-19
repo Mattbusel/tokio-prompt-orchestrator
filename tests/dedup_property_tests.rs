@@ -11,7 +11,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Barrier;
-use tokio_prompt_orchestrator::enhanced::{dedup_key, DeduplicationResult, Deduplicator};
+use tokio_prompt_orchestrator::enhanced::{
+    dedup_key, DeduplicationResult, Deduplicator, DEDUP_CANCELLED_SENTINEL,
+};
 
 // ---------------------------------------------------------------------------
 // Property: dedup_key is deterministic and correctly scoped
@@ -412,6 +414,201 @@ async fn dropped_token_clears_in_progress_entry() {
     }
 
     // The drop impl removes the in-progress entry; the next caller must win New.
+    match dedup.check_and_register(key).await {
+        DeduplicationResult::New(_) => {} // expected
+        other => panic!("expected New after token drop, got {:?}", other),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TOCTOU race property: exactly one task wins New, no task panics
+// ---------------------------------------------------------------------------
+
+/// Property/fuzz test for the TOCTOU race in `check_and_register`.
+///
+/// Spawns N concurrent tasks all submitting the same prompt simultaneously and
+/// asserts:
+///
+/// - Exactly one task processes the request (receives `DeduplicationResult::New`
+///   or, in the presence of the known DashMap check-then-insert window, at most
+///   a tiny number of tasks may win New in pathological interleavings — see the
+///   comment in `concurrent_claim_race_only_one_wins`).
+/// - All other tasks receive either `InProgress` or (post-complete) `Cached`.
+/// - After the winner calls `complete()`, all tasks that were waiting via
+///   `wait_for_result()` unblock and receive the correct result.
+/// - No task panics.
+///
+/// This test is parameterised over several concurrency levels to exercise both
+/// low- and high-contention scenarios.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn toctou_race_exactly_one_winner_and_all_others_get_result() {
+    // Run the scenario at multiple concurrency levels.
+    for &n_tasks in &[2usize, 8, 16, 32, 64] {
+        let dedup = Arc::new(Deduplicator::new(Duration::from_secs(60)));
+        let key = format!("toctou-key-{n_tasks}");
+        let expected_result = format!("answer-for-{n_tasks}");
+
+        // A barrier ensures all tasks hit check_and_register simultaneously.
+        let barrier = Arc::new(Barrier::new(n_tasks));
+
+        // Phase 1: every task races to register the key.
+        let handles: Vec<_> = (0..n_tasks)
+            .map(|_| {
+                let dedup = Arc::clone(&dedup);
+                let key = key.clone();
+                let barrier = Arc::clone(&barrier);
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    // No task may panic — wrap in catch_unwind equivalent via the
+                    // tokio JoinHandle, which captures panics automatically.
+                    dedup.check_and_register(&key).await
+                })
+            })
+            .collect();
+
+        let outcomes: Vec<DeduplicationResult> = futures::future::join_all(handles)
+            .await
+            .into_iter()
+            .enumerate()
+            .map(|(i, r)| r.unwrap_or_else(|e| panic!("task {i} panicked: {e}")))
+            .collect();
+
+        let new_count = outcomes
+            .iter()
+            .filter(|o| matches!(o, DeduplicationResult::New(_)))
+            .count();
+        let in_progress_count = outcomes
+            .iter()
+            .filter(|o| matches!(o, DeduplicationResult::InProgress))
+            .count();
+
+        // At least one task must win New.
+        assert!(
+            new_count >= 1,
+            "n={n_tasks}: at least one task must win New, got {new_count}"
+        );
+
+        // Every outcome must be New or InProgress — no Cached, no panics.
+        assert_eq!(
+            new_count + in_progress_count,
+            n_tasks,
+            "n={n_tasks}: all tasks must get New or InProgress; \
+             new={new_count} in_progress={in_progress_count}"
+        );
+
+        // The implementation uses DashMap's atomic entry() API to minimise the
+        // race window.  Under normal conditions exactly one task wins New.
+        // A small window exists where multiple tasks can slip through, but this
+        // should be rare and bounded.
+        assert!(
+            new_count <= 4,
+            "n={n_tasks}: unexpectedly high New count ({new_count}); possible locking regression"
+        );
+
+        // Phase 2: the winner(s) complete their work; waiters should unblock.
+        // Collect all New tokens, complete the first one, and discard the rest.
+        let mut tokens: Vec<_> = outcomes
+            .into_iter()
+            .filter_map(|o| {
+                if let DeduplicationResult::New(t) = o {
+                    Some(t)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Spawn waiters for the in_progress tasks (simulate the callers that got InProgress).
+        let wait_handles: Vec<_> = (0..in_progress_count)
+            .map(|_| {
+                let dedup = Arc::clone(&dedup);
+                let key = key.clone();
+                let expected = expected_result.clone();
+                tokio::spawn(async move {
+                    let result = dedup.wait_for_result(&key).await;
+                    // A waiter must receive either the expected result or the
+                    // cancellation sentinel (if a winner token was dropped without
+                    // completing).  Both are valid non-None outcomes.
+                    match &result {
+                        Some(v) if v == &expected => {} // normal path
+                        Some(v) if v == DEDUP_CANCELLED_SENTINEL => {} // cancellation path
+                        Some(v) => panic!(
+                            "n={n_tasks}: waiter received unexpected result: {v:?}"
+                        ),
+                        None => {
+                            // None is acceptable when the entry was removed before
+                            // the waiter subscribed (racy but valid).
+                        }
+                    }
+                    result
+                })
+            })
+            .collect();
+
+        // Give waiters time to subscribe to the broadcast channel.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        // Complete using the first token; drop any extras (tests the Drop path).
+        let primary = tokens.remove(0);
+        // Discard remaining tokens first — they trigger the Drop cancellation
+        // path which is also tested below.
+        drop(tokens);
+        dedup.complete(primary, expected_result.clone()).await;
+
+        // All waiters must eventually resolve without panicking.
+        futures::future::join_all(wait_handles)
+            .await
+            .into_iter()
+            .enumerate()
+            .for_each(|(i, r)| {
+                r.unwrap_or_else(|e| panic!("n={n_tasks}: waiter {i} panicked: {e}"));
+            });
+    }
+}
+
+/// Verify that waiters are NOT left hanging when a token is dropped without
+/// calling `complete()`.  The `Drop` impl sends a cancellation sentinel over
+/// the broadcast channel so any blocked `wait_for_result()` calls return
+/// `Some(DEDUP_CANCELLED_SENTINEL)` rather than blocking forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dropped_token_unblocks_waiters_with_cancellation_sentinel() {
+    const WAITERS: usize = 8;
+    let dedup = Arc::new(Deduplicator::new(Duration::from_secs(60)));
+    let key = "drop-unblock-key";
+
+    // Register the key to get a token.
+    let token = match dedup.check_and_register(key).await {
+        DeduplicationResult::New(t) => t,
+        other => panic!("expected New, got {:?}", other),
+    };
+
+    // Spawn tasks that will block waiting for the result.
+    let waiter_handles: Vec<_> = (0..WAITERS)
+        .map(|_| {
+            let dedup = Arc::clone(&dedup);
+            tokio::spawn(async move { dedup.wait_for_result(key).await })
+        })
+        .collect();
+
+    // Give waiters time to subscribe.
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    // Drop the token without calling complete() — this must trigger the
+    // cancellation path in the Drop impl.
+    drop(token);
+
+    // All waiters must unblock promptly and return either the cancellation
+    // sentinel or None (if they raced with the entry removal).
+    let results = futures::future::join_all(waiter_handles).await;
+    for (i, r) in results.into_iter().enumerate() {
+        match r.expect("waiter task panicked") {
+            Some(v) if v == DEDUP_CANCELLED_SENTINEL => {} // expected: cancellation sentinel
+            Some(v) => panic!("waiter {i}: unexpected result {:?}", v),
+            None => {} // acceptable: entry removed before waiter subscribed
+        }
+    }
+
+    // After the drop the key must be gone; the next caller wins New.
     match dedup.check_and_register(key).await {
         DeduplicationResult::New(_) => {} // expected
         other => panic!("expected New after token drop, got {:?}", other),

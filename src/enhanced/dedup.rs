@@ -61,19 +61,57 @@ pub struct DeduplicationToken {
     requests: Arc<DashMap<String, RequestState>>,
 }
 
+/// # Behavior on Drop
+///
+/// When a `DeduplicationToken` is dropped without calling `complete()`, the
+/// following sequence occurs:
+///
+/// 1. **Cancellation signal**: The `Drop` impl sends a sentinel cancellation
+///    string (`"\x00CANCELLED"`) over the broadcast channel before removing the
+///    entry.  Any tasks already blocked in `wait_for_result()` receive this
+///    value via `rx.recv()` and return `Some("\x00CANCELLED")` rather than
+///    `None`.  Callers of `wait_for_result` that inspect the returned string
+///    can detect cancellation by checking for this sentinel.
+///
+/// 2. **Entry removal**: After the cancellation broadcast the `InProgress`
+///    entry is removed from the shared map.  This drops the `Sender`, closing
+///    the broadcast channel.  Any tasks that subscribe *after* the removal will
+///    find no entry and `wait_for_result` will return `None`.
+///
+/// 3. **Re-registrability**: Because the entry is removed, the *next* caller
+///    to invoke `check_and_register` for the same key will receive a fresh
+///    `New` token and can retry processing.
+///
+/// **Waiters are NOT left hanging indefinitely.**  They either receive the
+/// cancellation sentinel or `None` (if they race with the removal), both of
+/// which are finite outcomes that unblock the awaiting task promptly.
+///
+/// The sentinel value `"\x00CANCELLED"` uses a NUL prefix which cannot appear
+/// in normal LLM output, making it safe to use as a reserved signal.
+pub const DEDUP_CANCELLED_SENTINEL: &str = "\x00CANCELLED";
+
 impl Drop for DeduplicationToken {
     fn drop(&mut self) {
-        // Only act if this is the last clone and complete() was never called
+        // Only act if this is the last clone and complete() was never called.
         if Arc::strong_count(&self.completed) == 1
             && !self.completed.load(std::sync::atomic::Ordering::Acquire)
         {
-            // Remove the in-progress entry so waiters don't hang.
-            // We can't notify them with a result, but at least they unblock
-            // on their next check_and_register() call.
+            // Broadcast a cancellation sentinel so tasks already blocked in
+            // wait_for_result() are unblocked immediately rather than hanging
+            // until the Sender is dropped by the map removal below.
+            if let Some(state) = self.requests.get(&self.key) {
+                if let RequestState::InProgress { waiter_tx, .. } = state.value() {
+                    // Ignore send errors — if there are no receivers, that's fine.
+                    let _ = waiter_tx.send(DEDUP_CANCELLED_SENTINEL.to_string());
+                }
+            }
+
+            // Remove the in-progress entry.  This drops the broadcast Sender,
+            // closing the channel for any tasks that subscribe after this point.
             self.requests.remove(&self.key);
             tracing::warn!(
                 key = %self.key,
-                "DeduplicationToken dropped without complete() — in-progress entry removed"
+                "DeduplicationToken dropped without complete() — cancellation sent and in-progress entry removed"
             );
         }
     }
