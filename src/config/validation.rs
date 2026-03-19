@@ -37,7 +37,7 @@
 //! | `deduplication.max_entries` | Must be ≥ 1 when `deduplication.enabled = true` | `InvalidField` |
 //! | `observability.metrics_port` | If set, must be ≥ 1 | `InvalidField` |
 
-use super::PipelineConfig;
+use super::{PipelineConfig, WorkersConfig};
 
 /// Errors arising from configuration parsing, validation, or I/O.
 ///
@@ -394,6 +394,7 @@ mod tests {
             },
             rate_limits: RateLimitConfig::default(),
             channel_sizes: None,
+            workers: WorkersConfig::default(),
         }
     }
 

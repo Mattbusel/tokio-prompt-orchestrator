@@ -337,7 +337,6 @@ log_format = "pretty"
         let result = ConfigWatcher::new(path);
         assert!(result.is_err());
     }
-}
 
     #[tokio::test]
     async fn hot_reload_concurrent_writes_no_invalid_config_broadcast() {
@@ -377,3 +376,4 @@ log_format = "pretty"
         // At least one reload must have been observed
         assert!(received > 0, "expected at least one hot-reload event");
     }
+}
