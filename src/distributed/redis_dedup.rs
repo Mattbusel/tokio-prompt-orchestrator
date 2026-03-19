@@ -18,7 +18,7 @@
 
 use redis::AsyncCommands;
 use std::sync::Arc;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::DistributedError;
 
@@ -88,6 +88,18 @@ impl RedisDedup {
         node_id: &str,
         ttl_seconds: u64,
     ) -> Result<Self, DistributedError> {
+        // Warn when connecting to a non-localhost Redis address without TLS.
+        {
+            let is_tls = redis_url.starts_with("rediss://");
+            let is_local = redis_url.contains("localhost") || redis_url.contains("127.0.0.1");
+            if !is_tls && !is_local {
+                warn!(
+                    "Connecting to {} over unencrypted TCP — consider using TLS in production",
+                    redis_url
+                );
+            }
+        }
+
         let client = redis::Client::open(redis_url).map_err(|e| {
             DistributedError::RedisConnection(format!("failed to open Redis client: {e}"))
         })?;

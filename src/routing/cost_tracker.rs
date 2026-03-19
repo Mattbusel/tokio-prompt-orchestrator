@@ -5,8 +5,14 @@
 //!
 //! Thread-safe: all counters use atomic operations for lock-free reads
 //! and writes under concurrent pipeline access.
+//!
+//! Also provides [`SessionBudgetTracker`] for per-session spending limits.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+
+use crate::OrchestratorError;
 
 /// Per-model cost tracking and savings computation.
 ///
@@ -191,6 +197,124 @@ pub struct CostSnapshot {
     pub savings_usd: f64,
     /// Savings as a percentage of baseline.
     pub savings_percent: f64,
+}
+
+// ── Per-session budget tracker ─────────────────────────────────────────
+
+/// Per-session spending limits and accumulated spend.
+///
+/// Allows callers to cap the total cost a single session ID may accrue and to
+/// reject new requests once the cap is breached.
+///
+/// Thread-safe: the inner map is protected by a [`Mutex`].
+///
+/// # Panics
+///
+/// Methods on this type never panic (the mutex is never poisoned by user code
+/// in normal operation; if it were the method would return an error rather than
+/// unwrapping).
+#[derive(Debug, Default)]
+pub struct SessionBudgetTracker {
+    /// Map from session ID → (limit_usd, spent_usd).
+    sessions: Mutex<HashMap<String, (f64, f64)>>,
+}
+
+impl SessionBudgetTracker {
+    /// Create a new, empty tracker.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a per-session spending limit.
+    ///
+    /// If the session already has a limit registered, the limit is updated.
+    ///
+    /// # Arguments
+    /// * `session_id` — Opaque session identifier.
+    /// * `limit_usd` — Maximum spend allowed for this session in USD.
+    ///
+    /// # Panics
+    ///
+    /// This function never panics.
+    pub fn set_limit(&self, session_id: impl Into<String>, limit_usd: f64) {
+        let mut map = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = map.entry(session_id.into()).or_insert((0.0, 0.0));
+        entry.0 = limit_usd;
+    }
+
+    /// Record additional spend for a session and check whether the budget is
+    /// exceeded.
+    ///
+    /// If no limit has been registered for the session, the spend is silently
+    /// accepted (no cap).
+    ///
+    /// # Arguments
+    /// * `session_id` — The session incurring the cost.
+    /// * `cost_usd` — The amount to add to the session's accumulated spend.
+    ///
+    /// # Returns
+    /// * `Ok(())` — within budget (or no limit registered).
+    /// * `Err(OrchestratorError::BudgetExceeded)` — the session's limit would
+    ///   be exceeded by this request.
+    ///
+    /// # Panics
+    ///
+    /// This function never panics.
+    pub fn record_spend(
+        &self,
+        session_id: &str,
+        cost_usd: f64,
+    ) -> Result<(), OrchestratorError> {
+        let mut map = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((limit, spent)) = map.get_mut(session_id) {
+            let new_spent = *spent + cost_usd;
+            if new_spent > *limit {
+                return Err(OrchestratorError::BudgetExceeded {
+                    spent: new_spent,
+                    limit: *limit,
+                });
+            }
+            *spent = new_spent;
+        }
+        Ok(())
+    }
+
+    /// Return how much has been spent for a session.
+    ///
+    /// Returns `None` if the session is not registered.
+    ///
+    /// # Panics
+    ///
+    /// This function never panics.
+    pub fn spent(&self, session_id: &str) -> Option<f64> {
+        let map = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        map.get(session_id).map(|(_, spent)| *spent)
+    }
+
+    /// Return the configured limit for a session.
+    ///
+    /// Returns `None` if the session is not registered.
+    ///
+    /// # Panics
+    ///
+    /// This function never panics.
+    pub fn limit(&self, session_id: &str) -> Option<f64> {
+        let map = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        map.get(session_id).map(|(limit, _)| *limit)
+    }
+
+    /// Reset the accumulated spend for a session to zero without removing the
+    /// limit.
+    ///
+    /// # Panics
+    ///
+    /// This function never panics.
+    pub fn reset_session(&self, session_id: &str) {
+        let mut map = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, spent)) = map.get_mut(session_id) {
+            *spent = 0.0;
+        }
+    }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -438,5 +562,87 @@ mod tests {
         let s = t.snapshot();
         assert_eq!(s.local_tokens, 0);
         assert_eq!(s.cloud_tokens, 500);
+    }
+
+    // ── SessionBudgetTracker ────────────────────────────────────────────
+
+    #[test]
+    fn test_session_budget_no_limit_always_ok() {
+        let tracker = SessionBudgetTracker::new();
+        // Session has no registered limit — all spends must be accepted.
+        assert!(tracker.record_spend("sess-1", 999.0).is_ok());
+        assert!(tracker.record_spend("sess-1", 999.0).is_ok());
+    }
+
+    #[test]
+    fn test_session_budget_within_limit_ok() {
+        let tracker = SessionBudgetTracker::new();
+        tracker.set_limit("sess-a", 1.0);
+        assert!(tracker.record_spend("sess-a", 0.5).is_ok());
+        assert_eq!(tracker.spent("sess-a"), Some(0.5));
+    }
+
+    #[test]
+    fn test_session_budget_exceeds_limit_returns_error() {
+        let tracker = SessionBudgetTracker::new();
+        tracker.set_limit("sess-b", 1.0);
+        // First spend is fine.
+        tracker.record_spend("sess-b", 0.8).expect("within budget");
+        // Second spend would bring total to 1.1, exceeding the $1.00 limit.
+        let err = tracker.record_spend("sess-b", 0.3);
+        assert!(err.is_err(), "spend exceeding limit must return an error");
+        match err {
+            Err(OrchestratorError::BudgetExceeded { spent, limit }) => {
+                assert!((limit - 1.0).abs() < f64::EPSILON);
+                assert!((spent - 1.1).abs() < 1e-9);
+            }
+            other => panic!("expected BudgetExceeded, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_session_budget_exactly_at_limit_ok() {
+        let tracker = SessionBudgetTracker::new();
+        tracker.set_limit("sess-c", 1.0);
+        // Spending exactly the limit must be allowed (strict greater-than check).
+        assert!(tracker.record_spend("sess-c", 1.0).is_ok());
+        assert_eq!(tracker.spent("sess-c"), Some(1.0));
+    }
+
+    #[test]
+    fn test_session_budget_reset_clears_spend() {
+        let tracker = SessionBudgetTracker::new();
+        tracker.set_limit("sess-d", 2.0);
+        tracker.record_spend("sess-d", 1.5).expect("within budget");
+        tracker.reset_session("sess-d");
+        assert_eq!(tracker.spent("sess-d"), Some(0.0));
+        // Limit must be preserved after reset.
+        assert_eq!(tracker.limit("sess-d"), Some(2.0));
+    }
+
+    #[test]
+    fn test_session_budget_independent_sessions() {
+        let tracker = SessionBudgetTracker::new();
+        tracker.set_limit("s1", 1.0);
+        tracker.set_limit("s2", 5.0);
+
+        tracker.record_spend("s1", 0.9).expect("s1 within budget");
+
+        // s2 has headroom even though s1 is almost full.
+        tracker.record_spend("s2", 4.9).expect("s2 within budget");
+
+        // s1 is now over budget.
+        assert!(tracker.record_spend("s1", 0.2).is_err());
+        // s2 is still fine.
+        assert!(tracker.record_spend("s2", 0.05).is_ok());
+    }
+
+    #[test]
+    fn test_session_budget_set_limit_unknown_session_creates_entry() {
+        let tracker = SessionBudgetTracker::new();
+        assert!(tracker.limit("new-sess").is_none());
+        tracker.set_limit("new-sess", 10.0);
+        assert_eq!(tracker.limit("new-sess"), Some(10.0));
+        assert_eq!(tracker.spent("new-sess"), Some(0.0));
     }
 }
