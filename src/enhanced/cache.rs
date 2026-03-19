@@ -38,7 +38,40 @@ struct CacheEntry {
     expires_at: SystemTime,
 }
 
-/// Cache layer supporting memory and Redis backends
+/// A two-backend response cache: in-memory (default) or Redis (feature `caching`).
+///
+/// Use [`CacheLayer::new_memory`] for single-process deployments or testing.
+/// Use `CacheLayer::new_redis` (feature `caching`) when multiple pipeline instances need a shared
+/// cache.
+///
+/// # Eviction
+///
+/// The in-memory backend evicts the entry with the nearest expiry when the
+/// `max_entries` limit is reached (O(n) scan).  For large caches consider a
+/// dedicated LRU crate.
+///
+/// Entries with `ttl_secs == 0` are silently ignored by [`CacheLayer::set`].
+///
+/// # Thread safety
+///
+/// `CacheLayer` is `Clone + Send + Sync`.  All clones share the same
+/// `Arc<MemoryCache>`.
+///
+/// # Examples
+///
+/// ```no_run
+/// use tokio_prompt_orchestrator::enhanced::CacheLayer;
+///
+/// # #[tokio::main]
+/// # async fn main() {
+/// let cache = CacheLayer::new_memory(1000);
+/// cache.set("prompt:abc", "response text", 3600).await;
+///
+/// if let Some(hit) = cache.get("prompt:abc").await {
+///     println!("cache hit: {hit}");
+/// }
+/// # }
+/// ```
 #[derive(Clone)]
 pub struct CacheLayer {
     backend: CacheBackend,
@@ -62,7 +95,24 @@ struct RedisCache {
 }
 
 impl CacheLayer {
-    /// Create in-memory cache with max entries
+    /// Create an in-memory [`CacheLayer`] with a maximum entry count.
+    ///
+    /// When `max_entries` is reached, the entry nearest to expiry is evicted
+    /// before inserting the new value.
+    ///
+    /// # Arguments
+    ///
+    /// * `max_entries` — Soft cap on the number of cached entries.  Use `0`
+    ///   to disable the cap (entries accumulate until evicted by TTL checks on
+    ///   `get`).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tokio_prompt_orchestrator::enhanced::CacheLayer;
+    ///
+    /// let cache = CacheLayer::new_memory(500);
+    /// ```
     pub fn new_memory(max_entries: usize) -> Self {
         Self {
             backend: CacheBackend::Memory(Arc::new(MemoryCache {
@@ -72,7 +122,30 @@ impl CacheLayer {
         }
     }
 
-    /// Create Redis-backed cache
+    /// Create a Redis-backed [`CacheLayer`].
+    ///
+    /// Tests the connection with a `PING` command on creation.  Requires the
+    /// `caching` Cargo feature.
+    ///
+    /// # Arguments
+    ///
+    /// * `redis_url` — A Redis connection string, e.g. `"redis://127.0.0.1:6379"`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(redis::RedisError)` if the URL is invalid or the initial
+    /// `PING` command fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tokio_prompt_orchestrator::enhanced::CacheLayer;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let cache = CacheLayer::new_redis("redis://127.0.0.1:6379").await?;
+    /// # Ok(()) }
+    /// ```
     #[cfg(feature = "caching")]
     pub async fn new_redis(redis_url: &str) -> Result<Self, redis::RedisError> {
         let client = redis::Client::open(redis_url)?;
@@ -296,7 +369,28 @@ pub struct CacheStats {
     pub backend: String,
 }
 
-/// Generate cache key from prompt
+/// Generate a stable cache key from a prompt string.
+///
+/// Uses `DefaultHasher` (non-cryptographic, non-deterministic across processes
+/// on Rust 1.36+).  For cross-process or cross-restart cache sharing, prefer
+/// [`crate::enhanced::dedup_key`] which uses FNV-1a with a fixed seed.
+///
+/// # Arguments
+///
+/// * `prompt` — The raw prompt text.
+///
+/// # Returns
+///
+/// A `"prompt:<hex>"` string suitable as a cache key.
+///
+/// # Examples
+///
+/// ```
+/// use tokio_prompt_orchestrator::enhanced::cache_key;
+///
+/// let k = cache_key("hello world");
+/// assert!(k.starts_with("prompt:"));
+/// ```
 pub fn cache_key(prompt: &str) -> String {
     use std::collections::hash_map::DefaultHasher;
 

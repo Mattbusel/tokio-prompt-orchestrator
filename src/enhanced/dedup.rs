@@ -40,21 +40,78 @@ use tokio::sync::broadcast;
 use tracing::{debug, info};
 use uuid::Uuid;
 
-/// Deduplication result
+/// Outcome of a [`Deduplicator::check_and_register`] call.
+///
+/// Three-way classification allows callers to decide whether to do the work
+/// themselves, wait for a concurrent worker, or immediately reuse a cached
+/// result.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::time::Duration;
+/// use tokio_prompt_orchestrator::enhanced::{Deduplicator, DeduplicationResult};
+///
+/// # #[tokio::main]
+/// # async fn main() {
+/// let dedup = Deduplicator::new(Duration::from_secs(60));
+/// match dedup.check_and_register("my-key").await {
+///     DeduplicationResult::New(token) => {
+///         let result = "computed".to_string();
+///         dedup.complete(token, result).await;
+///     }
+///     DeduplicationResult::InProgress => {
+///         // another task is already working; wait for it
+///         let _ = dedup.wait_for_result("my-key").await;
+///     }
+///     DeduplicationResult::Cached(result) => {
+///         println!("reused: {result}");
+///     }
+/// }
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub enum DeduplicationResult {
-    /// New request - should be processed
+    /// New request — should be processed by the caller.
+    ///
+    /// The caller must eventually call [`Deduplicator::complete`] or
+    /// [`Deduplicator::fail`] with the returned [`DeduplicationToken`] so that
+    /// any tasks blocked in [`Deduplicator::wait_for_result`] are unblocked.
     New(DeduplicationToken),
-    /// Request already in progress - wait for it
+    /// An identical request is already being processed by another task.
+    ///
+    /// The caller should call [`Deduplicator::wait_for_result`] to block until
+    /// that task completes and then reuse its result.
     InProgress,
-    /// Request recently completed - return cached result
+    /// The request was recently completed and the result is still within the
+    /// cache window.  The cached response string is returned directly.
     Cached(String),
 }
 
-/// Token for tracking request completion
+/// Ownership token issued when a new request is registered with the
+/// [`Deduplicator`].
+///
+/// The holder of a `DeduplicationToken` is the *authoritative worker* for
+/// that request key.  It must call either [`Deduplicator::complete`] or
+/// [`Deduplicator::fail`] to resolve the pending state.
+///
+/// # Drop behaviour
+///
+/// If a token is dropped without calling `complete` or `fail`, the
+/// `InProgress` entry is automatically removed from the deduplicator so that
+/// subsequent callers are not permanently blocked.  A `WARN`-level log line
+/// is emitted in this case.
+///
+/// # Cloning
+///
+/// Tokens are `Clone` because they are cheaply cloneable (`Arc`-backed), but
+/// only the **first** clone to call `complete` or `fail` takes effect;
+/// subsequent calls on other clones are no-ops.
 #[derive(Debug, Clone)]
 pub struct DeduplicationToken {
     /// Unique identifier for this deduplication token.
+    ///
+    /// Useful for structured log correlation.
     pub id: String,
     key: String,
     completed: Arc<std::sync::atomic::AtomicBool>,
@@ -92,7 +149,53 @@ enum RequestState {
     },
 }
 
-/// Request deduplicator
+/// In-process request deduplicator that coalesces identical concurrent
+/// requests and caches recently completed results.
+///
+/// # How it works
+///
+/// 1. The caller derives a stable cache key (see [`dedup_key`]) from the
+///    prompt and session.
+/// 2. [`Deduplicator::check_and_register`] atomically checks the shared
+///    state map and returns one of three outcomes:
+///    - [`DeduplicationResult::New`] — the caller is the first to see this
+///      key; it receives a [`DeduplicationToken`] and must process the request.
+///    - [`DeduplicationResult::InProgress`] — another task is already working;
+///      the caller should call [`Deduplicator::wait_for_result`] to block.
+///    - [`DeduplicationResult::Cached`] — a prior result is still within the
+///      `cache_duration` TTL; the caller can return it immediately.
+/// 3. On success the worker calls [`Deduplicator::complete`]; on failure it
+///    calls [`Deduplicator::fail`], which removes the entry.
+///
+/// # Thread safety
+///
+/// `Deduplicator` is `Clone + Send + Sync`.  All clones share the same
+/// underlying `Arc<DashMap>`.  A background task cleans up expired entries
+/// every 60 seconds; it stops when the *last* `Deduplicator` clone is dropped.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::time::Duration;
+/// use tokio_prompt_orchestrator::enhanced::{Deduplicator, DeduplicationResult};
+///
+/// # #[tokio::main]
+/// # async fn main() {
+/// let dedup = Deduplicator::new(Duration::from_secs(300));
+/// let key = "dedup:g:abc123";
+///
+/// match dedup.check_and_register(key).await {
+///     DeduplicationResult::New(token) => {
+///         let result = "hello".to_string();
+///         dedup.complete(token, result).await;
+///     }
+///     DeduplicationResult::InProgress => {
+///         let _ = dedup.wait_for_result(key).await;
+///     }
+///     DeduplicationResult::Cached(result) => println!("{result}"),
+/// }
+/// # }
+/// ```
 #[derive(Clone)]
 pub struct Deduplicator {
     requests: Arc<DashMap<String, RequestState>>,
@@ -102,9 +205,26 @@ pub struct Deduplicator {
 }
 
 impl Deduplicator {
-    /// Create new deduplicator
+    /// Create a new `Deduplicator` with the given cache TTL.
     ///
-    /// `cache_duration` - How long to cache completed requests
+    /// A background cleanup task is spawned immediately.  It wakes up every
+    /// 60 seconds to evict expired entries and exits when the last
+    /// `Deduplicator` clone is dropped.
+    ///
+    /// # Arguments
+    ///
+    /// * `cache_duration` — How long a completed result remains cached before
+    ///   being treated as a fresh request.  Common choices: 5 minutes for
+    ///   interactive use, 1 hour for batch/idempotent workloads.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use tokio_prompt_orchestrator::enhanced::Deduplicator;
+    ///
+    /// let dedup = Deduplicator::new(Duration::from_secs(300));
+    /// ```
     pub fn new(cache_duration: Duration) -> Self {
         let shutdown = Arc::new(AtomicBool::new(false));
         let dedup = Self {
@@ -130,12 +250,36 @@ impl Deduplicator {
         dedup
     }
 
-    /// Check if request is duplicate and register if new.
+    /// Atomically check whether a request is new, in-progress, or cached, and
+    /// register it as in-progress if it is new.
     ///
-    /// Uses DashMap's atomic `entry()` API to eliminate the TOCTOU race that
-    /// would otherwise let multiple concurrent callers each see `New` for the
-    /// same key.  Only one caller will ever receive `New(token)` for a given
-    /// key while that key is `InProgress`.
+    /// Uses `DashMap::entry()` for a compare-and-insert that prevents multiple
+    /// concurrent callers from each receiving [`DeduplicationResult::New`] for
+    /// the same key — only one will win the race.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` — Stable cache key; derive one with [`dedup_key`].
+    ///
+    /// # Returns
+    ///
+    /// A [`DeduplicationResult`] indicating whether the caller should process
+    /// the request, wait for another task, or reuse a cached result.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::time::Duration;
+    /// use tokio_prompt_orchestrator::enhanced::{Deduplicator, DeduplicationResult};
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let dedup = Deduplicator::new(Duration::from_secs(60));
+    /// if let DeduplicationResult::New(token) = dedup.check_and_register("key").await {
+    ///     dedup.complete(token, "result".to_string()).await;
+    /// }
+    /// # }
+    /// ```
     pub async fn check_and_register(&self, key: &str) -> DeduplicationResult {
         use dashmap::mapref::entry::Entry;
 
@@ -237,7 +381,20 @@ impl Deduplicator {
         }
     }
 
-    /// Wait for in-progress request to complete
+    /// Wait for an in-progress request to complete and return its result.
+    ///
+    /// Subscribes to the internal broadcast channel for the given key.  If the
+    /// request has already completed by the time this is called, the cached
+    /// result is returned immediately without waiting.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` — The same key passed to [`Deduplicator::check_and_register`].
+    ///
+    /// # Returns
+    ///
+    /// `Some(result)` when the pending request completes, or `None` if the
+    /// key is not tracked (e.g. the worker called [`Deduplicator::fail`]).
     pub async fn wait_for_result(&self, key: &str) -> Option<String> {
         let mut rx = {
             let state = self.requests.get(key)?;
@@ -256,7 +413,18 @@ impl Deduplicator {
         result
     }
 
-    /// Mark request as completed
+    /// Mark a request as successfully completed and cache its result.
+    ///
+    /// Notifies all tasks currently blocked in [`Deduplicator::wait_for_result`]
+    /// for the same key.  The result is retained in the cache for
+    /// `cache_duration` so subsequent callers receive
+    /// [`DeduplicationResult::Cached`].
+    ///
+    /// # Arguments
+    ///
+    /// * `token` — The [`DeduplicationToken`] returned by
+    ///   [`Deduplicator::check_and_register`].
+    /// * `result` — The serialised response to cache and broadcast.
     pub async fn complete(&self, token: DeduplicationToken, result: String) {
         token
             .completed
@@ -275,13 +443,27 @@ impl Deduplicator {
         }
     }
 
-    /// Mark request as failed (remove from tracking)
+    /// Mark a request as failed and remove it from tracking.
+    ///
+    /// After this call, the next [`Deduplicator::check_and_register`] for the
+    /// same key will receive [`DeduplicationResult::New`] so the request can
+    /// be retried.  Any tasks waiting in [`Deduplicator::wait_for_result`] will
+    /// receive `None` on their next `recv()` after the sender is dropped.
+    ///
+    /// # Arguments
+    ///
+    /// * `token` — The [`DeduplicationToken`] returned by
+    ///   [`Deduplicator::check_and_register`].
     pub async fn fail(&self, token: DeduplicationToken) {
         self.requests.remove(&token.key);
         debug!(key = token.key, token_id = %token.id, "request failed, removed from dedup");
     }
 
-    /// Get deduplication statistics
+    /// Return a snapshot of current deduplication statistics.
+    ///
+    /// The counts are computed by iterating the internal map in O(n).
+    /// Use sparingly on hot paths; prefer Prometheus counters for high-frequency
+    /// monitoring.
     pub fn stats(&self) -> DeduplicationStats {
         let mut stats = DeduplicationStats {
             total: self.requests.len(),
@@ -348,7 +530,9 @@ fn cleanup_expired(requests: &DashMap<String, RequestState>, cache_duration: Dur
     }
 }
 
-/// Deduplication statistics
+/// A point-in-time snapshot of [`Deduplicator`] state.
+///
+/// Obtain via [`Deduplicator::stats`].
 #[derive(Debug)]
 pub struct DeduplicationStats {
     /// Total number of tracked requests (in-progress + cached).

@@ -1,0 +1,59 @@
+name: Deploy Docs
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  deploy-docs:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-docs-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-docs-
+
+      - name: Build rustdoc
+        run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: "--cfg docsrs"
+
+      # GitHub Pages expects the site in a directory; add a redirect at the root.
+      - name: Add redirect index
+        run: |
+          cat > target/doc/index.html << 'HTML'
+          <!DOCTYPE html>
+          <html>
+            <head>
+              <meta http-equiv="refresh"
+                    content="0; url=tokio_prompt_orchestrator/index.html" />
+            </head>
+            <body>
+              <a href="tokio_prompt_orchestrator/index.html">
+                tokio_prompt_orchestrator docs
+              </a>
+            </body>
+          </html>
+          HTML
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./target/doc
+          destination_dir: .
+          keep_files: false
