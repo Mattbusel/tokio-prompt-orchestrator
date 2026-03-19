@@ -173,13 +173,13 @@ pub struct PipelineHandles {
 ///
 /// This function never panics.
 ///
-/// TODO: Support per-core pinning:
-/// ```ignore
-/// let core_id = shard_session(&request.session, num_cores);
-/// tokio::task::Builder::new()
-///     .name(&format!("rag-core-{}", core_id))
-///     .spawn_on(runtime_handles[core_id], async move { ... });
-/// ```
+/// NOTE: Per-core pinning (e.g. via `tokio::task::Builder::spawn_on`) is not
+/// implemented here.  Tokio's work-stealing scheduler already distributes tasks
+/// across threads, and `spawn_on` requires access to per-thread `Handle` objects
+/// that are not exposed through the stable public API without building a custom
+/// multi-thread runtime.  Per-core affinity can be layered on top by callers who
+/// construct their own `tokio::runtime::Builder::new_multi_thread` runtime and
+/// pass per-thread handles in.
 pub fn spawn_pipeline(worker: Arc<dyn ModelWorker>) -> PipelineHandles {
     // Channel creation with specified buffer sizes
     let (input_tx, input_rx) = mpsc::channel::<PromptRequest>(512);
@@ -304,14 +304,47 @@ pub fn spawn_pipeline_with_config(
 
     let rag = tokio::spawn(rag_stage(input_rx, rag_tx, Arc::clone(&dlq)));
     let assemble = tokio::spawn(assemble_stage(rag_rx, assemble_tx, Arc::clone(&dlq)));
-    let inference = tokio::spawn(inference_stage(
-        assemble_rx,
-        inference_tx,
-        worker,
-        circuit_breaker.clone(),
-        inference_timeout_secs,
-        Arc::clone(&dlq),
-    ));
+
+    // Multi-worker pool: spawn N inference tasks that all read from the same
+    // shared receiver.  When inference_workers == 1 (default) the behaviour is
+    // identical to a single direct tokio::spawn, preserving backward compat.
+    let num_workers = config.stages.inference.inference_workers.max(1);
+    let inference = if num_workers == 1 {
+        tokio::spawn(inference_stage(
+            assemble_rx,
+            inference_tx,
+            worker,
+            circuit_breaker.clone(),
+            inference_timeout_secs,
+            Arc::clone(&dlq),
+        ))
+    } else {
+        info!(
+            target: "orchestrator::pipeline",
+            num_workers = num_workers,
+            "Spawning inference worker pool"
+        );
+        let shared_rx = Arc::new(tokio::sync::Mutex::new(assemble_rx));
+        let mut handles = Vec::with_capacity(num_workers);
+        for id in 0..num_workers {
+            handles.push(tokio::spawn(inference_stage_pool_worker(
+                Arc::clone(&shared_rx),
+                inference_tx.clone(),
+                Arc::clone(&worker),
+                circuit_breaker.clone(),
+                inference_timeout_secs,
+                Arc::clone(&dlq),
+                id,
+            )));
+        }
+        // Return a single JoinHandle that waits for all pool workers to finish.
+        tokio::spawn(async move {
+            for h in handles {
+                let _ = h.await;
+            }
+        })
+    };
+
     let post = tokio::spawn(post_stage(inference_rx, post_tx, Arc::clone(&dlq)));
     let stream = tokio::spawn(stream_stage(post_rx, output_tx, Arc::new(LogSink)));
 
@@ -533,11 +566,12 @@ async fn assemble_stage(
 ///
 /// This function never panics.
 ///
-/// TODO: Add multi-worker pool for parallel inference:
-/// ```ignore
-/// let workers: Vec<Arc<dyn ModelWorker>> = ...;
-/// let worker = &workers[shard_session(&session, workers.len())];
-/// ```
+/// NOTE: The multi-worker pool pattern (spawning N tasks all reading from the
+/// same `mpsc::Receiver`) is implemented in [`spawn_pipeline_with_config`] via
+/// the `inference.inference_workers` config field.  Each worker task shares an
+/// `Arc<Mutex<Receiver<…>>>` so Tokio's work-stealing distributes items across
+/// workers.  This function remains a single-worker unit so it stays testable
+/// in isolation.
 async fn inference_stage(
     mut rx: mpsc::Receiver<AssembleOutput>,
     tx: mpsc::Sender<InferenceOutput>,
@@ -710,6 +744,195 @@ async fn inference_stage(
     }
 
     info!(target: "orchestrator::pipeline", "Inference stage shutting down");
+}
+
+/// Shared-receiver inference worker used by the multi-worker pool.
+///
+/// Multiple tasks share the same `Arc<tokio::sync::Mutex<Receiver>>` so that
+/// each call to `.lock().await.recv().await` atomically claims one item from
+/// the channel.  This avoids the need for an external dispatcher task.
+async fn inference_stage_pool_worker(
+    rx: Arc<tokio::sync::Mutex<mpsc::Receiver<AssembleOutput>>>,
+    tx: mpsc::Sender<InferenceOutput>,
+    worker: Arc<dyn ModelWorker>,
+    breaker: CircuitBreaker,
+    timeout_secs: u64,
+    dlq: Arc<DeadLetterQueue>,
+    worker_id: usize,
+) {
+    info!(
+        target: "orchestrator::pipeline",
+        worker_id = worker_id,
+        "Inference pool worker started"
+    );
+
+    loop {
+        // Acquire one item; release the lock immediately after recv() returns.
+        let assemble_output = {
+            let mut guard = rx.lock().await;
+            guard.recv().await
+        };
+
+        let assemble_output = match assemble_output {
+            Some(o) => o,
+            None => break, // channel closed
+        };
+
+        let start = Instant::now();
+        let session_id = assemble_output.session.as_str().to_string();
+        let request_id = assemble_output.request_id.clone();
+
+        let span = tracing::info_span!(
+            "pipeline.inference",
+            session_id = %session_id,
+            request_id = %request_id,
+            stage = "inference",
+            worker_id = worker_id,
+            duration_ms = tracing::field::Empty,
+            outcome = tracing::field::Empty,
+            error_kind = tracing::field::Empty,
+        );
+        let _enter = span.enter();
+
+        metrics::inc_request("inference");
+
+        if let Some(deadline) = assemble_output.deadline {
+            if std::time::Instant::now() > deadline {
+                warn!(
+                    target: "orchestrator::pipeline",
+                    session_id = %session_id,
+                    request_id = %request_id,
+                    "Inference pool worker: request deadline expired, dropping"
+                );
+                metrics::inc_error("inference", "deadline_expired");
+                metrics::inc_expired();
+                dlq.push(DroppedRequest {
+                    request_id: request_id.clone(),
+                    session_id: session_id.clone(),
+                    reason: "deadline_expired".to_string(),
+                    dropped_at: std::time::SystemTime::now(),
+                });
+                continue;
+            }
+        }
+
+        let prompt = assemble_output.prompt.clone();
+        let w = Arc::clone(&worker);
+        let infer_fut = breaker.call(|| async move { w.infer(&prompt).await });
+        let cb_result =
+            match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), infer_fut)
+                .await
+            {
+                Ok(result) => result,
+                Err(_elapsed) => {
+                    metrics::inc_inference_timeout();
+                    metrics::inc_error("inference", "timeout");
+                    warn!(
+                        target: "orchestrator::pipeline",
+                        session_id = %session_id,
+                        request_id = %request_id,
+                        timeout_secs = timeout_secs,
+                        "Inference pool worker timed out — dropping request into DLQ"
+                    );
+                    dlq.push(DroppedRequest {
+                        request_id: request_id.clone(),
+                        session_id: session_id.clone(),
+                        reason: format!("inference_timeout:{timeout_secs}s"),
+                        dropped_at: std::time::SystemTime::now(),
+                    });
+                    continue;
+                }
+            };
+
+        match cb_result {
+            Ok(tokens) => {
+                let elapsed = start.elapsed();
+                metrics::record_stage_latency("inference", elapsed);
+                tracing::Span::current().record("duration_ms", elapsed.as_millis() as u64);
+                tracing::Span::current().record("outcome", "ok");
+
+                let output = InferenceOutput {
+                    session: assemble_output.session,
+                    request_id: request_id.clone(),
+                    tokens,
+                };
+
+                match send_with_shed(&tx, output, PipelineStage::Inference).await {
+                    Ok(SendOutcome::Queued) => {}
+                    Ok(SendOutcome::Shed) => {
+                        metrics::inc_shed("inference");
+                        metrics::inc_dropped("inference");
+                        dlq.push(DroppedRequest {
+                            request_id: request_id.clone(),
+                            session_id: session_id.clone(),
+                            reason: "backpressure:inference".to_string(),
+                            dropped_at: std::time::SystemTime::now(),
+                        });
+                    }
+                    Err(e) => {
+                        warn!(
+                            target: "orchestrator::pipeline",
+                            session_id = %session_id,
+                            request_id = %request_id,
+                            error = ?e,
+                            "Inference pool worker send failed"
+                        );
+                        metrics::inc_error("inference", "channel_closed");
+                        break;
+                    }
+                }
+            }
+            Err(crate::enhanced::circuit_breaker::CircuitBreakerError::Open) => {
+                let elapsed = start.elapsed();
+                metrics::record_stage_latency("inference", elapsed);
+                tracing::Span::current().record("duration_ms", elapsed.as_millis() as u64);
+                tracing::Span::current().record("outcome", "err");
+                tracing::Span::current().record("error_kind", "circuit_open");
+                warn!(
+                    target: "orchestrator::pipeline",
+                    session_id = %session_id,
+                    request_id = %request_id,
+                    "Inference pool worker: circuit breaker open"
+                );
+                metrics::inc_error("inference", "circuit_open");
+                metrics::inc_shed("inference");
+                metrics::inc_dropped("inference");
+                dlq.push(DroppedRequest {
+                    request_id: request_id.clone(),
+                    session_id: session_id.clone(),
+                    reason: "circuit_breaker_open".to_string(),
+                    dropped_at: std::time::SystemTime::now(),
+                });
+            }
+            Err(crate::enhanced::circuit_breaker::CircuitBreakerError::Failed(e)) => {
+                let elapsed = start.elapsed();
+                metrics::record_stage_latency("inference", elapsed);
+                tracing::Span::current().record("duration_ms", elapsed.as_millis() as u64);
+                tracing::Span::current().record("outcome", "err");
+                tracing::Span::current().record("error_kind", "inference_failure");
+                warn!(
+                    target: "orchestrator::pipeline",
+                    session_id = %session_id,
+                    request_id = %request_id,
+                    error = %e,
+                    "Inference pool worker: inference failed"
+                );
+                metrics::inc_error("inference", "inference_failure");
+                dlq.push(DroppedRequest {
+                    request_id: request_id.clone(),
+                    session_id: session_id.clone(),
+                    reason: format!("inference_failure:{e}"),
+                    dropped_at: std::time::SystemTime::now(),
+                });
+            }
+        }
+    }
+
+    info!(
+        target: "orchestrator::pipeline",
+        worker_id = worker_id,
+        "Inference pool worker shutting down"
+    );
 }
 
 /// Stage 4: Post-processing

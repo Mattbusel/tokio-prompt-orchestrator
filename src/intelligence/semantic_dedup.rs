@@ -44,7 +44,7 @@ use std::sync::{
     Arc, RwLock,
 };
 use thiserror::Error;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 #[derive(Debug, Error)]
 pub enum SemanticDedupError {
@@ -101,6 +101,10 @@ pub struct SemanticDedup {
 
 impl SemanticDedup {
     pub fn new(config: SemanticDedupConfig) -> Self {
+        warn!(
+            "semantic_dedup: using hash-projection pseudo-embeddings — true embedding model \
+             endpoint is not yet implemented; similarity scores are lexical approximations only"
+        );
         Self {
             index: Arc::new(RwLock::new(Vec::new())),
             config,
