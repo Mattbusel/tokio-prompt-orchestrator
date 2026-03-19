@@ -781,7 +781,7 @@ mod tests {
         let outcome = send_with_shed(&tx, 42u32, PipelineStage::Rag)
             .await
             .unwrap();
-        assert_eq!(outcome, SendOutcome::Queued);
+        assert_eq!(outcome, SendOutcome::Queued, "send into channel with space must return Queued");
     }
 
     #[tokio::test]
@@ -789,13 +789,13 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel::<u32>(10);
         drop(rx);
         let result = send_with_shed(&tx, 1u32, PipelineStage::Rag).await;
-        assert!(matches!(result, Err(OrchestratorError::ChannelClosed)));
+        assert!(matches!(result, Err(OrchestratorError::ChannelClosed)), "send after receiver drop must return ChannelClosed error");
     }
 
     #[test]
     fn test_shard_session_deterministic() {
         let s = SessionId::new("test-session-123");
-        assert_eq!(shard_session(&s, 4), shard_session(&s, 4));
+        assert_eq!(shard_session(&s, 4), shard_session(&s, 4), "shard_session must be deterministic for the same session and shard count");
     }
 
     #[test]
@@ -809,7 +809,7 @@ mod tests {
                     .count()
             })
             .collect();
-        assert!(counts.iter().all(|&c| c > 0));
+        assert!(counts.iter().all(|&c| c > 0), "each of the 4 shards must receive at least one session from the 100-session sample");
     }
 
     /// Verify that tracing events can be captured and that when RUST_LOG_FORMAT=json

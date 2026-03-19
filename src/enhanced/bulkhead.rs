@@ -174,10 +174,10 @@ mod tests {
         let p2 = bh.acquire();
         let p3 = bh.acquire();
 
-        assert!(p1.is_ok());
-        assert!(p2.is_ok());
-        assert!(p3.is_ok());
-        assert_eq!(bh.available_permits(), 0);
+        assert!(p1.is_ok(), "first acquire within limit must succeed");
+        assert!(p2.is_ok(), "second acquire within limit must succeed");
+        assert!(p3.is_ok(), "third acquire within limit must succeed");
+        assert_eq!(bh.available_permits(), 0, "all 3 permits consumed — available must be 0");
     }
 
     #[test]
@@ -205,20 +205,20 @@ mod tests {
 
         {
             let _permit = bh.acquire().expect("first acquire must succeed");
-            assert_eq!(bh.available_permits(), 0);
+            assert_eq!(bh.available_permits(), 0, "permit held — available must be 0");
             // permit is dropped here
         }
 
         assert_eq!(bh.available_permits(), 1, "slot must be released after drop");
         // Should be acquirable again.
-        assert!(bh.acquire().is_ok());
+        assert!(bh.acquire().is_ok(), "acquire after permit drop must succeed");
     }
 
     #[test]
     fn test_name_and_max_concurrent_accessors() {
         let bh = Bulkhead::new("inference", 8);
-        assert_eq!(bh.name(), "inference");
-        assert_eq!(bh.max_concurrent(), 8);
+        assert_eq!(bh.name(), "inference", "name() must return the value passed to new()");
+        assert_eq!(bh.max_concurrent(), 8, "max_concurrent() must return the value passed to new()");
     }
 
     #[tokio::test]
@@ -237,7 +237,7 @@ mod tests {
                     Ok(_permit) => {
                         let prev = active_clone.fetch_add(1, Ordering::SeqCst);
                         // Must never exceed max_concurrent.
-                        assert!(prev < 5, "active={prev} must be < 5");
+                        assert!(prev < 5, "active count {prev} exceeded max_concurrent (5) — semaphore not working correctly");
                         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                         active_clone.fetch_sub(1, Ordering::SeqCst);
                     }

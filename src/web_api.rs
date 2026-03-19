@@ -299,6 +299,11 @@ struct BatchJob {
     completed: Arc<AtomicU64>,
     failed: Arc<AtomicU64>,
     /// IDs of the sub-requests that belong to this batch job.
+    ///
+    /// Reserved for a future `GET /api/v1/batch/{id}/requests` endpoint that
+    /// will allow callers to inspect individual sub-request outcomes.  The field
+    /// is stored now so that existing batch submissions will have complete data
+    /// when that endpoint is added.
     #[allow(dead_code)]
     sub_request_ids: Vec<String>,
 }

@@ -56,6 +56,10 @@ pub struct DashboardState {
     /// Sender side of the pipeline input channel — kept alive to prevent
     /// pipeline shutdown; also used by future request-submission routes.
     /// `None` in mock mode where no real pipeline is running.
+    ///
+    /// The field is intentionally held for its drop side-effect: dropping the
+    /// last `Sender` signals the pipeline stages to shut down.  It is not read
+    /// directly by the dashboard handler logic, hence the dead_code allow.
     #[allow(dead_code)]
     pipeline_tx: Option<mpsc::Sender<PromptRequest>>,
     /// Circuit breaker for the inference stage (live mode only).

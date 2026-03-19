@@ -504,9 +504,9 @@ mod tests {
             })
             .await;
 
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "success");
-        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        assert!(result.is_ok(), "retry should succeed on the third attempt");
+        assert_eq!(result.unwrap(), "success", "expected result value 'success'");
+        assert_eq!(attempts.load(Ordering::SeqCst), 3, "expected exactly 3 total attempts (2 failures + 1 success)");
     }
 
     #[tokio::test]
@@ -517,7 +517,7 @@ mod tests {
             .retry(|| async { Err::<(), _>("always fails") })
             .await;
 
-        assert!(result.is_err());
+        assert!(result.is_err(), "all 3 attempts exhausted — result must be Err");
     }
 
     #[tokio::test]
@@ -528,18 +528,18 @@ mod tests {
         let delay2 = policy.calculate_delay(2);
         let delay3 = policy.calculate_delay(3);
 
-        assert_eq!(delay1, Duration::from_millis(10));
-        assert_eq!(delay2, Duration::from_millis(20));
-        assert_eq!(delay3, Duration::from_millis(40));
+        assert_eq!(delay1, Duration::from_millis(10), "attempt 1 delay should equal initial_delay");
+        assert_eq!(delay2, Duration::from_millis(20), "attempt 2 delay should be initial_delay * 2");
+        assert_eq!(delay3, Duration::from_millis(40), "attempt 3 delay should be initial_delay * 4");
     }
 
     #[tokio::test]
     async fn test_linear_backoff() {
         let policy = RetryPolicy::linear(4, Duration::from_millis(100), Duration::from_millis(50));
 
-        assert_eq!(policy.calculate_delay(1), Duration::from_millis(100));
-        assert_eq!(policy.calculate_delay(2), Duration::from_millis(150));
-        assert_eq!(policy.calculate_delay(3), Duration::from_millis(200));
+        assert_eq!(policy.calculate_delay(1), Duration::from_millis(100), "attempt 1 delay should equal initial_delay");
+        assert_eq!(policy.calculate_delay(2), Duration::from_millis(150), "attempt 2 delay should be initial + 1*increment");
+        assert_eq!(policy.calculate_delay(3), Duration::from_millis(200), "attempt 3 delay should be initial + 2*increment");
     }
 
     #[tokio::test]
@@ -567,9 +567,9 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "permanent");
-        assert_eq!(attempts.load(Ordering::SeqCst), 2); // First attempt + one retry
+        assert!(result.is_err(), "retry_if with non-retryable error must return Err");
+        assert_eq!(result.unwrap_err(), "permanent", "expected the non-retryable 'permanent' error to propagate");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2, "expected 2 attempts: first (transient) + second (permanent, not retried)");
     }
 
     #[test]
@@ -578,7 +578,7 @@ mod tests {
         let jittered = with_jitter(base);
 
         // Should be within range
-        assert!(jittered >= base);
-        assert!(jittered <= base + Duration::from_millis(250));
+        assert!(jittered >= base, "jittered delay must not be less than the base delay");
+        assert!(jittered <= base + Duration::from_millis(250), "jitter must not exceed 25% of base (250ms for a 1s base)");
     }
 }

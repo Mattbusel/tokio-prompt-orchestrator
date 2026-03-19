@@ -461,6 +461,10 @@ impl RedisCache {
     }
 
     /// Issue DBSIZE to get the number of keys in the current Redis database.
+    ///
+    /// Used in integration tests and diagnostic tooling to assert cache state.
+    /// Not called by production code paths; kept to avoid losing the utility
+    /// function between debugging sessions.
     #[allow(dead_code)]
     async fn dbsize_redis(&self) -> Result<usize, redis::RedisError> {
         let mut conn = tokio::time::timeout(

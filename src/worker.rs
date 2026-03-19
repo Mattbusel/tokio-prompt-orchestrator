@@ -374,6 +374,7 @@ impl OpenAiWorker {
 #[async_trait]
 impl ModelWorker for OpenAiWorker {
     async fn infer(&self, prompt: &str) -> Result<Vec<String>, OrchestratorError> {
+        let _infer_start = Instant::now();
         let request = OpenAiRequest {
             model: self.model.clone(),
             messages: vec![OpenAiMessage {
@@ -443,11 +444,18 @@ impl ModelWorker for OpenAiWorker {
             .content
             .clone();
 
-        if content.trim().is_empty() {
+        let result = if content.trim().is_empty() {
             Ok(vec![])
         } else {
             Ok(vec![content])
-        }
+        };
+        tracing::debug!(
+            worker = "openai",
+            model = %self.model,
+            latency_ms = %_infer_start.elapsed().as_millis(),
+            "inference completed"
+        );
+        result
     }
 
     async fn infer_stream(&self, prompt: &str) -> Result<TokenStream, OrchestratorError> {
@@ -688,6 +696,7 @@ impl AnthropicWorker {
 #[async_trait]
 impl ModelWorker for AnthropicWorker {
     async fn infer(&self, prompt: &str) -> Result<Vec<String>, OrchestratorError> {
+        let _infer_start = Instant::now();
         // Use the Messages API (same as infer_stream)
         let request = serde_json::json!({
             "model": self.model,
@@ -762,11 +771,18 @@ impl ModelWorker for AnthropicWorker {
             .collect::<Vec<_>>()
             .join("");
 
-        if full_text.trim().is_empty() {
+        let result = if full_text.trim().is_empty() {
             Ok(vec![])
         } else {
             Ok(vec![full_text])
-        }
+        };
+        tracing::debug!(
+            worker = "anthropic",
+            model = %self.model,
+            latency_ms = %_infer_start.elapsed().as_millis(),
+            "inference completed"
+        );
+        result
     }
 
     async fn infer_stream(&self, prompt: &str) -> Result<TokenStream, OrchestratorError> {
@@ -1014,6 +1030,7 @@ impl Default for LlamaCppWorker {
 #[async_trait]
 impl ModelWorker for LlamaCppWorker {
     async fn infer(&self, prompt: &str) -> Result<Vec<String>, OrchestratorError> {
+        let _infer_start = Instant::now();
         let request = LlamaCppRequest {
             prompt: prompt.to_string(),
             n_predict: self.max_tokens,
@@ -1053,11 +1070,18 @@ impl ModelWorker for LlamaCppWorker {
         // Filter out empty strings so callers receive a genuinely-empty vec when
         // the model returns no text content.
         let content = api_response.content;
-        if content.is_empty() {
+        let result = if content.is_empty() {
             Ok(vec![])
         } else {
             Ok(vec![content])
-        }
+        };
+        tracing::debug!(
+            worker = "llama_cpp",
+            model = "llama.cpp",
+            latency_ms = %_infer_start.elapsed().as_millis(),
+            "inference completed"
+        );
+        result
     }
 }
 
@@ -1203,6 +1227,7 @@ impl Default for VllmWorker {
 #[async_trait]
 impl ModelWorker for VllmWorker {
     async fn infer(&self, prompt: &str) -> Result<Vec<String>, OrchestratorError> {
+        let _infer_start = Instant::now();
         let request = VllmRequest {
             prompt: prompt.to_string(),
             max_tokens: self.max_tokens,
@@ -1242,6 +1267,12 @@ impl ModelWorker for VllmWorker {
                 OrchestratorError::Inference("Empty response from vLLM".to_string())
             })?;
 
+        tracing::debug!(
+            worker = "vllm",
+            model = "vllm",
+            latency_ms = %_infer_start.elapsed().as_millis(),
+            "inference completed"
+        );
         Ok(vec![content])
     }
 }
