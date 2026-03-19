@@ -411,6 +411,12 @@ impl Deduplicator {
                 }
             }
             Entry::Vacant(vac) => {
+                // NOTE: buffer size 16 — allows up to 16 waiters to receive the
+                // completion notification without the sender blocking.  If more
+                // than 16 tasks subscribe and the sender falls behind, `recv()`
+                // returns `Err(RecvError::Lagged)` and the waiter must treat the
+                // request as a miss and re-check the map.  A buffer of 1 would
+                // drop notifications under moderate concurrency.
                 let (tx, _) = broadcast::channel(16);
                 vac.insert(RequestState::InProgress {
                     started_at: SystemTime::now(),
@@ -444,6 +450,7 @@ impl Deduplicator {
                 }
             },
             Entry::Vacant(vac) => {
+                // NOTE: same buffer-size rationale as check_and_register — see above.
                 let (tx, _) = broadcast::channel(16);
                 vac.insert(RequestState::InProgress {
                     started_at: SystemTime::now(),

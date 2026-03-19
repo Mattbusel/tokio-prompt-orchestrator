@@ -228,6 +228,11 @@ pub enum RequestStatus {
 #[derive(Clone)]
 struct RequestTracker {
     status: Arc<DashMap<String, TrackedRequest>>,
+    /// Hard upper bound on the number of tracked entries.
+    /// When the map is at capacity a new insert first evicts the oldest
+    /// completed entry (by `completed_at`).  If no completed entry exists
+    /// the insert is rejected with HTTP 503 to prevent unbounded memory growth.
+    max_entries: usize,
 }
 
 #[cfg(feature = "web-api")]
@@ -395,7 +400,41 @@ impl RequestTracker {
                 tracing::debug!(entries = remaining, "RequestTracker cleanup sweep complete");
             }
         });
-        Self { status }
+        Self {
+            status,
+            max_entries: 100_000,
+        }
+    }
+
+    /// Insert a new entry, enforcing the `max_entries` hard cap.
+    ///
+    /// Returns `true` on success, `false` when the tracker is full and no
+    /// completed entry could be evicted (caller should respond with 503).
+    fn try_insert(&self, request_id: String, entry: TrackedRequest) -> bool {
+        if self.status.len() < self.max_entries {
+            self.status.insert(request_id, entry);
+            return true;
+        }
+        // Cap reached — evict the oldest completed entry by `completed_at`.
+        let oldest_key: Option<String> = self
+            .status
+            .iter()
+            .filter_map(|e| {
+                e.value()
+                    .completed_at
+                    .map(|ts| (e.key().clone(), ts))
+            })
+            .min_by_key(|(_, ts)| *ts)
+            .map(|(k, _)| k);
+
+        if let Some(key) = oldest_key {
+            self.status.remove(&key);
+            self.status.insert(request_id, entry);
+            true
+        } else {
+            // No completed entry to evict — all in-flight; reject this request.
+            false
+        }
     }
 }
 
@@ -763,7 +802,7 @@ async fn infer_handler(
         .deadline_secs
         .map(|s| std::time::Instant::now() + std::time::Duration::from_secs(s));
 
-    state.tracker.status.insert(
+    if !state.tracker.try_insert(
         request_id.clone(),
         TrackedRequest {
             status: RequestStatus::Pending,
@@ -771,7 +810,9 @@ async fn infer_handler(
             error: None,
             completed_at: None,
         },
-    );
+    ) {
+        return Err(AppError::TrackerFull);
+    }
 
     let prompt_req = {
         let base = PromptRequest {
@@ -944,7 +985,7 @@ async fn sse_stream_handler(
     }
 
     // Register request in tracker so collector can write the result.
-    state.tracker.status.insert(
+    if !state.tracker.try_insert(
         request_id.clone(),
         TrackedRequest {
             status: RequestStatus::Processing,
@@ -952,7 +993,9 @@ async fn sse_stream_handler(
             error: None,
             completed_at: None,
         },
-    );
+    ) {
+        return Err(AppError::TrackerFull);
+    }
 
     let tracker = state.tracker.clone();
     let timeout_secs = state.config.timeout_seconds;
@@ -1077,7 +1120,7 @@ async fn websocket_stream(socket: WebSocket, state: Arc<AppState>) {
                         };
 
                         let request_id = Uuid::new_v4().to_string();
-                        state.tracker.status.insert(
+                        if !state.tracker.try_insert(
                             request_id.clone(),
                             TrackedRequest {
                                 status: RequestStatus::Processing,
@@ -1085,7 +1128,14 @@ async fn websocket_stream(socket: WebSocket, state: Arc<AppState>) {
                                 error: None,
                                 completed_at: None,
                             },
-                        );
+                        ) {
+                            let err_msg = serde_json::json!({
+                                "error": "TRACKER_FULL",
+                                "message": "Request tracker at capacity — retry after a backoff period"
+                            }).to_string();
+                            let _ = ws_sink.send(Message::Text(err_msg)).await;
+                            continue;
+                        }
                         let processing_msg = serde_json::json!({
                             "request_id": &request_id,
                             "status": "processing"
@@ -1410,11 +1460,7 @@ async fn pipeline_status_handler(State(state): State<Arc<AppState>>) -> Json<ser
 /// This function never panics.
 #[cfg(feature = "web-api")]
 async fn health_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let cb_open = if let Some(ref cb) = state.circuit_breaker {
-        cb.is_open_sync()
-    } else {
-        false
-    };
+    let cb_open = state.circuit_breaker.is_open_sync();
     if cb_open {
         (StatusCode::SERVICE_UNAVAILABLE,
          Json(serde_json::json!({"status":"degraded","reason":"circuit_breaker_open","version":env!("CARGO_PKG_VERSION")})))
@@ -1737,7 +1783,7 @@ async fn batch_handler(
                     .map(|s| format!("{s}-{i}"))
                     .unwrap_or_else(|| format!("batch-{request_id}"));
 
-                state.tracker.status.insert(
+                if !state.tracker.try_insert(
                     request_id.clone(),
                     TrackedRequest {
                         status: RequestStatus::Pending,
@@ -1745,7 +1791,14 @@ async fn batch_handler(
                         error: None,
                         completed_at: None,
                     },
-                );
+                ) {
+                    state.batch_tracker.record_failed(&batch_id);
+                    return BatchItemResult {
+                        request_id,
+                        text: None,
+                        error: Some("tracker_full".to_string()),
+                    };
+                }
 
                 let prompt_req = PromptRequest {
                     session: SessionId::new(session_id),
@@ -2086,6 +2139,8 @@ enum AppError {
     ValidationError(ValidationErrorBody),
     /// A debug endpoint was requested but debug mode is disabled.
     DebugDisabled,
+    /// The request tracker is at capacity and cannot accept new entries.
+    TrackerFull,
 }
 
 #[cfg(feature = "web-api")]
@@ -2130,6 +2185,14 @@ impl IntoResponse for AppError {
             AppError::DebugDisabled => (
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({"error": "not_found", "message": "Debug endpoints are disabled"})),
+            )
+                .into_response(),
+            AppError::TrackerFull => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "tracker_full",
+                    "message": "Request tracker at capacity — retry after a backoff period"
+                })),
             )
                 .into_response(),
         }
@@ -2308,6 +2371,7 @@ mod tests {
             pipeline_tx: tx,
             tracker: RequestTracker {
                 status: Arc::new(DashMap::new()),
+                max_entries: 100_000,
             },
             batch_tracker: BatchJobTracker::new(),
             config: ServerConfig::default(),

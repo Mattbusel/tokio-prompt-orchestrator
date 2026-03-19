@@ -292,9 +292,20 @@ impl OpenAiWorker {
         self
     }
 
-    /// Set temperature (0.0 - 2.0)
+    /// Set temperature (0.0 – 2.0 for OpenAI).
+    ///
+    /// Values outside `[0.0, 2.0]` are clamped and a `WARN`-level log line is
+    /// emitted.  The OpenAI API rejects values outside this range with HTTP 400.
     pub fn with_temperature(mut self, temperature: f32) -> Self {
-        self.temperature = temperature;
+        if !(0.0..=2.0).contains(&temperature) {
+            tracing::warn!(
+                temperature = temperature,
+                "OpenAI temperature out of range [0.0, 2.0] — clamping"
+            );
+            self.temperature = temperature.clamp(0.0, 2.0);
+        } else {
+            self.temperature = temperature;
+        }
         self
     }
 
@@ -571,9 +582,20 @@ impl AnthropicWorker {
         self
     }
 
-    /// Set temperature (0.0 - 1.0)
+    /// Set temperature (0.0 – 1.0 for Anthropic).
+    ///
+    /// Values outside `[0.0, 1.0]` are clamped and a `WARN`-level log line is
+    /// emitted.  The Anthropic API rejects values outside this range with HTTP 400.
     pub fn with_temperature(mut self, temperature: f32) -> Self {
-        self.temperature = temperature;
+        if !(0.0..=1.0).contains(&temperature) {
+            tracing::warn!(
+                temperature = temperature,
+                "Anthropic temperature out of range [0.0, 1.0] — clamping"
+            );
+            self.temperature = temperature.clamp(0.0, 1.0);
+        } else {
+            self.temperature = temperature;
+        }
         self
     }
 
@@ -862,9 +884,20 @@ impl LlamaCppWorker {
         self
     }
 
-    /// Set temperature
+    /// Set temperature (0.0 – 2.0).
+    ///
+    /// Values outside `[0.0, 2.0]` are clamped and a `WARN`-level log line is
+    /// emitted.  Most llama.cpp-compatible servers reject values outside this range.
     pub fn with_temperature(mut self, temperature: f32) -> Self {
-        self.temperature = temperature;
+        if !(0.0..=2.0).contains(&temperature) {
+            tracing::warn!(
+                temperature = temperature,
+                "LlamaCpp temperature out of range [0.0, 2.0] — clamping"
+            );
+            self.temperature = temperature.clamp(0.0, 2.0);
+        } else {
+            self.temperature = temperature;
+        }
         self
     }
 
@@ -1007,9 +1040,20 @@ impl VllmWorker {
         self
     }
 
-    /// Set temperature
+    /// Set temperature (0.0 – 2.0).
+    ///
+    /// Values outside `[0.0, 2.0]` are clamped and a `WARN`-level log line is
+    /// emitted.  Most vLLM-compatible servers reject values outside this range.
     pub fn with_temperature(mut self, temperature: f32) -> Self {
-        self.temperature = temperature;
+        if !(0.0..=2.0).contains(&temperature) {
+            tracing::warn!(
+                temperature = temperature,
+                "vLLM temperature out of range [0.0, 2.0] — clamping"
+            );
+            self.temperature = temperature.clamp(0.0, 2.0);
+        } else {
+            self.temperature = temperature;
+        }
         self
     }
 

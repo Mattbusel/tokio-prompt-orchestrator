@@ -231,6 +231,14 @@ pub fn validate(config: &PipelineConfig) -> Result<(), Vec<ConfigError>> {
         });
     }
 
+    if config.deduplication.max_entries > 1_000_000 {
+        errors.push(ConfigError::InvalidField {
+            field: "deduplication.max_entries".into(),
+            value: config.deduplication.max_entries.to_string(),
+            reason: "dedup_max_entries exceeds maximum allowed value of 1_000_000".into(),
+        });
+    }
+
     // ── Metrics port range ──────────────────────────────────────────
     if let Some(port) = config.observability.metrics_port {
         if port == 0 {
@@ -590,6 +598,25 @@ mod tests {
         let mut config = valid_config();
         config.deduplication.enabled = false;
         config.deduplication.window_s = 0;
+        assert!(validate(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_dedup_max_entries_over_limit_fails() {
+        let mut config = valid_config();
+        config.deduplication.max_entries = 1_000_001;
+        let errors = validate(&config).unwrap_err();
+        assert!(errors.iter().any(|e| {
+            matches!(e, ConfigError::InvalidField { field, reason, .. }
+                if field == "deduplication.max_entries"
+                    && reason.contains("1_000_000"))
+        }));
+    }
+
+    #[test]
+    fn test_validate_dedup_max_entries_at_limit_passes() {
+        let mut config = valid_config();
+        config.deduplication.max_entries = 1_000_000;
         assert!(validate(&config).is_ok());
     }
 
