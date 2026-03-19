@@ -28,6 +28,6 @@ pub mod scorer;
 
 // Re-exports for convenience
 pub use config::RoutingConfig;
-pub use cost_tracker::{CostSnapshot, CostTracker};
+pub use cost_tracker::{CostSnapshot, CostTracker, SessionBudgetTracker};
 pub use router::{ModelRouter, RoutingDecision};
 pub use scorer::{ComplexityScorer, ScoreBreakdown};

@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use super::DistributedError;
 
@@ -84,6 +84,18 @@ impl NatsBus {
     /// # Panics
     /// This function never panics.
     pub async fn connect(nats_url: &str, node_id: &str) -> Result<Self, DistributedError> {
+        // Warn when connecting to a non-localhost address over unencrypted NATS.
+        {
+            let is_tls = nats_url.starts_with("nats+tls://") || nats_url.starts_with("tls://");
+            let is_local = nats_url.contains("localhost") || nats_url.contains("127.0.0.1");
+            if !is_tls && !is_local {
+                warn!(
+                    "Connecting to {} over unencrypted TCP — consider using TLS in production",
+                    nats_url
+                );
+            }
+        }
+
         let client = async_nats::connect(nats_url).await.map_err(|e| {
             DistributedError::NatsConnection(format!(
                 "failed to connect to NATS at {nats_url}: {e}"

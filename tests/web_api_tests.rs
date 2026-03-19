@@ -1115,6 +1115,104 @@ async fn test_infer_endpoint_large_prompt_succeeds() {
 }
 
 // ============================================================================
+// Error Path Tests — 404, Malformed Body, Timeout
+// ============================================================================
+
+/// GET /api/v1/nonexistent must return 404.
+#[tokio::test]
+async fn test_unknown_endpoint_returns_404() {
+    let (base, _rx) = spawn_server().await;
+    let resp = client()
+        .get(format!("{base}/api/v1/does_not_exist"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "unknown endpoint must return 404"
+    );
+}
+
+/// POST /api/v1/infer with a JSON body that is syntactically valid JSON but
+/// semantically wrong (integer instead of a string prompt) must return a 4xx.
+#[tokio::test]
+async fn test_malformed_request_body_wrong_type_returns_4xx() {
+    let (base, _rx) = spawn_server().await;
+    let resp = client()
+        .post(format!("{base}/api/v1/infer"))
+        .header("content-type", "application/json")
+        // `prompt` must be a string; sending an integer is malformed.
+        .body(r#"{"prompt": 12345}"#)
+        .send()
+        .await
+        .expect("send");
+    assert!(
+        resp.status().is_client_error(),
+        "wrong type for prompt field must return 4xx, got {}",
+        resp.status()
+    );
+}
+
+/// POST /api/v1/infer with a truncated / incomplete JSON object must return 4xx.
+#[tokio::test]
+async fn test_malformed_request_body_truncated_json_returns_4xx() {
+    let (base, _rx) = spawn_server().await;
+    let resp = client()
+        .post(format!("{base}/api/v1/infer"))
+        .header("content-type", "application/json")
+        .body(r#"{"prompt": "hello"#) // missing closing brace
+        .send()
+        .await
+        .expect("send");
+    assert!(
+        resp.status().is_client_error(),
+        "truncated JSON must return 4xx, got {}",
+        resp.status()
+    );
+}
+
+/// POST /api/v1/infer with completely random binary-like content must return 4xx.
+#[tokio::test]
+async fn test_malformed_request_body_binary_content_returns_4xx() {
+    let (base, _rx) = spawn_server().await;
+    let resp = client()
+        .post(format!("{base}/api/v1/infer"))
+        .header("content-type", "application/json")
+        .body(b"\x00\x01\x02\x03garbage".as_ref())
+        .send()
+        .await
+        .expect("send");
+    assert!(
+        resp.status().is_client_error(),
+        "binary body with JSON content-type must return 4xx, got {}",
+        resp.status()
+    );
+}
+
+/// The server must not time out on its own while a fast request is in-flight —
+/// verify the infer endpoint responds well within the configured 2-second
+/// server timeout.
+#[tokio::test]
+async fn test_fast_request_completes_before_server_timeout() {
+    let (base, _rx) = spawn_server().await;
+    let start = std::time::Instant::now();
+    let resp = client()
+        .post(format!("{base}/api/v1/infer"))
+        .json(&json!({"prompt": "fast"}))
+        .send()
+        .await
+        .expect("send");
+    let elapsed = start.elapsed();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "fast request must complete in under 2s, took {:?}",
+        elapsed
+    );
+}
+
+// ============================================================================
 // Health Endpoint — Idempotent
 // ============================================================================
 
