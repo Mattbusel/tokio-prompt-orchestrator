@@ -282,6 +282,19 @@ fn default_inference_workers() -> usize {
     1
 }
 
+/// Default adaptive timeout minimum floor: 500 ms.
+///
+/// **Why 500 ms?** This is a conservative lower bound that prevents the
+/// adaptive algorithm from producing a timeout so short that it triggers
+/// spurious failures during brief periods of low-latency traffic.  Cloud LLM
+/// APIs often have a non-trivial connection establishment cost (~100–300 ms)
+/// that would be mis-classified as a timeout at a sub-500 ms floor.  Operators
+/// running local inference servers with sub-100 ms P99 should lower this to
+/// match their actual minimum latency.
+fn default_adaptive_timeout_min_ms() -> u64 {
+    500
+}
+
 /// Inference stage configuration.
 ///
 /// Specifies the worker backend, model, and generation parameters.
@@ -308,6 +321,12 @@ pub struct InferenceStageConfig {
     /// parallelism for high-throughput deployments.
     #[serde(default = "default_inference_workers")]
     pub inference_workers: usize,
+    /// Enable adaptive timeout based on P95 of recent inferences. Overrides timeout_ms if set.
+    #[serde(default)]
+    pub adaptive_timeout_enabled: bool,
+    /// Minimum adaptive timeout floor in milliseconds (only used when adaptive_timeout_enabled = true).
+    #[serde(default = "default_adaptive_timeout_min_ms")]
+    pub adaptive_timeout_min_ms: u64,
 }
 
 /// Supported model worker backends.
@@ -401,7 +420,7 @@ impl<'de> serde::Deserialize<'de> for Provider {
 /// # Panics
 ///
 /// This type never panics.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct WorkerConfig {
     /// Model name to use (e.g. `"gpt-4o"`, `"claude-opus-4-6"`).
@@ -417,6 +436,19 @@ pub struct WorkerConfig {
     pub host: Option<String>,
     /// Port for local servers (llama.cpp / vLLM).
     pub port: Option<u16>,
+}
+
+impl Default for WorkerConfig {
+    fn default() -> Self {
+        Self {
+            model: None,
+            api_base_url: None,
+            max_tokens: None,
+            temperature: None,
+            host: None,
+            port: None,
+        }
+    }
 }
 
 /// Per-worker configuration map, keyed by provider name.
@@ -847,6 +879,9 @@ metrics_port = 9090
                     max_tokens: Some(2048),
                     temperature: Some(0.5),
                     timeout_ms: Some(60000),
+                    inference_workers: 1,
+                    adaptive_timeout_enabled: false,
+                    adaptive_timeout_min_ms: 500,
                 },
                 post_process: PostProcessStageConfig {
                     enabled: true,
@@ -911,6 +946,9 @@ metrics_port = 9090
                     max_tokens: None,
                     temperature: None,
                     timeout_ms: None,
+                    inference_workers: 1,
+                    adaptive_timeout_enabled: false,
+                    adaptive_timeout_min_ms: 500,
                 },
                 post_process: PostProcessStageConfig {
                     enabled: true,
