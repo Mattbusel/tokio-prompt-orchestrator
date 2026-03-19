@@ -1080,7 +1080,7 @@ mod tests {
                     auto_concluded = true;
                     break;
                 }
-                Err(e) => panic!("unexpected error: {e}"),
+                Err(e) => unreachable!("unexpected error: {e}"),
             }
         }
 
@@ -1103,7 +1103,7 @@ mod tests {
                         auto_concluded = true;
                         break;
                     }
-                    Err(e) => panic!("unexpected error: {e}"),
+                    Err(e) => unreachable!("unexpected error: {e}"),
                 }
             }
         }
@@ -1283,7 +1283,7 @@ mod tests {
                     concluded = true;
                     break;
                 }
-                Err(e) => panic!("unexpected error from add_control_sample: {e}"),
+                Err(e) => unreachable!("unexpected error from add_control_sample: {e}"),
             }
 
             // Check if add_treatment_sample concludes the experiment
@@ -1298,7 +1298,7 @@ mod tests {
                     concluded = true;
                     break;
                 }
-                Err(e) => panic!("unexpected error from add_treatment_sample: {e}"),
+                Err(e) => unreachable!("unexpected error from add_treatment_sample: {e}"),
             }
         }
         assert!(concluded, "experiment should have timed out at max samples");

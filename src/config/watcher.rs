@@ -121,23 +121,40 @@ impl ConfigWatcher {
                 .unwrap_or_else(std::time::Instant::now);
 
             loop {
-                // Check for events in a non-blocking loop with a small sleep
-                tokio::time::sleep(Duration::from_millis(100)).await;
-
+                // Block on the notify channel with a timeout instead of
+                // busy-polling with try_recv + sleep.  500 ms gives a good
+                // balance: fast reaction to file changes while keeping CPU use
+                // near zero when the file is idle.
                 let mut should_reload = false;
-                while let Ok(event) = notify_rx.try_recv() {
-                    // Only react to modify/create events for our config file
-                    match event.kind {
-                        EventKind::Modify(_) | EventKind::Create(_) => {
-                            let is_our_file = event
-                                .paths
-                                .iter()
-                                .any(|p| p.file_name() == config_path.file_name());
-                            if is_our_file {
-                                should_reload = true;
+                // Collect any events that arrived within the timeout window.
+                match notify_rx.recv_timeout(Duration::from_millis(500)) {
+                    Ok(first_event) => {
+                        // Process the first event, then drain any extras that
+                        // arrived concurrently.
+                        let events = std::iter::once(first_event)
+                            .chain(std::iter::from_fn(|| notify_rx.try_recv().ok()))
+                            .collect::<Vec<_>>();
+                        for event in events {
+                            match event.kind {
+                                EventKind::Modify(_) | EventKind::Create(_) => {
+                                    let is_our_file = event
+                                        .paths
+                                        .iter()
+                                        .any(|p| p.file_name() == config_path.file_name());
+                                    if is_our_file {
+                                        should_reload = true;
+                                    }
+                                }
+                                _ => {}
                             }
                         }
-                        _ => {}
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        // Nothing arrived — loop back and wait again.
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        tracing::warn!("config watcher: notify channel disconnected, stopping");
+                        break;
                     }
                 }
 

@@ -662,7 +662,7 @@ mod tests {
     #[test]
     fn test_new_creates_detector() {
         let det = AnomalyDetector::new(AnomalyDetectorConfig::default());
-        let inner = det.inner.lock().unwrap();
+        let inner = det.inner.lock().unwrap_or_else(|p| { tracing::warn!("anomaly: recovering from poisoned mutex"); p.into_inner() });
         assert!(inner.windows.is_empty());
         assert!(inner.cusum_states.is_empty());
         assert!(inner.anomaly_history.is_empty());
@@ -671,7 +671,7 @@ mod tests {
     #[test]
     fn test_with_defaults() {
         let det = AnomalyDetector::with_defaults();
-        let inner = det.inner.lock().unwrap();
+        let inner = det.inner.lock().unwrap_or_else(|p| { tracing::warn!("anomaly: recovering from poisoned mutex"); p.into_inner() });
         assert_eq!(inner.config.z_score.window_size, 60);
         assert_eq!(inner.config.cusum.threshold, 5.0);
         assert!(inner.config.isolation_enabled);
@@ -994,7 +994,7 @@ mod tests {
         assert!(result.is_ok());
 
         // All three metrics should have windows
-        let inner = det.inner.lock().unwrap();
+        let inner = det.inner.lock().unwrap_or_else(|p| { tracing::warn!("anomaly: recovering from poisoned mutex"); p.into_inner() });
         assert!(inner.windows.contains_key("cpu"));
         assert!(inner.windows.contains_key("mem"));
         assert!(inner.windows.contains_key("disk"));
@@ -1150,7 +1150,7 @@ mod tests {
 
         // Manually push an anomaly into history
         {
-            let mut inner = det.inner.lock().unwrap();
+            let mut inner = det.inner.lock().unwrap_or_else(|p| { tracing::warn!("anomaly: recovering from poisoned mutex"); p.into_inner() });
             inner.anomaly_history.push(Anomaly {
                 metric: "test".to_string(),
                 value: 1.0,
@@ -1186,7 +1186,7 @@ mod tests {
             let _ = det.ingest("bounded", i as f64);
         }
 
-        let inner = det.inner.lock().unwrap();
+        let inner = det.inner.lock().unwrap_or_else(|p| { tracing::warn!("anomaly: recovering from poisoned mutex"); p.into_inner() });
         let window = inner.windows.get("bounded").unwrap();
         assert!(
             window.len() <= 10,
@@ -1268,7 +1268,7 @@ mod tests {
         let _ = det1.ingest("shared_metric", 42.0);
 
         // det2 should see the same window
-        let inner = det2.inner.lock().unwrap();
+        let inner = det2.inner.lock().unwrap_or_else(|p| { tracing::warn!("anomaly: recovering from poisoned mutex"); p.into_inner() });
         assert!(inner.windows.contains_key("shared_metric"));
     }
 
@@ -1285,7 +1285,7 @@ mod tests {
             let _ = det.ingest("beta", 200.0);
         }
 
-        let inner = det.inner.lock().unwrap();
+        let inner = det.inner.lock().unwrap_or_else(|p| { tracing::warn!("anomaly: recovering from poisoned mutex"); p.into_inner() });
         let alpha_window = inner.windows.get("alpha").unwrap();
         let beta_window = inner.windows.get("beta").unwrap();
 
@@ -1390,13 +1390,13 @@ mod tests {
 
         // Set a low cap for testing
         {
-            let mut inner = det.inner.lock().unwrap();
+            let mut inner = det.inner.lock().unwrap_or_else(|p| { tracing::warn!("anomaly: recovering from poisoned mutex"); p.into_inner() });
             inner.max_history = 5;
         }
 
         // Insert many anomalies directly
         {
-            let mut inner = det.inner.lock().unwrap();
+            let mut inner = det.inner.lock().unwrap_or_else(|p| { tracing::warn!("anomaly: recovering from poisoned mutex"); p.into_inner() });
             for i in 0..20 {
                 inner.anomaly_history.push(Anomaly {
                     metric: format!("m{i}"),

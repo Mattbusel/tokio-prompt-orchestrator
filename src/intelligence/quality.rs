@@ -328,7 +328,10 @@ mod tests {
         let e = estimator();
         e.estimate("q", "a longer response text here.", "local")
             .unwrap();
-        let g = e.history.lock().unwrap();
+        let g = e.history.lock().unwrap_or_else(|p| {
+            tracing::warn!("quality: recovering from poisoned mutex");
+            p.into_inner()
+        });
         assert_eq!(g.len(), 1);
     }
 

@@ -172,8 +172,11 @@ impl ModelRouter {
         let effective_threshold = self
             .effective_cloud_threshold
             .read()
-            .map(|g| *g)
-            .unwrap_or(self.config.cloud_threshold);
+            .unwrap_or_else(|p| {
+                tracing::warn!("router: RwLock poisoned, using stale state");
+                p.into_inner()
+            })
+            .to_owned();
 
         if score < self.config.local_threshold {
             RoutingDecision::Local {
@@ -251,8 +254,11 @@ impl ModelRouter {
     pub fn effective_cloud_threshold(&self) -> f64 {
         self.effective_cloud_threshold
             .read()
-            .map(|g| *g)
-            .unwrap_or(self.config.cloud_threshold)
+            .unwrap_or_else(|p| {
+                tracing::warn!("router: RwLock poisoned, using stale state");
+                p.into_inner()
+            })
+            .to_owned()
     }
 
     /// Return a reference to the scorer for external breakdown queries.

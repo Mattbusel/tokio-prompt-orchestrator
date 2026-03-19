@@ -596,7 +596,7 @@ mod tests {
                 assert!((limit - 1.0).abs() < f64::EPSILON);
                 assert!((spent - 1.1).abs() < 1e-9);
             }
-            other => panic!("expected BudgetExceeded, got {:?}", other),
+            other => unreachable!("expected BudgetExceeded, got {:?}", other),
         }
     }
 

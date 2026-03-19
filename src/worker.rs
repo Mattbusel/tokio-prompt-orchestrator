@@ -13,6 +13,22 @@
 //! - `ANTHROPIC_API_KEY`: Required for AnthropicWorker
 //! - `LLAMA_CPP_URL`: llama.cpp server URL (default: http://localhost:8080)
 //! - `VLLM_URL`: vLLM server URL (default: http://localhost:8000)
+//!
+//! ## Design note: workers are pipeline components
+//!
+//! Workers are designed to be used through the pipeline orchestrated in
+//! `stages.rs`, not called directly in production code.  The pipeline provides
+//! circuit breaking, backpressure, dead-letter queuing, and timeout handling
+//! around every worker call.
+//!
+//! If you call a worker directly (e.g. in tests or custom integrations), you
+//! must supply your own retry, timeout, and backoff strategy.
+//!
+//! # Note (debug builds only)
+//!
+//! In debug builds (`cfg(debug_assertions)`) consider adding assertions that
+//! verify a pipeline context is present when calling workers directly, to
+//! catch accidental direct use in integration tests.
 
 use crate::{metrics, OrchestratorError};
 use async_trait::async_trait;
@@ -56,6 +72,13 @@ fn warn_if_low_remaining(headers: &reqwest::header::HeaderMap, provider: &str) {
 ///
 /// Implementations must be thread-safe (Send + Sync) for use across tasks.
 /// The trait is object-safe to allow dynamic dispatch via Arc<dyn ModelWorker>.
+///
+/// # Resilience
+///
+/// Worker implementations do **not** include retry logic. Retries are handled
+/// by the pipeline's inference stage (see `stages::inference_stage`). If you
+/// call a worker directly outside of the pipeline, you are responsible for
+/// implementing appropriate retry, timeout, and backoff logic.
 #[async_trait]
 pub trait ModelWorker: Send + Sync {
     /// Perform inference on the given prompt.
@@ -222,6 +245,11 @@ struct OpenAiResponseMessage {
 /// );
 /// # Ok(()) }
 /// ```
+///
+/// # Resilience
+///
+/// `OpenAiWorker` does not retry internally. Retry logic is handled by the
+/// pipeline's inference stage. See [`ModelWorker`] for details.
 #[derive(Debug)]
 pub struct OpenAiWorker {
     client: reqwest::Client,
@@ -496,6 +524,11 @@ impl ModelWorker for OpenAiWorker {
 /// );
 /// # Ok(()) }
 /// ```
+///
+/// # Resilience
+///
+/// `AnthropicWorker` does not retry internally. Retry logic is handled by the
+/// pipeline's inference stage. See [`ModelWorker`] for details.
 #[derive(Debug)]
 pub struct AnthropicWorker {
     client: reqwest::Client,
@@ -1352,7 +1385,7 @@ mod tests {
                     "Error should name the missing var"
                 );
             }
-            other => panic!("Expected ConfigError, got {:?}", other),
+            other => unreachable!("Expected ConfigError, got {:?}", other),
         }
     }
 
@@ -1406,7 +1439,7 @@ mod tests {
                     "Error message should include the status code"
                 );
             }
-            other => panic!("Expected Inference error, got {:?}", other),
+            other => unreachable!("Expected Inference error, got {:?}", other),
         }
     }
 
@@ -1434,7 +1467,7 @@ mod tests {
                     "Error should mention missing choices"
                 );
             }
-            other => panic!("Expected Inference error, got {:?}", other),
+            other => unreachable!("Expected Inference error, got {:?}", other),
         }
     }
 
@@ -1573,7 +1606,7 @@ mod tests {
                     "Error should name the missing var"
                 );
             }
-            other => panic!("Expected ConfigError, got {:?}", other),
+            other => unreachable!("Expected ConfigError, got {:?}", other),
         }
     }
 
@@ -1624,7 +1657,7 @@ mod tests {
             OrchestratorError::Inference(msg) => {
                 assert!(msg.contains("500"), "Error should include the status code");
             }
-            other => panic!("Expected Inference error, got {:?}", other),
+            other => unreachable!("Expected Inference error, got {:?}", other),
         }
     }
 
@@ -1800,7 +1833,7 @@ mod tests {
             OrchestratorError::Inference(msg) => {
                 assert!(msg.contains("500"), "Error should include the status code");
             }
-            other => panic!("Expected Inference error, got {:?}", other),
+            other => unreachable!("Expected Inference error, got {:?}", other),
         }
     }
 
@@ -1925,7 +1958,7 @@ mod tests {
             OrchestratorError::Inference(msg) => {
                 assert!(msg.contains("500"), "Error should include the status code");
             }
-            other => panic!("Expected Inference error, got {:?}", other),
+            other => unreachable!("Expected Inference error, got {:?}", other),
         }
     }
 
@@ -1945,7 +1978,7 @@ mod tests {
             OrchestratorError::Inference(msg) => {
                 assert!(msg.contains("Empty"), "Error should mention empty response");
             }
-            other => panic!("Expected Inference error, got {:?}", other),
+            other => unreachable!("Expected Inference error, got {:?}", other),
         }
     }
 

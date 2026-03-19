@@ -603,11 +603,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_queue_from_tasks_creates_lock_dir() {
-        let dir = TempDir::new().ok().unwrap_or_else(|| {
-            TempDir::new()
-                .ok()
-                .unwrap_or_else(|| panic!("cannot create temp dir"))
-        });
+        let dir = TempDir::new()
+            .or_else(|_| TempDir::new())
+            .expect("test setup: tempdir creation failed");
         let config = test_config(&dir);
         let lock_dir = config.lock_dir.clone();
         let queue = TaskQueue::from_tasks(config, test_tasks()).await;

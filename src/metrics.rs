@@ -84,6 +84,8 @@ pub struct Metrics {
     pub session_affinity_hits_total: Counter,
     /// Session affinity routing misses (preferred shard unavailable, rerouted).
     pub session_affinity_misses_total: Counter,
+    /// Dedup hash collisions: two different prompts produced the same hash key.
+    pub dedup_hash_collisions_total: Counter,
 }
 
 static METRICS: OnceLock<Metrics> = OnceLock::new();
@@ -282,9 +284,9 @@ pub fn init_metrics() -> Result<(), OrchestratorError> {
     let worker_errors_total = CounterVec::new(
         Opts::new(
             "orchestrator_worker_errors_total",
-            "Errors returned by a named worker, labelled by worker name",
+            "Errors returned by a named worker, labelled by worker name and error kind",
         ),
-        &["worker"],
+        &["worker", "error_kind"],
     )
     .map_err(|e| OrchestratorError::Other(format!("metrics init failed: {e}")))?;
     registry
@@ -352,6 +354,15 @@ pub fn init_metrics() -> Result<(), OrchestratorError> {
         .register(Box::new(session_affinity_misses_total.clone()))
         .map_err(|e| OrchestratorError::Other(format!("metrics registration failed: {e}")))?;
 
+    let dedup_hash_collisions_total = Counter::with_opts(Opts::new(
+        "orchestrator_dedup_hash_collisions_total",
+        "Number of times two different prompts produced the same dedup hash key",
+    ))
+    .map_err(|e| OrchestratorError::Other(format!("metrics init failed: {e}")))?;
+    registry
+        .register(Box::new(dedup_hash_collisions_total.clone()))
+        .map_err(|e| OrchestratorError::Other(format!("metrics registration failed: {e}")))?;
+
     // If another thread raced us, the first one wins  -  both initializations
     // produce identical metric descriptors, so neither outcome is incorrect.
     let _ = METRICS.set(Metrics {
@@ -380,6 +391,7 @@ pub fn init_metrics() -> Result<(), OrchestratorError> {
         config_reload_duration_seconds,
         session_affinity_hits_total,
         session_affinity_misses_total,
+        dedup_hash_collisions_total,
     });
 
     Ok(())
@@ -675,11 +687,30 @@ pub fn inc_config_reload_error() {
 /// # Panics
 ///
 /// This function never panics.
-pub fn inc_worker_error(worker: &str) {
+pub fn inc_worker_error(worker: &str, error_kind: &str) {
     if let Some(m) = metrics() {
-        if let Ok(c) = m.worker_errors_total.get_metric_with_label_values(&[worker]) {
+        if let Ok(c) = m
+            .worker_errors_total
+            .get_metric_with_label_values(&[worker, error_kind])
+        {
             c.inc();
         }
+    }
+}
+
+/// Increment the dedup hash collision counter.
+///
+/// Call when two different prompts are found to produce the same hash key in the
+/// deduplication layer, indicating a hash collision.
+///
+/// No-op if metrics have not been initialised.
+///
+/// # Panics
+///
+/// This function never panics.
+pub fn inc_dedup_hash_collision() {
+    if let Some(m) = metrics() {
+        m.dedup_hash_collisions_total.inc();
     }
 }
 
@@ -1031,7 +1062,7 @@ mod tests {
 
         let worker_errors_total = CounterVec::new(
             Opts::new("t_worker_errors_total", "test counter"),
-            &["worker"],
+            &["worker", "error_kind"],
         )
         .expect("CounterVec construction must succeed in tests");
         registry
@@ -1084,6 +1115,13 @@ mod tests {
             .register(Box::new(session_affinity_misses_total.clone()))
             .expect("register must succeed in tests");
 
+        let dedup_hash_collisions_total =
+            Counter::with_opts(Opts::new("t_dedup_hash_collisions_total", "test counter"))
+                .expect("Counter construction must succeed in tests");
+        registry
+            .register(Box::new(dedup_hash_collisions_total.clone()))
+            .expect("register must succeed in tests");
+
         Metrics {
             registry,
             requests_total,
@@ -1110,6 +1148,7 @@ mod tests {
             config_reload_duration_seconds,
             session_affinity_hits_total,
             session_affinity_misses_total,
+            dedup_hash_collisions_total,
         }
     }
 

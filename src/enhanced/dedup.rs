@@ -147,6 +147,15 @@ pub struct DeduplicationToken {
 /// in normal LLM output, making it safe to use as a reserved signal.
 pub const DEDUP_CANCELLED_SENTINEL: &str = "\x00CANCELLED";
 
+/// Returns `true` if the dedup result string represents a cancellation signal.
+///
+/// Callers that receive a result from [`Deduplicator::wait_for_result`] should
+/// use this function instead of comparing to the raw sentinel directly, so
+/// that internal implementation details remain hidden.
+pub fn is_cancelled_result(result: &str) -> bool {
+    result == DEDUP_CANCELLED_SENTINEL
+}
+
 impl Drop for DeduplicationToken {
     fn drop(&mut self) {
         // Only act if this is the last clone and complete() was never called.
@@ -787,7 +796,7 @@ mod tests {
             DeduplicationResult::New(token) => {
                 assert_eq!(token.key, "test-key");
             }
-            _ => panic!("Expected new request"),
+            _ => unreachable!("Expected new request"),
         }
     }
 
@@ -798,13 +807,13 @@ mod tests {
         // First request
         let token = match dedup.check_and_register("test-key").await {
             DeduplicationResult::New(t) => t,
-            _ => panic!("Expected new request"),
+            _ => unreachable!("Expected new request"),
         };
 
         // Second request (while first is in progress)
         match dedup.check_and_register("test-key").await {
             DeduplicationResult::InProgress => {} // Expected
-            _ => panic!("Expected in-progress"),
+            _ => unreachable!("Expected in-progress"),
         }
 
         // Complete first request
@@ -815,7 +824,7 @@ mod tests {
             DeduplicationResult::Cached(result) => {
                 assert_eq!(result, "result");
             }
-            _ => panic!("Expected cached result"),
+            _ => unreachable!("Expected cached result"),
         }
     }
 
@@ -826,7 +835,7 @@ mod tests {
         // Register request
         let token = match dedup.check_and_register("test-key").await {
             DeduplicationResult::New(t) => t,
-            _ => panic!("Expected new request"),
+            _ => unreachable!("Expected new request"),
         };
 
         // Spawn task to wait
@@ -855,7 +864,7 @@ mod tests {
         // Verify it's cached
         match dedup.check_and_register("test-key").await {
             DeduplicationResult::Cached(_) => {} // expected
-            other => panic!("expected Cached, got {:?}", other),
+            other => unreachable!("expected Cached, got {:?}", other),
         }
 
         // Wait for TTL to expire
@@ -864,7 +873,7 @@ mod tests {
         // Now it should be treated as new
         match dedup.check_and_register("test-key").await {
             DeduplicationResult::New(_) => {} // expected
-            other => panic!("expected New after expiry, got {:?}", other),
+            other => unreachable!("expected New after expiry, got {:?}", other),
         }
     }
 
@@ -922,7 +931,7 @@ mod tests {
         // Register and complete a request so there is some state.
         let token = match dedup.check_and_register("key").await {
             DeduplicationResult::New(t) => t,
-            _ => panic!("expected New"),
+            _ => unreachable!("expected New"),
         };
         dedup.complete(token, "result".into()).await;
         // shutdown() must return promptly (background task wakes every 60 s,

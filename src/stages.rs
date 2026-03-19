@@ -636,6 +636,13 @@ async fn assemble_stage(
 /// Delegates to the ModelWorker trait for actual LLM inference.
 /// This stage is the hot path and should be horizontally scalable.
 ///
+/// # Retry and timeout policy
+///
+/// Retry logic and per-request timeout enforcement are centralised here.
+/// The circuit breaker (`CircuitBreaker::call`) wraps every worker call, and
+/// `tokio::time::timeout` enforces the wall-clock deadline per request.
+/// Individual [`ModelWorker`] implementations do **not** retry; see `worker.rs`.
+///
 /// # Panics
 ///
 /// This function never panics.
@@ -817,7 +824,7 @@ async fn inference_stage(
                     "Inference failed"
                 );
                 metrics::inc_error("inference", "inference_failure");
-                metrics::inc_worker_error("unknown");
+                metrics::inc_worker_error("unknown", "inference_error");
                 dlq.push(DroppedRequest {
                     request_id: request_id.clone(),
                     session_id: session_id.clone(),
@@ -1009,7 +1016,7 @@ async fn inference_stage_pool_worker(
                     "Inference pool worker: inference failed"
                 );
                 metrics::inc_error("inference", "inference_failure");
-                metrics::inc_worker_error("unknown");
+                metrics::inc_worker_error("unknown", "inference_error");
                 dlq.push(DroppedRequest {
                     request_id: request_id.clone(),
                     session_id: session_id.clone(),
@@ -1528,7 +1535,7 @@ async fn inference_stage_with_intelligence(
                     "Inference failed"
                 );
                 metrics::inc_error("inference", "inference_failure");
-                metrics::inc_worker_error(&worker_name);
+                metrics::inc_worker_error(&worker_name, "inference_error");
             }
         }
     }

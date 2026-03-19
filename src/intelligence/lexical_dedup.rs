@@ -682,7 +682,7 @@ mod tests {
         assert!(result.is_err(), "should return error when index is full");
         match result.unwrap_err() {
             SemanticDedupError::IndexFull(cap) => assert_eq!(cap, 2),
-            other => panic!("expected IndexFull, got {:?}", other),
+            other => unreachable!("expected IndexFull, got {:?}", other),
         }
     }
 
