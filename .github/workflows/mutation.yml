@@ -1,0 +1,64 @@
+name: Mutation Testing
+# This workflow is DISABLED by default because mutation testing is expensive
+# (it rebuilds and reruns the test suite for every mutant — potentially hundreds
+# of runs).
+#
+# To enable it on demand:
+#   1. Un-comment the `on:` trigger below (or use workflow_dispatch to trigger
+#      manually from the GitHub UI).
+#   2. Commit the change to your branch.
+#
+# Alternatively, run locally:
+#   cargo install cargo-mutants
+#   cargo mutants
+
+# on: [push, pull_request]         # <-- un-comment to enable in CI
+on:
+  workflow_dispatch:                # manual trigger only — remove to auto-run
+    inputs:
+      package:
+        description: 'Package to mutate (default: tokio-prompt-orchestrator)'
+        required: false
+        default: 'tokio-prompt-orchestrator'
+
+jobs:
+  # NOTE: This job is intentionally commented out to prevent accidental
+  # expensive runs.  Un-comment the `on:` push/pull_request trigger above
+  # and this job block to enable automatic mutation testing.
+  mutation-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-mutants-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked
+
+      - name: Run mutation tests
+        # The mutants.toml config focuses on core modules and excludes generated code.
+        # A non-zero exit code means some mutants survived — review the output and
+        # add tests or mark as equivalent mutants.
+        run: |
+          cargo mutants \
+            --package "${{ github.event.inputs.package || 'tokio-prompt-orchestrator' }}" \
+            --output mutants-output \
+            -- --lib
+        continue-on-error: true   # don't block CI — treat as advisory
+
+      - name: Upload mutation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-report
+          path: mutants-output/
+          retention-days: 14

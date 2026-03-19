@@ -81,6 +81,35 @@ All tests must pass before a PR is merged. The project enforces a minimum **1.5:
 
 ---
 
+## Mutation testing
+
+Mutation testing helps verify that your tests actually detect defects rather than just achieving line coverage. We use [`cargo-mutants`](https://mutants.rs/) for this.
+
+### Install
+
+```bash
+cargo install cargo-mutants
+```
+
+### Run
+
+```bash
+# Run mutation testing on the core enhanced and stages modules:
+cargo mutants --package tokio-prompt-orchestrator
+
+# Focus on a specific module:
+cargo mutants --file src/enhanced/circuit_breaker.rs
+
+# Use the project config (excludes generated code, limits to core modules):
+cargo mutants  # picks up mutants.toml automatically
+```
+
+Aim for a **caught-mutant rate of ≥ 80%**. Surviving mutants indicate logic that is not covered by any assertion. Review them and either add a test or document why the mutant is equivalent.
+
+The full mutation test run is computationally expensive and is not part of the default CI pipeline. Enable it manually by un-commenting the `mutation-test` job in `.github/workflows/mutation.yml` when you want a deep quality check on a branch.
+
+---
+
 ## Running benchmarks
 
 ```bash
