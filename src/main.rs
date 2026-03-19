@@ -953,6 +953,8 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
             });
 
             let pipeline_tx = handles.input_tx.clone();
+            let dlq = handles.dlq.clone();
+            let circuit_breaker = handles.circuit_breaker.clone();
             let output_rx = match output_rx_raw {
                 Some(rx) => rx,
                 None => {
@@ -969,7 +971,7 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
             };
             tracing::info!(addr = %format!("{}:{}", cfg.host, cfg.port), "Starting web API");
             tokio::select! {
-                result = start_server(config, pipeline_tx, output_rx) => {
+                result = start_server(config, pipeline_tx, output_rx, dlq, circuit_breaker) => {
                     if let Err(e) = result {
                         tracing::error!(error = %e, "Web API server error");
                         std::process::exit(1);
