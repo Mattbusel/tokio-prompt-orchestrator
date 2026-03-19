@@ -27,7 +27,31 @@ use crate::OrchestratorError;
 use std::time::Duration;
 use tracing::{debug, warn};
 
-/// Retry policy configuration
+/// Configuration for automatic retry behaviour with backoff.
+///
+/// Construct via the factory helpers [`RetryPolicy::fixed`],
+/// [`RetryPolicy::exponential`], or [`RetryPolicy::linear`], then execute an
+/// async closure with [`RetryPolicy::retry`].
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::time::Duration;
+/// use tokio_prompt_orchestrator::enhanced::RetryPolicy;
+///
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), String> {
+/// let policy = RetryPolicy::exponential(3, Duration::from_millis(100));
+///
+/// let result: Result<String, String> = policy.retry(|| async {
+///     // replace with a real async call
+///     Err("transient".to_string())
+/// }).await;
+///
+/// // All 3 attempts failed
+/// assert!(result.is_err());
+/// # Ok(()) }
+/// ```
 #[derive(Clone, Debug)]
 pub struct RetryPolicy {
     /// Maximum number of attempts (including the first try).
@@ -36,7 +60,16 @@ pub struct RetryPolicy {
     pub strategy: RetryStrategy,
 }
 
-/// Retry backoff strategy
+/// Backoff algorithm applied between successive [`RetryPolicy`] attempts.
+///
+/// Select the strategy that best matches your workload:
+///
+/// - [`RetryStrategy::Fixed`] — constant pause; good for idempotent operations
+///   where timing is well understood.
+/// - [`RetryStrategy::Exponential`] — classic exponential back-off; good for
+///   transient network errors where you want to back off quickly under load.
+/// - [`RetryStrategy::Linear`] — linear growth; a middle ground useful when a
+///   fixed number of timed steps is preferable to unbounded growth.
 #[derive(Clone, Debug)]
 pub enum RetryStrategy {
     /// Fixed delay between retries
@@ -74,7 +107,23 @@ pub enum RetryResult<T, E> {
 }
 
 impl RetryPolicy {
-    /// Create policy with fixed delay
+    /// Create a policy that waits a constant `delay` between attempts.
+    ///
+    /// # Arguments
+    ///
+    /// * `max_attempts` — Total attempts including the first try.  `1` means
+    ///   no retries.
+    /// * `delay` — Fixed pause between consecutive attempts.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use tokio_prompt_orchestrator::enhanced::RetryPolicy;
+    ///
+    /// let policy = RetryPolicy::fixed(3, Duration::from_millis(50));
+    /// assert_eq!(policy.max_attempts, 3);
+    /// ```
     pub fn fixed(max_attempts: usize, delay: Duration) -> Self {
         Self {
             max_attempts,
@@ -82,7 +131,25 @@ impl RetryPolicy {
         }
     }
 
-    /// Create policy with exponential backoff
+    /// Create a policy with exponential back-off (multiplier 2×, cap 60 s).
+    ///
+    /// The delay before attempt `n` is:
+    /// `min(initial_delay × 2^(n-1), 60 s)`
+    ///
+    /// # Arguments
+    ///
+    /// * `max_attempts` — Total attempts including the first try.
+    /// * `initial_delay` — Delay before the second attempt.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use tokio_prompt_orchestrator::enhanced::RetryPolicy;
+    ///
+    /// // Delays: 100 ms, 200 ms, 400 ms
+    /// let policy = RetryPolicy::exponential(4, Duration::from_millis(100));
+    /// ```
     pub fn exponential(max_attempts: usize, initial_delay: Duration) -> Self {
         Self {
             max_attempts,
@@ -105,7 +172,35 @@ impl RetryPolicy {
         }
     }
 
-    /// Execute operation with retries
+    /// Execute a fallible async closure, retrying on error according to this
+    /// policy.
+    ///
+    /// The closure `f` is called up to `max_attempts` times.  Between
+    /// consecutive failures the task sleeps for the duration computed by the
+    /// configured [`RetryStrategy`].
+    ///
+    /// # Arguments
+    ///
+    /// * `f` — A `FnMut` that returns a `Future<Output = Result<T, E>>`.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(value)` from the first successful attempt, or `Err(last_error)` if
+    /// all attempts fail.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::time::Duration;
+    /// use tokio_prompt_orchestrator::enhanced::RetryPolicy;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let policy = RetryPolicy::fixed(3, Duration::from_millis(10));
+    /// let result: Result<&str, &str> = policy.retry(|| async { Ok("done") }).await;
+    /// assert_eq!(result, Ok("done"));
+    /// # }
+    /// ```
     pub async fn retry<F, Fut, T, E>(&self, mut f: F) -> Result<T, E>
     where
         F: FnMut() -> Fut,
@@ -208,7 +303,42 @@ impl RetryPolicy {
     }
 }
 
-/// Conditional retry - only retry if predicate returns true
+/// Retry a fallible async closure only when a predicate approves the error.
+///
+/// Unlike [`RetryPolicy::retry`], errors for which `should_retry` returns
+/// `false` are propagated immediately without consuming further attempts.
+/// This is useful for distinguishing transient errors (e.g. network timeout)
+/// from permanent ones (e.g. invalid request body).
+///
+/// # Arguments
+///
+/// * `policy` — The [`RetryPolicy`] controlling attempt counts and delays.
+/// * `f` — The fallible async closure to invoke.
+/// * `should_retry` — A predicate called on each error; return `true` to retry
+///   or `false` to propagate immediately.
+///
+/// # Returns
+///
+/// `Ok(value)` on success, or `Err(error)` when the predicate returns `false`
+/// or `max_attempts` are exhausted.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::time::Duration;
+/// use tokio_prompt_orchestrator::enhanced::{RetryPolicy, retry_if};
+///
+/// # #[tokio::main]
+/// # async fn main() {
+/// let policy = RetryPolicy::fixed(5, Duration::from_millis(10));
+/// let result: Result<(), &str> = retry_if(
+///     &policy,
+///     || async { Err("permanent") },
+///     |e| *e == "transient",
+/// ).await;
+/// assert_eq!(result.unwrap_err(), "permanent"); // stopped immediately
+/// # }
+/// ```
 pub async fn retry_if<F, Fut, T, E, P>(
     policy: &RetryPolicy,
     mut f: F,
@@ -244,7 +374,29 @@ where
     }
 }
 
-/// Retry with jitter to prevent thundering herd
+/// Add random jitter (up to 25 %) to a delay to prevent thundering-herd
+/// scenarios when many clients retry at the same time.
+///
+/// # Arguments
+///
+/// * `duration` — Base delay to which jitter is added.
+///
+/// # Returns
+///
+/// A `Duration` in the range `[duration, duration + duration/4)`.
+/// When `duration` is very small (< 4 ms), the jitter is zero.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+/// use tokio_prompt_orchestrator::enhanced::retry::with_jitter;
+///
+/// let base = Duration::from_millis(200);
+/// let jittered = with_jitter(base);
+/// assert!(jittered >= base);
+/// assert!(jittered <= base + Duration::from_millis(50));
+/// ```
 pub fn with_jitter(duration: Duration) -> Duration {
     use rand::Rng;
     let max_jitter = duration.as_millis() / 4;

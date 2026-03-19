@@ -40,7 +40,25 @@ use tracing::debug;
 
 use crate::PromptRequest;
 
-/// Request priority levels
+/// Request priority level.
+///
+/// Used by [`PriorityQueue`] to order requests.  Higher numeric values have
+/// higher priority.  Within the same priority tier, requests are served in
+/// FIFO order.
+///
+/// # Ordering
+///
+/// `Low < Normal < High < Critical`
+///
+/// # Examples
+///
+/// ```
+/// use tokio_prompt_orchestrator::enhanced::Priority;
+///
+/// assert!(Priority::Critical > Priority::High);
+/// assert_eq!(Priority::default(), Priority::Normal);
+/// assert_eq!(Priority::from_name("high"), Some(Priority::High));
+/// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Priority {
     /// Lowest priority  -  background / batch work.
@@ -101,7 +119,46 @@ impl Ord for PrioritizedRequest {
     }
 }
 
-/// Priority queue for requests
+/// A priority queue for [`PromptRequest`] items that orders requests by
+/// [`Priority`] and, within the same tier, by arrival time (FIFO).
+///
+/// # Capacity
+///
+/// [`PriorityQueue::new`] creates a queue with capacity 10 000.  Use
+/// [`PriorityQueue::with_capacity`] for custom sizing.  When the queue is full,
+/// [`PriorityQueue::push`] returns `Err(`[`QueueError::QueueFull`]`)`.
+///
+/// # Thread safety
+///
+/// `PriorityQueue` is `Clone + Send + Sync`.  All clones share the same
+/// underlying heap behind a `Mutex`.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::collections::HashMap;
+/// use tokio_prompt_orchestrator::{PromptRequest, SessionId};
+/// use tokio_prompt_orchestrator::enhanced::{PriorityQueue, Priority};
+///
+/// # #[tokio::main]
+/// # async fn main() {
+/// let queue = PriorityQueue::new();
+///
+/// let req = PromptRequest {
+///     session: SessionId::new("s1"),
+///     request_id: "r1".to_string(),
+///     input: "hello".to_string(),
+///     meta: HashMap::new(),
+///     deadline: None,
+/// };
+///
+/// queue.push(Priority::High, req).await.unwrap();
+///
+/// if let Some((priority, request)) = queue.pop().await {
+///     println!("{priority:?}: {}", request.input);
+/// }
+/// # }
+/// ```
 #[derive(Clone)]
 pub struct PriorityQueue {
     heap: Arc<Mutex<BinaryHeap<PrioritizedRequest>>>,
@@ -115,12 +172,17 @@ pub struct PriorityQueue {
 }
 
 impl PriorityQueue {
-    /// Create new priority queue with max size
+    /// Create a `PriorityQueue` with the default capacity of 10 000 entries.
+    ///
+    /// See also [`PriorityQueue::with_capacity`].
     pub fn new() -> Self {
         Self::with_capacity(10000)
     }
 
-    /// Create priority queue with specific capacity
+    /// Create a `PriorityQueue` with a specific maximum capacity.
+    ///
+    /// A capacity of `0` causes every `push` to return
+    /// `Err(`[`QueueError::QueueFull`]`)` immediately.
     pub fn with_capacity(max_size: usize) -> Self {
         Self {
             heap: Arc::new(Mutex::new(BinaryHeap::new())),
@@ -142,7 +204,17 @@ impl PriorityQueue {
         }
     }
 
-    /// Push request with priority
+    /// Push a request onto the queue with the given priority.
+    ///
+    /// # Arguments
+    ///
+    /// * `priority` — Relative importance; see [`Priority`].
+    /// * `request` — The [`PromptRequest`] to enqueue.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(QueueError::QueueFull)` if the queue has reached its
+    /// capacity.  The request is **not** enqueued in that case.
     pub async fn push(&self, priority: Priority, request: PromptRequest) -> Result<(), QueueError> {
         let mut heap = self.heap.lock().await;
 
@@ -173,7 +245,14 @@ impl PriorityQueue {
         Ok(())
     }
 
-    /// Pop highest priority request
+    /// Remove and return the highest-priority request.
+    ///
+    /// Among requests with equal priority the one inserted first is returned
+    /// (FIFO within a tier).
+    ///
+    /// # Returns
+    ///
+    /// `Some((priority, request))` if the queue is non-empty, otherwise `None`.
     pub async fn pop(&self) -> Option<(Priority, PromptRequest)> {
         let mut heap = self.heap.lock().await;
         heap.pop().map(|pr| {

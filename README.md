@@ -4,6 +4,7 @@
 [![Coverage](https://codecov.io/gh/Mattbusel/tokio-prompt-orchestrator/branch/main/graph/badge.svg)](https://codecov.io/gh/Mattbusel/tokio-prompt-orchestrator)
 [![Crates.io](https://img.shields.io/crates/v/tokio-prompt-orchestrator.svg)](https://crates.io/crates/tokio-prompt-orchestrator)
 [![docs.rs](https://docs.rs/tokio-prompt-orchestrator/badge.svg)](https://docs.rs/tokio-prompt-orchestrator)
+[![GitHub Pages](https://img.shields.io/badge/docs-GitHub%20Pages-blue.svg)](https://mattbusel.github.io/tokio-prompt-orchestrator/tokio_prompt_orchestrator/)
 [![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 

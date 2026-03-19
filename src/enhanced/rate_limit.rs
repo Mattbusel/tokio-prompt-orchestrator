@@ -33,7 +33,37 @@ use dashmap::DashMap;
 use std::sync::Arc;
 use tracing::{debug, warn};
 
-/// Rate limiter with per-session limits
+/// A per-session token-bucket rate limiter.
+///
+/// Two backend implementations are available:
+///
+/// - **Simple** (always available) — a sliding-window counter per session
+///   stored in a [`dashmap::DashMap`].  Accurate to the granularity of the
+///   configured window.
+/// - **Governor** (requires feature `rate-limiting`) — a true token-bucket
+///   backed by the `governor` crate, with sub-millisecond accuracy.
+///
+/// # Examples
+///
+/// ```no_run
+/// use tokio_prompt_orchestrator::enhanced::RateLimiter;
+///
+/// # #[tokio::main]
+/// # async fn main() {
+/// let limiter = RateLimiter::new(100, 60); // 100 requests per 60-second window
+///
+/// if limiter.check("user-123").await {
+///     // allowed
+/// } else {
+///     // rate limit exceeded
+/// }
+/// # }
+/// ```
+///
+/// # Isolation
+///
+/// Each session (identified by a string key) has its own independent counter.
+/// Exhausting one session's quota does not affect others.
 #[derive(Clone)]
 pub struct RateLimiter {
     backend: RateLimiterBackend,

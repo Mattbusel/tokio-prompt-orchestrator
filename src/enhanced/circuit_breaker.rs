@@ -37,7 +37,54 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
-/// Circuit breaker for preventing cascading failures
+/// A circuit breaker that prevents cascading failures by stopping requests to
+/// a failing downstream service.
+///
+/// # State machine
+///
+/// ```text
+/// Closed ──(failures ≥ threshold)──► Open
+///   ▲                                  │
+///   │                                  │ (timeout elapsed)
+///   │                                  ▼
+///   └──(success_rate ≥ threshold)── HalfOpen
+/// ```
+///
+/// - **Closed** — normal operation; all requests flow through.
+/// - **Open** — all requests are rejected immediately with
+///   [`CircuitBreakerError::Open`] without calling the wrapped operation.
+/// - **HalfOpen** — a single probe request is allowed; on success the circuit
+///   closes; on failure it reopens.
+///
+/// # Cloning
+///
+/// `CircuitBreaker` is `Clone + Send + Sync`.  All clones share the same
+/// underlying `Arc<RwLock<CircuitState>>`.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::time::Duration;
+/// use tokio_prompt_orchestrator::enhanced::CircuitBreaker;
+/// use tokio_prompt_orchestrator::enhanced::circuit_breaker::CircuitBreakerError;
+///
+/// # #[tokio::main]
+/// # async fn main() {
+/// let cb = CircuitBreaker::new(5, 0.8, Duration::from_secs(30));
+///
+/// let result = cb.call(|| async {
+///     reqwest::get("https://api.example.com/infer")
+///         .await
+///         .map_err(|e| e.to_string())
+/// }).await;
+///
+/// match result {
+///     Ok(resp) => { /* handle response */ }
+///     Err(CircuitBreakerError::Open) => { /* fail fast */ }
+///     Err(CircuitBreakerError::Failed(e)) => { /* handle error */ }
+/// }
+/// # }
+/// ```
 #[derive(Clone)]
 pub struct CircuitBreaker {
     state: Arc<RwLock<CircuitState>>,
@@ -88,12 +135,27 @@ pub enum CircuitBreakerError<E> {
 }
 
 impl CircuitBreaker {
-    /// Create new circuit breaker
+    /// Create a new `CircuitBreaker` in the `Closed` state.
     ///
     /// # Arguments
-    /// * `failure_threshold` - Number of consecutive failures before opening
-    /// * `success_threshold` - Success rate (0.0-1.0) needed to close circuit
-    /// * `timeout` - How long to wait in open state before testing recovery
+    ///
+    /// * `failure_threshold` — Number of consecutive failures required to open
+    ///   the circuit.  A value of `1` opens immediately on the first error.
+    /// * `success_threshold` — Required success rate (`0.0..=1.0`) over the
+    ///   recent-results window before the circuit closes from `HalfOpen`.
+    ///   Typical values: `0.8` (80 %) or `1.0` (100 %).
+    /// * `timeout` — How long to stay in the `Open` state before transitioning
+    ///   to `HalfOpen` and allowing one probe request through.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use tokio_prompt_orchestrator::enhanced::CircuitBreaker;
+    ///
+    /// // Open after 5 failures; require 80 % success rate to close; probe after 60 s.
+    /// let cb = CircuitBreaker::new(5, 0.8, Duration::from_secs(60));
+    /// ```
     pub fn new(failure_threshold: usize, success_threshold: f64, timeout: Duration) -> Self {
         Self {
             state: Arc::new(RwLock::new(CircuitState {
@@ -113,7 +175,38 @@ impl CircuitBreaker {
         }
     }
 
-    /// Execute operation through circuit breaker
+    /// Execute a fallible async operation through the circuit breaker.
+    ///
+    /// If the circuit is `Open` the operation is **not called** and
+    /// `Err(CircuitBreakerError::Open)` is returned immediately.
+    /// Otherwise the closure is invoked; its `Ok`/`Err` outcome is recorded
+    /// and may cause a state transition.
+    ///
+    /// # Arguments
+    ///
+    /// * `f` — A `FnOnce` that returns a `Future<Output = Result<T, E>>`.
+    ///   The closure is called at most once per `call` invocation.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(value)` — operation succeeded.
+    /// - `Err(CircuitBreakerError::Open)` — circuit is open; request rejected.
+    /// - `Err(CircuitBreakerError::Failed(e))` — operation returned `Err(e)`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::time::Duration;
+    /// use tokio_prompt_orchestrator::enhanced::CircuitBreaker;
+    /// use tokio_prompt_orchestrator::enhanced::circuit_breaker::CircuitBreakerError;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let cb = CircuitBreaker::new(3, 0.8, Duration::from_secs(10));
+    /// let result = cb.call(|| async { Ok::<_, String>("ok") }).await;
+    /// assert!(matches!(result, Ok("ok")));
+    /// # }
+    /// ```
     pub async fn call<F, Fut, T, E>(&self, f: F) -> Result<T, CircuitBreakerError<E>>
     where
         F: FnOnce() -> Fut,
@@ -319,7 +412,9 @@ impl CircuitBreaker {
     }
 }
 
-/// Circuit breaker statistics
+/// A point-in-time snapshot of [`CircuitBreaker`] metrics.
+///
+/// Obtain via [`CircuitBreaker::stats`].
 #[derive(Debug)]
 pub struct CircuitBreakerStats {
     /// Current state of the circuit breaker.
