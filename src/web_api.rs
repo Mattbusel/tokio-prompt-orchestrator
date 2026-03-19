@@ -98,7 +98,7 @@ use std::collections::HashMap;
 #[cfg(feature = "web-api")]
 use std::collections::HashSet;
 #[cfg(feature = "web-api")]
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 #[cfg(feature = "web-api")]
 use std::sync::Arc;
 #[cfg(feature = "web-api")]
@@ -141,6 +141,11 @@ pub struct ServerConfig {
     /// When `true`, the `/api/v1/debug/*` endpoints are enabled.
     /// Default: `true` (safe for development; set to `false` in production).
     pub debug_mode: bool,
+    /// How often (in milliseconds) polling loops check the tracker for results.
+    ///
+    /// Lower values reduce tail latency but increase CPU usage; higher values
+    /// save CPU at the cost of slightly delayed responses.  Default: 100 ms.
+    pub poll_interval_ms: u64,
 }
 
 #[cfg(feature = "web-api")]
@@ -152,6 +157,7 @@ impl Default for ServerConfig {
             max_request_size: 10 * 1024 * 1024, // 10MB
             timeout_seconds: 300,               // 5 minutes
             debug_mode: true,
+            poll_interval_ms: 100,
         }
     }
 }
@@ -455,11 +461,19 @@ struct AppState {
     circuit_breaker: crate::enhanced::CircuitBreaker,
     /// Optional metrics scrape API key (separate from the main API key).
     metrics_key: Option<String>,
+    /// Set to `true` when a shutdown signal has been received.  New inference
+    /// requests are rejected with HTTP 503 while this is `true`.
+    shutting_down: Arc<AtomicBool>,
 }
 
 // ============================================================================
 // Constants
 // ============================================================================
+
+/// How long (in seconds) the server waits for in-flight requests to complete
+/// after receiving a shutdown signal before forcing the pipeline to stop.
+#[cfg(feature = "web-api")]
+const DRAIN_TIMEOUT_SECS: u64 = 30;
 
 /// Maximum WebSocket message size (1 MB).
 #[cfg(feature = "web-api")]
@@ -496,6 +510,7 @@ pub async fn start_server(
     mut output_rx: mpsc::Receiver<crate::PostOutput>,
     dlq: Arc<crate::DeadLetterQueue>,
     circuit_breaker: crate::enhanced::CircuitBreaker,
+    shutdown_rx: Option<tokio::sync::oneshot::Receiver<()>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr = format!("{}:{}", config.host, config.port);
 
@@ -553,6 +568,8 @@ pub async fn start_server(
     let batch_tracker = BatchJobTracker::new();
     let debug_mode = config.debug_mode;
 
+    let shutting_down = Arc::new(AtomicBool::new(false));
+
     let state = Arc::new(AppState {
         pipeline_tx,
         tracker,
@@ -563,6 +580,7 @@ pub async fn start_server(
         dlq,
         circuit_breaker,
         metrics_key,
+        shutting_down,
     });
 
     // Collector task: receives pipeline output and writes results into the tracker.
@@ -593,6 +611,9 @@ pub async fn start_server(
         .route("/api/v1/debug/dedup-index", get(debug_dedup_handler))
         .route("/api/v1/debug/pipeline", get(debug_pipeline_handler))
         .route("/health", get(health_handler))
+        .route("/live", get(live_handler))
+        .route("/ready", get(ready_handler))
+        .route("/version", get(version_handler))
         .route("/metrics", get(metrics_handler))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -608,12 +629,62 @@ pub async fn start_server(
             body_size_middleware,
         ))
         .layer(cors)
-        .with_state(state);
+        .with_state(state.clone());
 
-    info!("Web API ready on http://{}", addr);
+    info!(
+        addr = %addr,
+        "Web API ready — endpoints: /health (legacy), /live (liveness), /ready (readiness), /version"
+    );
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app).await?;
+
+    // If a shutdown receiver was provided, run the server until it fires,
+    // then perform a graceful drain before returning.
+    if let Some(rx) = shutdown_rx {
+        let drain_state = state;
+        let serve_future = axum::serve(listener, app);
+        tokio::select! {
+            result = serve_future => {
+                return result.map_err(Into::into);
+            }
+            _ = rx => {
+                // Mark server as shutting down so new inference requests get 503.
+                drain_state.shutting_down.store(true, AtomicOrdering::Relaxed);
+                info!("Shutdown signal received — draining in-flight requests (max {}s)", DRAIN_TIMEOUT_SECS);
+
+                let drain_deadline = tokio::time::Instant::now()
+                    + Duration::from_secs(DRAIN_TIMEOUT_SECS);
+
+                loop {
+                    let in_flight = drain_state
+                        .tracker
+                        .status
+                        .iter()
+                        .filter(|e| {
+                            matches!(
+                                e.value().status,
+                                RequestStatus::Pending | RequestStatus::Processing
+                            )
+                        })
+                        .count();
+
+                    if in_flight == 0 {
+                        info!("All in-flight requests drained");
+                        break;
+                    }
+
+                    if tokio::time::Instant::now() >= drain_deadline {
+                        warn!(in_flight, "Drain timeout reached; {} request(s) still in-flight", in_flight);
+                        break;
+                    }
+
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            }
+        }
+    } else {
+        axum::serve(listener, app).await?;
+    }
 
     Ok(())
 }
@@ -668,7 +739,11 @@ async fn auth_middleware(
 ) -> Response {
     // Public endpoints that do not require authentication.
     let req_path = req.uri().path().to_owned();
-    let is_public = req_path == "/health" || req_path == "/api/v1/schema";
+    let is_public = req_path == "/health"
+        || req_path == "/live"
+        || req_path == "/ready"
+        || req_path == "/version"
+        || req_path == "/api/v1/schema";
     if is_public {
         return next.run(req).await;
     }
@@ -780,6 +855,9 @@ async fn infer_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<InferRequest>,
 ) -> Result<Response, AppError> {
+    if state.shutting_down.load(AtomicOrdering::Relaxed) {
+        return Err(AppError::ShuttingDown);
+    }
     // Field-level validation — returns HTTP 422 with structured errors.
     if let Some(err) = validate_infer_request(&req) {
         return Ok(err.into_response());
@@ -914,7 +992,7 @@ async fn result_handler(
             return Err(AppError::Timeout);
         }
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(state.config.poll_interval_ms)).await;
     }
 }
 
@@ -936,6 +1014,9 @@ async fn sse_stream_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<InferRequest>,
 ) -> Result<Sse<impl futures::Stream<Item = Result<Event, std::convert::Infallible>>>, AppError> {
+    if state.shutting_down.load(AtomicOrdering::Relaxed) {
+        return Err(AppError::ShuttingDown);
+    }
     // Field-level validation — returns HTTP 422 with structured errors.
     // Must happen before any field is moved out of `req`.
     if let Some(err) = validate_infer_request(&req) {
@@ -999,6 +1080,7 @@ async fn sse_stream_handler(
 
     let tracker = state.tracker.clone();
     let timeout_secs = state.config.timeout_seconds;
+    let poll_interval_ms = state.config.poll_interval_ms;
     let request_id_for_done = request_id.clone();
     let token_stream = stream::once(async move {
         Ok::<_, std::convert::Infallible>(
@@ -1032,7 +1114,7 @@ async fn sse_stream_handler(
             if sse_start.elapsed() > sse_timeout {
                 break "[error] Request timed out".to_string();
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(poll_interval_ms)).await;
         };
 
         Ok::<_, std::convert::Infallible>(Event::default().event("done").data(result_text))
@@ -1054,6 +1136,16 @@ async fn sse_stream_handler(
 /// This function never panics.
 #[cfg(feature = "web-api")]
 async fn websocket_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> Response {
+    if state.shutting_down.load(AtomicOrdering::Relaxed) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "SHUTTING_DOWN",
+                "message": "Server is shutting down, retry on another instance"
+            })),
+        )
+            .into_response();
+    }
     ws.max_message_size(WS_MAX_MESSAGE_SIZE)
         .on_upgrade(|socket| websocket_stream(socket, state))
 }
@@ -1182,7 +1274,7 @@ async fn websocket_stream(socket: WebSocket, state: Arc<AppState>) {
                                 }
                                 // Race poll sleep vs. incoming WS frame (disconnect detection).
                                 tokio::select! {
-                                    _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                                    _ = tokio::time::sleep(Duration::from_millis(state.config.poll_interval_ms)) => {
                                         // Continue polling; client still connected.
                                     }
                                     frame = ws_stream.next() => {
@@ -1470,6 +1562,93 @@ async fn health_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse
          Json(serde_json::json!({"status":"healthy","version":env!("CARGO_PKG_VERSION")})))
             .into_response()
     }
+}
+
+/// `GET /live`  -  Kubernetes liveness probe.
+///
+/// Always returns `200 {"status":"alive"}` as long as the process is running.
+/// This is intentionally simple — if this endpoint is reachable, the process is alive.
+///
+/// # Panics
+///
+/// This function never panics.
+#[cfg(feature = "web-api")]
+async fn live_handler() -> impl IntoResponse {
+    (StatusCode::OK, Json(serde_json::json!({"status": "alive"}))).into_response()
+}
+
+/// `GET /ready`  -  Kubernetes readiness probe.
+///
+/// Returns `200 {"status":"ready"}` only when all of the following hold:
+/// - The circuit breaker is not open.
+/// - The server is not in the process of shutting down.
+/// - The request tracker is not near capacity (< 95% full).
+///
+/// Returns `503 {"status":"not_ready","reason":"..."}` otherwise.
+///
+/// # Panics
+///
+/// This function never panics.
+#[cfg(feature = "web-api")]
+async fn ready_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    if state.shutting_down.load(AtomicOrdering::Relaxed) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"status": "not_ready", "reason": "shutting_down"})),
+        )
+            .into_response();
+    }
+    if state.circuit_breaker.is_open_sync() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(
+                serde_json::json!({"status": "not_ready", "reason": "circuit_breaker_open"}),
+            ),
+        )
+            .into_response();
+    }
+    let tracker_len = state.tracker.status.len();
+    let tracker_max = state.tracker.max_entries;
+    if tracker_len >= (tracker_max as f64 * 0.95) as usize {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "status": "not_ready",
+                "reason": "tracker_near_capacity",
+                "tracker_len": tracker_len,
+                "tracker_max": tracker_max,
+            })),
+        )
+            .into_response();
+    }
+    (StatusCode::OK, Json(serde_json::json!({"status": "ready"}))).into_response()
+}
+
+/// `GET /version`  -  Return build metadata.
+///
+/// Returns the crate version, name, optional build timestamp, and enabled features.
+///
+/// # Panics
+///
+/// This function never panics.
+#[cfg(feature = "web-api")]
+async fn version_handler() -> impl IntoResponse {
+    let mut features: Vec<&str> = Vec::new();
+    #[cfg(feature = "web-api")]
+    features.push("web-api");
+    #[cfg(feature = "metrics-server")]
+    features.push("metrics-server");
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "name": env!("CARGO_PKG_NAME"),
+            "build_timestamp": option_env!("VERGEN_BUILD_TIMESTAMP").unwrap_or("unknown"),
+            "features": features,
+        })),
+    )
+        .into_response()
 }
 
 /// `GET /metrics`  -  Prometheus metrics endpoint.
@@ -1771,6 +1950,9 @@ async fn batch_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<BatchRequest>,
 ) -> Result<Json<BatchResponse>, AppError> {
+    if state.shutting_down.load(AtomicOrdering::Relaxed) {
+        return Err(AppError::ShuttingDown);
+    }
     let batch_id = Uuid::new_v4().to_string();
     tracing::info!(
         batch_id = %batch_id,
@@ -1908,7 +2090,7 @@ async fn batch_handler(
                             error: Some("timeout".to_string()),
                         };
                     }
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    tokio::time::sleep(Duration::from_millis(state.config.poll_interval_ms)).await;
                 }
             }
         });
@@ -2183,6 +2365,8 @@ enum AppError {
     DebugDisabled,
     /// The request tracker is at capacity and cannot accept new entries.
     TrackerFull,
+    /// The server is shutting down and no longer accepts new inference requests.
+    ShuttingDown,
 }
 
 #[cfg(feature = "web-api")]
@@ -2237,6 +2421,14 @@ impl IntoResponse for AppError {
                 })),
             )
                 .into_response(),
+            AppError::ShuttingDown => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "SHUTTING_DOWN",
+                    "message": "Server is shutting down, retry on another instance"
+                })),
+            )
+                .into_response(),
         }
     }
 }
@@ -2262,6 +2454,7 @@ pub async fn start_server(
     _output_rx: tokio::sync::mpsc::Receiver<crate::PostOutput>,
     _dlq: std::sync::Arc<crate::DeadLetterQueue>,
     _circuit_breaker: crate::enhanced::CircuitBreaker,
+    _shutdown_rx: Option<tokio::sync::oneshot::Receiver<()>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Err("Web API requires 'web-api' feature".into())
 }
