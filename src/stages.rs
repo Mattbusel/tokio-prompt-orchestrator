@@ -225,9 +225,9 @@ pub fn spawn_pipeline(worker: Arc<dyn ModelWorker>) -> PipelineHandles {
     let dlq = Arc::new(DeadLetterQueue::new(1000));
 
     // Spawn each stage
-    let rag = tokio::spawn(rag_stage(input_rx, rag_tx, Arc::clone(&dlq)));
     let cancel = CancellationToken::new();
-    let assemble = tokio::spawn(assemble_stage(rag_rx, assemble_tx, Arc::clone(&dlq)));
+    let rag = tokio::spawn(rag_stage(input_rx, rag_tx, Arc::clone(&dlq), cancel.child_token()));
+    let assemble = tokio::spawn(assemble_stage(rag_rx, assemble_tx, Arc::clone(&dlq), cancel.child_token()));
     let inference = tokio::spawn(inference_stage(
         assemble_rx,
         inference_tx,
@@ -235,9 +235,10 @@ pub fn spawn_pipeline(worker: Arc<dyn ModelWorker>) -> PipelineHandles {
         circuit_breaker.clone(),
         DEFAULT_INFERENCE_TIMEOUT_SECS,
         Arc::clone(&dlq),
+        cancel.child_token(),
     ));
-    let post = tokio::spawn(post_stage(inference_rx, post_tx, Arc::clone(&dlq)));
-    let stream = tokio::spawn(stream_stage(post_rx, output_tx, Arc::new(LogSink)));
+    let post = tokio::spawn(post_stage(inference_rx, post_tx, Arc::clone(&dlq), cancel.child_token()));
+    let stream = tokio::spawn(stream_stage(post_rx, output_tx, Arc::new(LogSink), cancel.child_token()));
 
     PipelineHandles {
         rag,
@@ -347,10 +348,10 @@ pub fn spawn_pipeline_with_config(
     let dlq = Arc::new(DeadLetterQueue::new(1000));
     let inference_timeout_secs = DEFAULT_INFERENCE_TIMEOUT_SECS;
 
-    let rag = tokio::spawn(rag_stage(input_rx, rag_tx, Arc::clone(&dlq)));
-    let assemble = tokio::spawn(assemble_stage(rag_rx, assemble_tx, Arc::clone(&dlq)));
-
     let cancel2 = CancellationToken::new();
+    let rag = tokio::spawn(rag_stage(input_rx, rag_tx, Arc::clone(&dlq), cancel2.child_token()));
+    let assemble = tokio::spawn(assemble_stage(rag_rx, assemble_tx, Arc::clone(&dlq), cancel2.child_token()));
+
     // Multi-worker pool: spawn N inference tasks that all read from the same
     // shared receiver.  When inference_workers == 1 (default) the behaviour is
     // identical to a single direct tokio::spawn, preserving backward compat.
@@ -363,6 +364,7 @@ pub fn spawn_pipeline_with_config(
             circuit_breaker.clone(),
             inference_timeout_secs,
             Arc::clone(&dlq),
+            cancel2.child_token(),
         ))
     } else {
         info!(
@@ -381,6 +383,7 @@ pub fn spawn_pipeline_with_config(
                 inference_timeout_secs,
                 Arc::clone(&dlq),
                 id,
+                cancel2.child_token(),
             )));
         }
         // Return a single JoinHandle that waits for all pool workers to finish.
@@ -392,13 +395,13 @@ pub fn spawn_pipeline_with_config(
     };
 
     #[cfg(not(feature = "core-pinning"))]
-    let post = tokio::spawn(post_stage(inference_rx, post_tx, Arc::clone(&dlq)));
+    let post = tokio::spawn(post_stage(inference_rx, post_tx, Arc::clone(&dlq), cancel2.child_token()));
     #[cfg(feature = "core-pinning")]
-    let post = spawn_on_core(3, post_stage(inference_rx, post_tx, Arc::clone(&dlq)));
+    let post = spawn_on_core(3, post_stage(inference_rx, post_tx, Arc::clone(&dlq), cancel2.child_token()));
     #[cfg(not(feature = "core-pinning"))]
-    let stream = tokio::spawn(stream_stage(post_rx, output_tx, Arc::new(LogSink)));
+    let stream = tokio::spawn(stream_stage(post_rx, output_tx, Arc::new(LogSink), cancel2.child_token()));
     #[cfg(feature = "core-pinning")]
-    let stream = spawn_on_core(4, stream_stage(post_rx, output_tx, Arc::new(LogSink)));
+    let stream = spawn_on_core(4, stream_stage(post_rx, output_tx, Arc::new(LogSink), cancel2.child_token()));
 
     PipelineHandles {
         rag,
@@ -426,10 +429,19 @@ async fn rag_stage(
     mut rx: mpsc::Receiver<PromptRequest>,
     tx: mpsc::Sender<RagOutput>,
     dlq: Arc<DeadLetterQueue>,
+    cancel: CancellationToken,
 ) {
     info!(target: "orchestrator::pipeline", "RAG stage started");
 
-    while let Some(request) = rx.recv().await {
+    loop {
+        let request = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            item = rx.recv() => match item {
+                Some(req) => req,
+                None => break,
+            }
+        };
         let start = Instant::now();
         let session_id = request.session.as_str().to_string();
         let request_id = request.request_id.clone();
@@ -535,10 +547,19 @@ async fn assemble_stage(
     mut rx: mpsc::Receiver<RagOutput>,
     tx: mpsc::Sender<AssembleOutput>,
     dlq: Arc<DeadLetterQueue>,
+    cancel: CancellationToken,
 ) {
     info!(target: "orchestrator::pipeline", "Assemble stage started");
 
-    while let Some(rag_output) = rx.recv().await {
+    loop {
+        let rag_output = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            item = rx.recv() => match item {
+                Some(req) => req,
+                None => break,
+            }
+        };
         let start = Instant::now();
         let session_id = rag_output.session.as_str().to_string();
         let request_id = rag_output.original.request_id.clone();
@@ -632,10 +653,19 @@ async fn inference_stage(
     breaker: CircuitBreaker,
     timeout_secs: u64,
     dlq: Arc<DeadLetterQueue>,
+    cancel: CancellationToken,
 ) {
     info!(target: "orchestrator::pipeline", "Inference stage started");
 
-    while let Some(assemble_output) = rx.recv().await {
+    loop {
+        let assemble_output = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            item = rx.recv() => match item {
+                Some(req) => req,
+                None => break,
+            }
+        };
         let start = Instant::now();
         let session_id = assemble_output.session.as_str().to_string();
         let request_id = assemble_output.request_id.clone();
@@ -814,6 +844,7 @@ async fn inference_stage_pool_worker(
     timeout_secs: u64,
     dlq: Arc<DeadLetterQueue>,
     worker_id: usize,
+    cancel: CancellationToken,
 ) {
     info!(
         target: "orchestrator::pipeline",
@@ -823,12 +854,16 @@ async fn inference_stage_pool_worker(
 
     loop {
         // Acquire one item; release the lock immediately after recv() returns.
-        let assemble_output = {
+        let raw = {
             let mut guard = rx.lock().await;
-            guard.recv().await
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => break,
+                item = guard.recv() => item,
+            }
         };
 
-        let assemble_output = match assemble_output {
+        let assemble_output = match raw {
             Some(o) => o,
             None => break, // channel closed
         };
@@ -1004,10 +1039,19 @@ async fn post_stage(
     mut rx: mpsc::Receiver<InferenceOutput>,
     tx: mpsc::Sender<PostOutput>,
     dlq: Arc<DeadLetterQueue>,
+    cancel: CancellationToken,
 ) {
     info!(target: "orchestrator::pipeline", "Post stage started");
 
-    while let Some(inference_output) = rx.recv().await {
+    loop {
+        let inference_output = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            item = rx.recv() => match item {
+                Some(req) => req,
+                None => break,
+            }
+        };
         let start = Instant::now();
         let session_id = inference_output.session.as_str().to_string();
         let request_id = inference_output.request_id.clone();
@@ -1088,10 +1132,19 @@ async fn stream_stage(
     mut rx: mpsc::Receiver<PostOutput>,
     output_tx: mpsc::Sender<PostOutput>,
     sink: Arc<dyn OutputSink>,
+    cancel: CancellationToken,
 ) {
     info!(target: "orchestrator::pipeline", "Stream stage started");
 
-    while let Some(post_output) = rx.recv().await {
+    loop {
+        let post_output = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            item = rx.recv() => match item {
+                Some(req) => req,
+                None => break,
+            }
+        };
         let start = Instant::now();
         let session_id = post_output.session.as_str().to_string();
         let request_id = post_output.request_id.clone();
@@ -1197,9 +1250,9 @@ pub fn spawn_pipeline_with_intelligence(
     let rag = {
         let bridge_clone = Arc::clone(&bridge);
         let counter = Arc::clone(&req_counter);
-        tokio::spawn(rag_stage_tracked(input_rx, rag_tx, bridge_clone, counter))
+        tokio::spawn(rag_stage_tracked(input_rx, rag_tx, bridge_clone, counter, cancel3.child_token()))
     };
-    let assemble = tokio::spawn(assemble_stage(rag_rx, assemble_tx, Arc::clone(&dlq)));
+    let assemble = tokio::spawn(assemble_stage(rag_rx, assemble_tx, Arc::clone(&dlq), cancel3.child_token()));
     let inference = {
         let bridge_clone = Arc::clone(&bridge);
         let name = worker_name.to_string();
@@ -1210,10 +1263,11 @@ pub fn spawn_pipeline_with_intelligence(
             circuit_breaker.clone(),
             bridge_clone,
             name,
+            cancel3.child_token(),
         ))
     };
-    let post = tokio::spawn(post_stage(inference_rx, post_tx, Arc::clone(&dlq)));
-    let stream = tokio::spawn(stream_stage(post_rx, output_tx, Arc::new(LogSink)));
+    let post = tokio::spawn(post_stage(inference_rx, post_tx, Arc::clone(&dlq), cancel3.child_token()));
+    let stream = tokio::spawn(stream_stage(post_rx, output_tx, Arc::new(LogSink), cancel3.child_token()));
 
     PipelineHandles {
         rag,
@@ -1242,6 +1296,7 @@ async fn rag_stage_tracked(
     tx: mpsc::Sender<RagOutput>,
     bridge: Arc<IntelligenceBridge>,
     req_counter: Arc<std::sync::atomic::AtomicU64>,
+    cancel: CancellationToken,
 ) {
     use std::sync::atomic::Ordering;
     use std::time::Duration;
@@ -1251,7 +1306,15 @@ async fn rag_stage_tracked(
     // Track a 10-second window for RPS estimation.
     let window_start = Instant::now();
 
-    while let Some(request) = rx.recv().await {
+    loop {
+        let request = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            item = rx.recv() => match item {
+                Some(req) => req,
+                None => break,
+            }
+        };
         let start = Instant::now();
         let session_id = request.session.as_str().to_string();
         let request_id = request.request_id.clone();
@@ -1337,10 +1400,19 @@ async fn inference_stage_with_intelligence(
     breaker: CircuitBreaker,
     bridge: Arc<IntelligenceBridge>,
     worker_name: String,
+    cancel: CancellationToken,
 ) {
     info!(target: "orchestrator::pipeline", "Inference stage (intelligence-tracked) started");
 
-    while let Some(assemble_output) = rx.recv().await {
+    loop {
+        let assemble_output = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            item = rx.recv() => match item {
+                Some(req) => req,
+                None => break,
+            }
+        };
         let start = Instant::now();
         let session_id = assemble_output.session.as_str().to_string();
         let request_id = assemble_output.request_id.clone();
