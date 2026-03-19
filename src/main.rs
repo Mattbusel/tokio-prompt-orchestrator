@@ -971,16 +971,13 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
             };
             tracing::info!(addr = %format!("{}:{}", cfg.host, cfg.port), "Starting web API");
             tokio::select! {
-                result = start_server(config, pipeline_tx, output_rx, dlq, circuit_breaker) => {
+                result = start_server(config, pipeline_tx, output_rx, dlq, circuit_breaker, Some(shutdown_rx)) => {
                     if let Err(e) = result {
                         tracing::error!(error = %e, "Web API server error");
                         std::process::exit(1);
                     }
                 }
                 _ = repl_handle => {}
-                _ = shutdown_rx => {
-                    tracing::info!("Shutdown signal received — stopping web API");
-                }
             }
         }
 
