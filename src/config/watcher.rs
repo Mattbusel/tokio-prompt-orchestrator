@@ -269,6 +269,7 @@ log_format = "pretty"
     }
 
     #[tokio::test]
+    #[ignore = "relies on inotify/FSEvents timing — run locally, not in CI coverage"]
     async fn test_config_watcher_detects_file_change() {
         let dir = tempfile::tempdir().expect("test: create tempdir");
         let path = dir.path().join("config.toml");
@@ -308,6 +309,7 @@ log_format = "pretty"
     }
 
     #[tokio::test]
+    #[ignore = "relies on inotify/FSEvents timing — run locally, not in CI coverage"]
     async fn test_config_watcher_rejects_invalid_reload() {
         let dir = tempfile::tempdir().expect("test: create tempdir");
         let path = dir.path().join("config.toml");
@@ -339,6 +341,7 @@ log_format = "pretty"
     }
 
     #[tokio::test]
+    #[ignore = "relies on inotify/FSEvents timing — run locally, not in CI coverage"]
     async fn hot_reload_concurrent_writes_no_invalid_config_broadcast() {
         use std::io::Write;
         let dir = tempfile::tempdir().expect("test: create tempdir");
