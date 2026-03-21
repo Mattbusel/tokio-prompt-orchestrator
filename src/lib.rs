@@ -210,6 +210,31 @@ impl OrchestratorError {
             Self::Other(_)              => "other",
         }
     }
+
+    /// Return `true` if retrying the request may succeed.
+    ///
+    /// Transient errors (`RateLimited`, `InferenceTimeout`, `Inference`) are
+    /// retryable. Permanent errors (`ConfigError`, `AuthFailed`,
+    /// `BudgetExceeded`, `ChannelClosed`) are not.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tokio_prompt_orchestrator::OrchestratorError;
+    ///
+    /// assert!(OrchestratorError::RateLimited { retry_after_secs: 5 }.is_retryable());
+    /// assert!(!OrchestratorError::AuthFailed("bad key".into()).is_retryable());
+    /// ```
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::RateLimited { .. } | Self::InferenceTimeout { .. } | Self::Inference(_)
+        )
+    }
 }
 
 /// Unique session identifier for request tracking and affinity
@@ -233,6 +258,12 @@ impl SessionId {
     /// This function does not panic.
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl std::fmt::Display for SessionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
     }
 }
 
@@ -330,7 +361,7 @@ impl PromptRequest {
     ) -> Result<Self, OrchestratorError> {
         if timeout_seconds == 0 {
             return Err(OrchestratorError::ConfigError(
-                "timeout_seconds must be \u{2264} 3600".into(),
+                "timeout_seconds must be > 0".into(),
             ));
         }
         if timeout_seconds > 3600 {
@@ -538,6 +569,38 @@ impl DeadLetterQueue {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Return the maximum number of entries this queue can hold before evicting.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Return a snapshot of all queued entries without removing them.
+    ///
+    /// Unlike [`drain`](Self::drain), this does not clear the queue. The
+    /// snapshot is a clone taken under the lock; the queue continues to
+    /// operate normally while the returned `Vec` is used.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic. If the internal mutex is poisoned it is
+    /// recovered automatically and a warning is logged.
+    pub fn peek(&self) -> Vec<DroppedRequest> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| {
+                tracing::warn!("DeadLetterQueue: recovering from poisoned mutex");
+                crate::metrics::inc_dlq_lock_poisoned();
+                p.into_inner()
+            })
+            .iter()
+            .cloned()
+            .collect()
+    }
 }
 
 /// Type alias for the optional OpenTelemetry tracing layer used in main.rs.
@@ -719,6 +782,33 @@ impl PipelineStage {
             Self::Post => "post",
             Self::Stream => "stream",
         }
+    }
+
+    /// Return a slice of all pipeline stage variants in pipeline order.
+    ///
+    /// Useful for iterating over all stages when initialising per-stage metrics
+    /// or building dashboards.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tokio_prompt_orchestrator::PipelineStage;
+    ///
+    /// let labels: Vec<&str> = PipelineStage::all().iter().map(|s| s.as_str()).collect();
+    /// assert_eq!(labels, ["rag", "assemble", "inference", "post", "stream"]);
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
+    pub fn all() -> &'static [PipelineStage] {
+        &[
+            PipelineStage::Rag,
+            PipelineStage::Assemble,
+            PipelineStage::Inference,
+            PipelineStage::Post,
+            PipelineStage::Stream,
+        ]
     }
 }
 

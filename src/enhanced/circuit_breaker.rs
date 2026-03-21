@@ -32,6 +32,7 @@
 //! # }
 //! ```
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -111,7 +112,7 @@ struct CircuitState {
     last_failure_time: Option<Instant>,
     last_state_change: Instant,
     /// Recent results (true = success, false = failure)
-    recent_results: Vec<bool>,
+    recent_results: VecDeque<bool>,
 }
 
 /// Current state of a circuit breaker.
@@ -147,6 +148,9 @@ impl CircuitBreaker {
     /// * `timeout` — How long to stay in the `Open` state before transitioning
     ///   to `HalfOpen` and allowing one probe request through.
     ///
+    /// The default rolling-window size is 100 results.  Use
+    /// [`with_window_size`](Self::with_window_size) to customise it.
+    ///
     /// # Examples
     ///
     /// ```
@@ -164,7 +168,7 @@ impl CircuitBreaker {
                 successes: 0,
                 last_failure_time: None,
                 last_state_change: Instant::now(),
-                recent_results: Vec::new(),
+                recent_results: VecDeque::new(),
             })),
             config: CircuitBreakerConfig {
                 failure_threshold,
@@ -173,6 +177,32 @@ impl CircuitBreaker {
                 window_size: 100,
             },
         }
+    }
+
+    /// Set the rolling-window size used to calculate the success rate.
+    ///
+    /// The window keeps the most recent `size` call outcomes. A smaller window
+    /// reacts faster to bursts of failures but is more sensitive to noise. The
+    /// default is `100`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use tokio_prompt_orchestrator::enhanced::CircuitBreaker;
+    ///
+    /// // Tighter window — reacts faster to short failure bursts.
+    /// let cb = CircuitBreaker::new(5, 0.8, Duration::from_secs(30))
+    ///     .with_window_size(20);
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
+    #[must_use]
+    pub fn with_window_size(mut self, size: usize) -> Self {
+        self.config.window_size = size.max(1);
+        self
     }
 
     /// Execute a fallible async operation through the circuit breaker.
@@ -259,9 +289,9 @@ impl CircuitBreaker {
         let mut state = self.state.write().await;
 
         state.successes += 1;
-        state.recent_results.push(true);
+        state.recent_results.push_back(true);
         if state.recent_results.len() > self.config.window_size {
-            state.recent_results.remove(0);
+            state.recent_results.pop_front();
         }
 
         debug!(
@@ -302,9 +332,9 @@ impl CircuitBreaker {
 
         state.failures += 1;
         state.last_failure_time = Some(Instant::now());
-        state.recent_results.push(false);
+        state.recent_results.push_back(false);
         if state.recent_results.len() > self.config.window_size {
-            state.recent_results.remove(0);
+            state.recent_results.pop_front();
         }
 
         warn!(
