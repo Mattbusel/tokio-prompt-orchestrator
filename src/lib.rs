@@ -170,6 +170,8 @@ pub mod worker_pool;
 pub mod model_selector;
 pub mod intent_classifier;
 pub mod response_validator;
+pub mod prompt_versioning;
+pub mod multi_modal;
 
 // Re-exports
 pub use cache::{CacheConfig, CacheEntry, CacheStats, PromptCache};
