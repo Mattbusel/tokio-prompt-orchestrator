@@ -17,8 +17,6 @@
 //! Pricing is configurable and can be hot-reloaded from a TOML string at
 //! runtime via [`SmartRouter::load_pricing_toml`].
 
-use std::collections::HashMap;
-
 // ---------------------------------------------------------------------------
 // ModelPricing
 // ---------------------------------------------------------------------------

@@ -16,6 +16,50 @@ Five-stage bounded-backpressure DAG with deduplication, circuit breakers, rate l
 
 ## What's New
 
+### v1.5.0 — Circuit Breaker Adaptive Backoff, Token Budget Middleware, SimHash Dedup
+
+| Feature | Module | What it does |
+|---------|--------|--------------|
+| **Adaptive circuit breaker probe intervals** | `enhanced::CircuitBreaker` | Half-open probe timeouts now use exponential backoff (`timeout × 2^N`, capped at 64×) so a flapping service is not hammered — each consecutive failed probe doubles the wait before the next attempt |
+| **Token budget middleware** | `token_budget::TokenBudgetGuard` | Pre-flight token estimation (⌈bytes/4⌉) gates every request before it reaches the LLM — enforces per-request and rolling-period caps with automatic window rollover and surplus credit-back after actual usage |
+| **Semantic deduplication (SimHash)** | `enhanced::SemanticDeduplicator` | 64-bit locality-sensitive hash catches paraphrased near-duplicates that bypass exact-match dedup — configurable Hamming-distance threshold with TTL expiry |
+
+#### Adaptive circuit breaker — how it works
+
+Previously, a half-open probe failure immediately re-opened the circuit and waited the **same** full timeout before trying again. This caused probe storms against recovering services. Now:
+
+```
+probe 0 fails → wait 1× timeout
+probe 1 fails → wait 2× timeout
+probe 2 fails → wait 4× timeout
+probe 3 fails → wait 8× timeout
+...
+probe 6+ fails → wait 64× timeout (capped)
+probe succeeds → reset to 0 (normal operation resumes)
+```
+
+The backoff factor is exposed in `CircuitBreakerStats::probe_failures` for observability.
+
+#### Token budget — quick example
+
+```rust
+use tokio_prompt_orchestrator::token_budget::{TokenBudgetGuard, TokenBudgetConfig};
+use std::time::Duration;
+
+let guard = TokenBudgetGuard::new(TokenBudgetConfig {
+    max_tokens_per_request: 4_096,   // reject single requests over 4k tokens
+    max_tokens_per_period:  100_000, // 100k tokens per hour
+    period: Duration::from_secs(3600),
+});
+
+match guard.check(&prompt) {
+    Ok(estimated) => { /* send to LLM */ }
+    Err(e) => { /* reject early — no API charge */ }
+}
+// After response arrives:
+guard.release(estimated, actual_tokens_from_provider);
+```
+
 ### v1.4.0 — Prompt A/B Testing Framework and Semantic Deduplication
 
 This release adds two major data-science primitives for production LLM deployments:
