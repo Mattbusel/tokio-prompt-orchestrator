@@ -397,7 +397,7 @@ mod tests {
         let n = dedup.complete("m", "prompt", vec!["out".to_string()]);
         assert_eq!(n, 5);
         // All receivers have a value pending (non-async check via try_recv).
-        for rx in rxs {
+        for mut rx in rxs {
             assert!(rx.try_recv().is_ok());
         }
     }

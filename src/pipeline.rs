@@ -153,6 +153,7 @@ impl PipelineStage for AppendStage {
 ///
 /// The `pattern` is compiled once at construction time and reused for every
 /// call to [`process`](PipelineStage::process).
+#[derive(Debug)]
 pub struct RegexReplaceStage {
     /// The compiled regex pattern.
     compiled: Regex,

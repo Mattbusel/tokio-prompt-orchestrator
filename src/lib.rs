@@ -164,6 +164,8 @@ pub mod priority_queue;
 pub mod hot_config;
 pub mod observability;
 pub mod retry_policy;
+pub mod worker_pool;
+pub mod model_selector;
 
 // Re-exports
 pub use cache::{CacheConfig, CacheEntry, CacheStats, PromptCache};
