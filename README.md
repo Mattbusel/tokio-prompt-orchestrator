@@ -830,6 +830,152 @@ Implement `ResponseScorer` to define your own quality function.
 
 ---
 
+## Cascading Inference — Multi-Turn Tool Call Loops
+
+The `cascade` module lets a model drive its own multi-turn reasoning loop: it emits tool calls, the engine executes them, injects results back into context, and re-infers until the model is satisfied or a safety limit is reached.
+
+```rust,no_run
+use std::sync::Arc;
+use tokio_prompt_orchestrator::cascade::{
+    CascadeEngine, CascadeConfig, NoopToolExecutor, InferFn,
+};
+use tokio_prompt_orchestrator::OrchestratorError;
+
+// Wire in your real worker — here we use a closure for brevity
+let infer: InferFn = Arc::new(|prompt: String| Box::pin(async move {
+    // In production: call AnthropicWorker/OpenAiWorker here
+    Ok::<String, OrchestratorError>(format!("Answer: {prompt}"))
+}));
+
+let engine = CascadeEngine::new(infer, Arc::new(NoopToolExecutor));
+// ^ swap NoopToolExecutor for a real executor that calls your tools
+
+let config = CascadeConfig {
+    max_turns: 8,
+    ..Default::default()
+};
+
+let result = engine.run("Research and summarise the Rust async ecosystem", &config).await?;
+
+println!("Final answer: {}", result.final_answer);
+println!("Tool calls made: {}", result.total_tool_calls);
+println!("Turns taken: {}", result.turns.len());
+println!("Stopped because: {:?}", result.termination_reason);
+```
+
+**Tool call format** — the model emits JSON blocks that the engine parses:
+
+```text
+<tool_call>
+{"name": "web_search", "arguments": {"query": "tokio async runtime"}}
+</tool_call>
+```
+
+Register a custom parser via `CascadeEngine::with_tool_parser` or a custom executor via `CascadeEngine::new(..., your_executor)`.
+
+**Termination conditions:** no tool calls in response, explicit `[DONE]` sentinel, `max_turns` reached, or pipeline error.
+
+---
+
+## Multi-Pipeline Routing
+
+Deploy multiple named pipeline instances simultaneously and route each prompt to the best-fit pipeline based on detected intent.
+
+```rust,no_run
+use std::sync::Arc;
+use tokio_prompt_orchestrator::{EchoWorker, PromptRequest, SessionId};
+use tokio_prompt_orchestrator::multi_pipeline::{
+    MultiPipelineRouter, PipelineDescriptor, PromptClass,
+};
+use std::collections::HashMap;
+
+let router = MultiPipelineRouter::builder()
+    .add_pipeline(PipelineDescriptor::new(
+        "fast",                          // name
+        PromptClass::Faq,               // primary class
+        Arc::new(EchoWorker::new()),    // fast/cheap model worker
+    ))
+    .add_pipeline(
+        PipelineDescriptor::new("reasoning", PromptClass::Reasoning, Arc::new(EchoWorker::new()))
+            .also_serving(vec![PromptClass::General]),  // fallback
+    )
+    .add_pipeline(PipelineDescriptor::new("code", PromptClass::Code, Arc::new(EchoWorker::new())))
+    .build();
+
+// Route a request — classification is automatic
+let req = PromptRequest {
+    session: SessionId::new("user-42"),
+    request_id: "r1".to_string(),
+    input: "Explain why Rust is memory safe step by step".to_string(),
+    meta: HashMap::new(),
+    deadline: None,
+};
+
+router.route(req).await?;
+
+// Or classify manually
+let class = router.classify(&req); // → PromptClass::Reasoning
+
+// Inspect per-pipeline stats
+for stats in router.stats() {
+    println!("{}: {} routed, {} shed, {:.0}ms EMA", stats.name, stats.routed, stats.shed, stats.ema_latency_ms);
+}
+```
+
+**Override classification** by setting `"pipeline_class": "code"` in `PromptRequest::meta`.
+
+**Routing priority:** exact class match → `also_serves` list → first pipeline (default).
+
+---
+
+## Adaptive Worker Pool (Kalman Filter)
+
+The `adaptive_pool` module implements a closed-loop controller that smooths noisy queue depth observations with a Kalman filter and recommends scale-up/scale-down events with configurable cooldowns.
+
+```rust,no_run
+use std::sync::Arc;
+use std::time::Duration;
+use tokio_prompt_orchestrator::adaptive_pool::{
+    AdaptivePool, AdaptivePoolConfig, ScaleDecision, run_pool_controller,
+};
+
+let config = AdaptivePoolConfig {
+    min_workers: 2,
+    max_workers: 32,
+    scale_up_threshold: 50.0,     // queue depth above this triggers scale-up
+    scale_down_threshold: 5.0,    // queue depth below this triggers scale-down
+    latency_threshold_ms: 500.0,  // both depth AND latency must be high to scale up
+    cooldown: Duration::from_secs(15),
+    ..Default::default()
+};
+
+let pool = AdaptivePool::new(config, 2); // start with 2 workers
+
+// Run the controller loop every 500ms
+let _handle = run_pool_controller(
+    Arc::clone(&pool),
+    Duration::from_millis(500),
+    || current_queue_depth(),    // your function returning usize
+    || current_p99_latency_ms(), // your function returning f64
+    |decision| Box::pin(async move {
+        match decision {
+            ScaleDecision::ScaleUp { by } => spawn_n_workers(by),
+            ScaleDecision::ScaleDown { by } => drain_n_workers(by),
+            ScaleDecision::Stable => {},
+        }
+    }),
+);
+
+// Inspect pool state
+let stats = pool.stats().await;
+println!("Workers: {}, estimated depth: {:.1}, latency EMA: {:.0}ms",
+    stats.current_workers, stats.estimated_queue_depth, stats.latency_ema_ms);
+```
+
+The Kalman filter converges to the true queue depth in ~5–10 observations, ignoring single-sample spikes that would cause naive reactive controllers to thrash.
+
+---
+
 ## Contributing
 
 1. Fork the repository and create a feature branch off `main`.
