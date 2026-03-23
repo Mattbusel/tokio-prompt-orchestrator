@@ -1584,6 +1584,99 @@ assert!(dedup.check_and_register("What is the capital of Germany?"));
 
 ---
 
+## Prompt Cache
+
+Content-addressed, in-process LRU cache for LLM inference responses.  Cache
+keys are SHA-256 hashes of `(model_id + prompt)`.  Entries carry a TTL and are
+evicted lazily (on `get`) or eagerly (via `evict_expired`).  When the cache
+reaches `max_entries` the least-recently-used entry is evicted.
+
+### Usage
+
+```rust,no_run
+use tokio_prompt_orchestrator::cache::{CacheConfig, PromptCache};
+use std::time::Duration;
+
+let cache = PromptCache::new(CacheConfig {
+    max_entries: 1024,
+    default_ttl: Duration::from_secs(300),
+    max_prompt_len: 16_384,
+});
+
+// Store a response.
+cache.insert("gpt-4o", "Summarise the Rust book.", vec!["Rust is a systems language…".to_string()], None);
+
+// Retrieve on the next identical request.
+if let Some(cached) = cache.get("gpt-4o", "Summarise the Rust book.") {
+    println!("Cache hit: {} chunks", cached.len());
+}
+
+// Inspect statistics.
+let stats = cache.stats();
+println!("Hit rate: {:.1}%  Entries: {}  Evictions: {}",
+    stats.hit_rate * 100.0, stats.entries, stats.evictions);
+
+// Flush all entries.
+cache.flush();
+```
+
+### HTTP Endpoints (web-api feature)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/v1/cache/stats` | Return hit rate, entry count, evictions |
+| `DELETE` | `/api/v1/cache` | Flush all entries |
+
+---
+
+## Rate Limiter
+
+Per-model token bucket rate limiter with configurable capacity and refill rate.
+Supports non-blocking (`try_acquire`) and async waiting (`acquire`) modes.
+
+### Usage
+
+```rust,no_run
+use tokio_prompt_orchestrator::rate_limiter::{BucketConfig, RateLimiter};
+
+let limiter = RateLimiter::new(vec![
+    BucketConfig {
+        model_id: "gpt-4o".to_string(),
+        requests_per_second: 10.0,
+        burst_capacity: 20,
+    },
+    BucketConfig {
+        model_id: "claude-sonnet-4-6".to_string(),
+        requests_per_second: 5.0,
+        burst_capacity: 10,
+    },
+]);
+
+// Non-blocking check.
+match limiter.try_acquire("gpt-4o") {
+    Ok(()) => { /* proceed */ }
+    Err(e) => eprintln!("Rate limited: {e}"),
+}
+
+// Async: wait until a token is available.
+// limiter.acquire("gpt-4o").await?;
+
+// Inspect per-model statistics.
+let stats = limiter.stats();
+for m in stats.per_model {
+    println!("Model {}: allowed={} denied={} tokens={:.1}",
+        m.model_id, m.requests_allowed, m.requests_denied, m.current_tokens);
+}
+```
+
+### HTTP Endpoints (web-api feature)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/v1/rate-limiter/stats` | Per-model token counts and request tallies |
+
+---
+
 ## Known Issues / Roadmap
 
 - **prometheus 0.13**: Has RUSTSEC-2024-0437 (protobuf DoS). Mitigated by API key auth on `/metrics`. Migration to 0.14 blocked by `prometheus::proto` API removal — tracked internally for Q3 2026.

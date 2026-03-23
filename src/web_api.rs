@@ -545,6 +545,10 @@ struct AppState {
     circuit_breaker: crate::enhanced::CircuitBreaker,
     /// Optional metrics scrape API key (separate from the main API key).
     metrics_key: Option<String>,
+    /// Shared in-process prompt cache.
+    prompt_cache: crate::cache::PromptCache,
+    /// Per-model rate limiter.
+    rate_limiter: crate::rate_limiter::RateLimiter,
     /// Set to `true` when a shutdown signal has been received.  New inference
     /// requests are rejected with HTTP 503 while this is `true`.
     shutting_down: Arc<AtomicBool>,
@@ -674,6 +678,8 @@ pub async fn start_server(
         started_at: Instant::now(),
         session_budget: Arc::new(crate::session::SessionBudget::new()),
         ab_runner: Arc::new(crate::ab_test::AbTestRunner::new()),
+        prompt_cache: crate::cache::PromptCache::new(crate::cache::CacheConfig::default()),
+        rate_limiter: crate::rate_limiter::RateLimiter::new(vec![]),
     });
 
     // Collector task: receives pipeline output and writes results into the tracker.
@@ -706,6 +712,9 @@ pub async fn start_server(
         .route("/api/v1/debug/dlq", get(debug_dlq_handler))
         .route("/api/v1/debug/dedup-index", get(debug_dedup_handler))
         .route("/api/v1/debug/pipeline", get(debug_pipeline_handler))
+        .route("/api/v1/cache/stats", get(cache_stats_handler))
+        .route("/api/v1/cache", axum::routing::delete(cache_flush_handler))
+        .route("/api/v1/rate-limiter/stats", get(rate_limiter_stats_handler))
         .route("/v1/sessions/:session_id/budget", get(session_budget_handler))
         .route("/v1/sessions/:session_id/budget/reset", post(session_budget_reset_handler))
         .route("/health", get(health_handler))
@@ -3165,4 +3174,77 @@ mod tests {
         let state = make_state_with_key(None);
         assert!(state.api_key.is_none(), "no API key → auth disabled");
     }
+}
+
+// ============================================================================
+// Cache endpoints
+// ============================================================================
+
+/// `GET /api/v1/cache/stats` — return cache statistics as JSON.
+#[cfg(feature = "web-api")]
+async fn cache_stats_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    struct CacheStatsResponse {
+        entries: usize,
+        total_hits: u64,
+        total_misses: u64,
+        hit_rate: f64,
+        evictions: u64,
+    }
+
+    let stats = state.prompt_cache.stats();
+    Json(CacheStatsResponse {
+        entries: stats.entries,
+        total_hits: stats.total_hits,
+        total_misses: stats.total_misses,
+        hit_rate: stats.hit_rate,
+        evictions: stats.evictions,
+    })
+}
+
+/// `DELETE /api/v1/cache` — flush all cache entries.
+#[cfg(feature = "web-api")]
+async fn cache_flush_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    state.prompt_cache.flush();
+    (StatusCode::OK, Json(serde_json::json!({"status": "flushed"})))
+}
+
+// ============================================================================
+// Rate-limiter endpoint
+// ============================================================================
+
+/// `GET /api/v1/rate-limiter/stats` — return per-model rate limiter stats.
+#[cfg(feature = "web-api")]
+async fn rate_limiter_stats_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    struct ModelStats {
+        model_id: String,
+        requests_allowed: u64,
+        requests_denied: u64,
+        current_tokens: f64,
+        capacity: f64,
+    }
+
+    #[derive(Serialize)]
+    struct RateLimiterStatsResponse {
+        models: Vec<ModelStats>,
+    }
+
+    let stats = state.rate_limiter.stats();
+    let models = stats
+        .per_model
+        .into_iter()
+        .map(|m| ModelStats {
+            model_id: m.model_id,
+            requests_allowed: m.requests_allowed,
+            requests_denied: m.requests_denied,
+            current_tokens: m.current_tokens,
+            capacity: m.capacity,
+        })
+        .collect();
+    Json(RateLimiterStatsResponse { models })
 }

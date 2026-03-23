@@ -88,6 +88,7 @@ use thiserror::Error;
 
 pub mod ab_test;
 pub mod adaptive_pool;
+pub mod cache;
 pub mod cascade;
 pub mod compression;
 pub mod config;
@@ -95,6 +96,7 @@ pub mod conversation;
 pub mod coordination;
 pub mod failover;
 pub mod provider_health;
+pub mod rate_limiter;
 pub mod smart_router;
 #[cfg(feature = "distributed")]
 pub mod distributed;
@@ -149,6 +151,8 @@ pub mod trace_ui;
 pub mod webhooks;
 
 // Re-exports
+pub use cache::{CacheConfig, CacheEntry, CacheStats, PromptCache};
+pub use rate_limiter::{BucketConfig, ModelRateLimiterStats, RateLimitError, RateLimiter, RateLimiterStats};
 pub use ab_test::{AbTestConfig, AbTestResult, AbTestRunner, SuccessMetric, Variant};
 pub use conversation::{
     ConversationConfig, ConversationManager, PromptFormat, Role, Turn,
