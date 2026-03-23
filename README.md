@@ -14,6 +14,22 @@ Five-stage bounded-backpressure DAG with deduplication, circuit breakers, rate l
 
 ---
 
+## What's New
+
+### v1.3.0 — Plugin Stage System, DLQ Replay Binary, and Cron Scheduler
+
+This release breaks the rigidity of the five-stage DAG by adding three major extensibility layers:
+
+| Feature | Module | What it does |
+|---------|--------|--------------|
+| **Custom Plugin Stage System** | `plugin` | Insert async middleware at any of the 10 pipeline hook points (before/after each stage) without forking the library |
+| **Dead-Letter Queue Replay Binary** | `src/bin/replay.rs` | `cargo run --bin replay` reads NDJSON from a file or stdin and resubmits failed requests with configurable retries and progress display |
+| **Cron Scheduler** | `scheduler` | POST a prompt template + cron expression; a Tokio background task fires it on schedule and injects it into the live pipeline |
+
+All three features are available without any optional feature flags and are wired into the web API when `--features web-api` is enabled.
+
+---
+
 ## Why This Exists
 
 Running LLM inference in production at scale exposes a class of problems that a single `reqwest` call cannot solve:
