@@ -174,6 +174,8 @@ pub mod prompt_versioning;
 pub mod multi_modal;
 pub mod persona_manager;
 pub mod chain_of_thought;
+pub mod streaming_processor;
+pub mod provider_manager;
 
 // Re-exports
 pub use cache::{CacheConfig, CacheEntry, CacheStats, PromptCache};
