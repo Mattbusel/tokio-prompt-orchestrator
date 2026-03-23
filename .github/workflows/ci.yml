@@ -9,6 +9,52 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo check
 
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Clippy (default features)
+        run: cargo clippy -- -D warnings
+      - name: Clippy (all features)
+        run: cargo clippy --all-features -- -D warnings
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check documentation builds without warnings
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+
+  feature-matrix:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        features:
+          - ""
+          - "web-api"
+          - "metrics-server"
+          - "tui"
+          - "mcp"
+          - "caching"
+          - "rate-limiting"
+          - "full"
+          - "self-improving"
+          - "distributed"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check feature set "${{ matrix.features }}"
+        run: |
+          if [ -z "${{ matrix.features }}" ]; then
+            cargo check
+          else
+            cargo check --features "${{ matrix.features }}"
+          fi
+
   test-coverage:
     runs-on: ubuntu-latest
     timeout-minutes: 20
