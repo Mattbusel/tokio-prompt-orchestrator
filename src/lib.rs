@@ -162,6 +162,8 @@ pub mod trace_ui;
 pub mod webhooks;
 pub mod priority_queue;
 pub mod hot_config;
+pub mod observability;
+pub mod retry_policy;
 
 // Re-exports
 pub use cache::{CacheConfig, CacheEntry, CacheStats, PromptCache};
