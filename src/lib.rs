@@ -102,6 +102,7 @@ pub mod scheduler;
 pub mod security;
 pub mod session;
 pub mod stages;
+pub mod token_budget;
 pub mod worker;
 
 #[cfg(feature = "metrics-server")]
