@@ -53,9 +53,10 @@
 //!
 //! | Module | Description |
 //! |--------|-------------|
+//! | [`ab_test`] | Prompt A/B testing — consistent hashing assignment, Welch's t-test winner determination, Cohen's d effect size |
 //! | [`stages`] | Five pipeline stage implementations and channel wiring |
 //! | [`worker`] | [`ModelWorker`] trait and five production implementations |
-//! | [`enhanced`] | Resilience primitives: circuit breaker, dedup, retry, cache, rate limiter, smart batching, tournament mode |
+//! | [`enhanced`] | Resilience primitives: circuit breaker, dedup, semantic dedup (SimHash), retry, cache, rate limiter, smart batching, tournament mode |
 //! | [`metrics`] | Prometheus metrics initialisation and helper functions |
 //! | [`config`] | TOML-deserialisable [`PipelineConfig`] with hot-reload support |
 //! | [`routing`] | [`ModelRouter`] for complexity-scored routing; [`ArbitrageEngine`] for SLA-aware cheapest-provider selection; [`PoolSizer`] for adaptive worker scaling |
@@ -142,6 +143,7 @@ pub mod self_improve_loop;
 pub mod tui;
 
 // Re-exports
+pub use ab_test::{AbTestConfig, AbTestResult, AbTestRunner, SuccessMetric, Variant};
 pub use conversation::{
     ConversationConfig, ConversationManager, PromptFormat, Role, Turn,
 };

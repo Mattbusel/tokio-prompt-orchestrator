@@ -9,7 +9,7 @@
 //! | [`cache`] | In-process LRU cache with TTL for inference results |
 //! | [`circuit_breaker`] | Prevents cascading failures; opens on threshold, probes recovery with exponential backoff |
 //! | [`dedup`] | Request coalescing — collapses byte-identical in-flight prompts |
-//! | [`semantic_dedup`] | Near-duplicate detection using SimHash locality-sensitive hashing |
+//! | [`semantic_dedup`] | Near-duplicate detection using SimHash LSH — catches paraphrases with configurable Hamming-distance threshold; when a near-duplicate is found, logs the similarity score and optionally returns the cached result |
 //! | [`priority`] | Four-level priority queue for request scheduling |
 //! | [`rate_limit`] | Token-bucket rate limiter with configurable burst |
 //! | [`retry`] | Exponential back-off with jitter and configurable attempt cap |

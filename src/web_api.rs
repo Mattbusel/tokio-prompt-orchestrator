@@ -552,6 +552,8 @@ struct AppState {
     started_at: Instant,
     /// Per-session token budget tracker — backs the `/v1/sessions/{id}/budget` endpoints.
     session_budget: Arc<crate::session::SessionBudget>,
+    /// A/B test runner — backs the `/api/v1/ab-tests` endpoints.
+    ab_runner: Arc<crate::ab_test::AbTestRunner>,
 }
 
 // ============================================================================
@@ -671,6 +673,7 @@ pub async fn start_server(
         shutting_down,
         started_at: Instant::now(),
         session_budget: Arc::new(crate::session::SessionBudget::new()),
+        ab_runner: Arc::new(crate::ab_test::AbTestRunner::new()),
     });
 
     // Collector task: receives pipeline output and writes results into the tracker.
