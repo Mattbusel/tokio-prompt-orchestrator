@@ -78,7 +78,7 @@ pub enum Variant {
 }
 
 /// The metric used to evaluate variant quality.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum SuccessMetric {
     /// Higher output length is better (e.g. completeness).
     OutputLength,
