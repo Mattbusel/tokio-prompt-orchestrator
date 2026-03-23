@@ -196,6 +196,8 @@ pub mod conversation_analyzer;
 pub mod retry_budget;
 pub mod model_registry;
 pub mod prompt_validator;
+pub mod cache_warmer;
+pub mod token_counter;
 
 // Re-exports
 pub use cache::{CacheConfig, CacheEntry, CacheStats, PromptCache};
