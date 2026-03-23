@@ -183,6 +183,8 @@ pub mod context_compression;
 pub mod prompt_router;
 pub mod tool_call_parser;
 pub mod session_manager;
+pub mod output_cache;
+pub mod pipeline_builder;
 
 // Re-exports
 pub use cache::{CacheConfig, CacheEntry, CacheStats, PromptCache};
