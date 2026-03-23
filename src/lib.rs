@@ -101,6 +101,7 @@ pub mod coordination;
 pub mod failover;
 pub mod provider_health;
 pub mod rate_limiter;
+pub mod semantic_cache;
 pub mod smart_router;
 #[cfg(feature = "distributed")]
 pub mod distributed;

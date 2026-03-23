@@ -430,3 +430,224 @@ mod tests {
             .expect("acquire should succeed");
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Async DashMap-based rate limiter
+// ═══════════════════════════════════════════════════════════════════════════════
+
+use dashmap::DashMap;
+use std::sync::Arc as StdArc;
+
+// ── AsyncRateLimitError ───────────────────────────────────────────────────────
+
+/// Errors returned by [`AsyncRateLimiter::check_and_consume`].
+#[derive(thiserror::Error, Debug, Clone)]
+pub enum AsyncRateLimitError {
+    /// No bucket is registered for the requested model.
+    #[error("model '{0}' is not registered in the rate limiter")]
+    ModelNotRegistered(String),
+    /// The bucket does not have enough tokens for the requested amount.
+    #[error("rate limit exceeded for model '{model}': only {available:.2} tokens available")]
+    RateLimitExceeded {
+        /// The model whose limit was exceeded.
+        model: String,
+        /// How many tokens were available when the request was denied.
+        available: f64,
+    },
+}
+
+// ── TokenBucketAsync ──────────────────────────────────────────────────────────
+
+/// A single token bucket used by [`AsyncRateLimiter`].
+///
+/// Tokens are refilled continuously based on elapsed wall-clock time.
+pub struct TokenBucketAsync {
+    /// Maximum number of tokens the bucket can hold.
+    pub capacity: f64,
+    /// Current available tokens.
+    pub tokens: f64,
+    /// Refill rate in tokens per second.
+    pub refill_rate: f64,
+    /// Last refill instant.
+    pub last_refill: Instant,
+}
+
+impl TokenBucketAsync {
+    /// Create a new bucket starting full.
+    pub fn new(capacity: f64, refill_rate: f64) -> Self {
+        Self {
+            capacity,
+            tokens: capacity,
+            refill_rate,
+            last_refill: Instant::now(),
+        }
+    }
+
+    /// Refill tokens based on elapsed time, then attempt to consume `tokens`.
+    ///
+    /// Returns `true` if the tokens were consumed, `false` if the bucket has
+    /// insufficient tokens.
+    pub fn try_consume(&mut self, tokens: f64) -> bool {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
+        self.tokens = (self.tokens + elapsed * self.refill_rate).min(self.capacity);
+        self.last_refill = now;
+
+        if self.tokens >= tokens {
+            self.tokens -= tokens;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Returns the number of tokens currently available (after refill).
+    pub fn available(&mut self) -> f64 {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
+        self.tokens = (self.tokens + elapsed * self.refill_rate).min(self.capacity);
+        self.last_refill = now;
+        self.tokens
+    }
+}
+
+// ── AsyncRateLimiter ──────────────────────────────────────────────────────────
+
+/// Async, DashMap-backed per-model rate limiter.
+///
+/// Each model has its own [`TokenBucketAsync`] behind a `tokio::sync::Mutex`
+/// so that individual model buckets can be locked without blocking other models.
+///
+/// Clone-cheap: the inner `Arc<DashMap<...>>` is reference-counted.
+#[derive(Clone)]
+pub struct AsyncRateLimiter {
+    buckets: StdArc<DashMap<String, tokio::sync::Mutex<TokenBucketAsync>>>,
+}
+
+impl AsyncRateLimiter {
+    /// Create a new `AsyncRateLimiter` with no models registered.
+    pub fn new() -> Self {
+        Self {
+            buckets: StdArc::new(DashMap::new()),
+        }
+    }
+
+    /// Register a model with the given capacity and refill rate.
+    ///
+    /// If the model is already registered its bucket is replaced.
+    pub fn register_model(&self, model: &str, capacity: f64, refill_rate: f64) {
+        let bucket = TokenBucketAsync::new(capacity, refill_rate);
+        self.buckets
+            .insert(model.to_string(), tokio::sync::Mutex::new(bucket));
+    }
+
+    /// Attempt to consume `tokens` from the model's bucket.
+    ///
+    /// # Errors
+    ///
+    /// - [`AsyncRateLimitError::ModelNotRegistered`] — model has no bucket.
+    /// - [`AsyncRateLimitError::RateLimitExceeded`] — bucket has insufficient tokens.
+    pub async fn check_and_consume(
+        &self,
+        model: &str,
+        tokens: f64,
+    ) -> Result<(), AsyncRateLimitError> {
+        let entry = self
+            .buckets
+            .get(model)
+            .ok_or_else(|| AsyncRateLimitError::ModelNotRegistered(model.to_string()))?;
+        let mut bucket = entry.lock().await;
+        let available = bucket.available();
+        if bucket.try_consume(tokens) {
+            Ok(())
+        } else {
+            Err(AsyncRateLimitError::RateLimitExceeded {
+                model: model.to_string(),
+                available,
+            })
+        }
+    }
+}
+
+impl Default for AsyncRateLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ── Async limiter tests ───────────────────────────────────────────────────────
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod async_limiter_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_basic_consumption() {
+        let limiter = AsyncRateLimiter::new();
+        limiter.register_model("gpt-4", 10.0, 1.0);
+        assert!(limiter.check_and_consume("gpt-4", 5.0).await.is_ok());
+        assert!(limiter.check_and_consume("gpt-4", 5.0).await.is_ok());
+        // Bucket should now be empty.
+        let err = limiter.check_and_consume("gpt-4", 1.0).await.unwrap_err();
+        assert!(
+            matches!(err, AsyncRateLimitError::RateLimitExceeded { .. }),
+            "Expected RateLimitExceeded, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unregistered_model() {
+        let limiter = AsyncRateLimiter::new();
+        let err = limiter
+            .check_and_consume("unknown-model", 1.0)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, AsyncRateLimitError::ModelNotRegistered(_)),
+            "Expected ModelNotRegistered"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_exceeded_limit_returns_available() {
+        let limiter = AsyncRateLimiter::new();
+        limiter.register_model("claude", 3.0, 0.001);
+        // Drain the bucket.
+        limiter.check_and_consume("claude", 3.0).await.unwrap();
+        match limiter.check_and_consume("claude", 1.0).await.unwrap_err() {
+            AsyncRateLimitError::RateLimitExceeded { available, .. } => {
+                assert!(available < 1.0, "available should be < 1 after drain, got {available}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_refill_over_time() {
+        let limiter = AsyncRateLimiter::new();
+        // 1000 tokens/sec → 1 token/ms.
+        limiter.register_model("fast-model", 1.0, 1000.0);
+        // Drain.
+        limiter.check_and_consume("fast-model", 1.0).await.unwrap();
+        // Wait for refill.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(limiter.check_and_consume("fast-model", 1.0).await.is_ok());
+    }
+
+    #[test]
+    fn test_error_display_not_registered() {
+        let e = AsyncRateLimitError::ModelNotRegistered("m".to_string());
+        assert!(e.to_string().contains("'m'"));
+    }
+
+    #[test]
+    fn test_error_display_exceeded() {
+        let e = AsyncRateLimitError::RateLimitExceeded {
+            model: "m".to_string(),
+            available: 0.5,
+        };
+        assert!(e.to_string().contains("m"));
+        assert!(e.to_string().contains("0.50"));
+    }
+}
