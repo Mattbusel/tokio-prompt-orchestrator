@@ -1841,6 +1841,230 @@ async fn session_budget_reset_handler(
         .into_response()
 }
 
+// ============================================================================
+// A/B Test Handlers
+// ============================================================================
+
+/// JSON body for `POST /api/v1/ab-tests`.
+///
+/// Creates a new A/B experiment.  If an experiment with the same name already
+/// exists it is replaced and all accumulated samples are discarded.
+#[cfg(feature = "web-api")]
+#[derive(Debug, Deserialize, Serialize)]
+struct AbTestCreateRequest {
+    /// Unique experiment name.
+    name: String,
+    /// Template body for variant A (the control).
+    variant_a_body: String,
+    /// Template body for variant B (the treatment).
+    variant_b_body: String,
+    /// Fraction of traffic routed to variant A (0.0–1.0).  Default: 0.5.
+    #[serde(default = "default_traffic_split")]
+    traffic_split: f64,
+    /// Which metric to use for winner determination.
+    ///
+    /// Accepted values: `"output_length"` (default), `"latency"`, `"user_rating"`.
+    #[serde(default = "default_success_metric")]
+    success_metric: String,
+    /// Minimum samples per variant before analysis is attempted.  Default: 30.
+    #[serde(default = "default_min_samples")]
+    min_samples: usize,
+}
+
+#[cfg(feature = "web-api")]
+fn default_traffic_split() -> f64 {
+    0.5
+}
+
+#[cfg(feature = "web-api")]
+fn default_success_metric() -> String {
+    "output_length".into()
+}
+
+#[cfg(feature = "web-api")]
+fn default_min_samples() -> usize {
+    30
+}
+
+/// `POST /api/v1/ab-tests`
+///
+/// Register a new A/B experiment.
+///
+/// Returns `200` with the experiment name on success.
+/// Returns `400` if the request body is malformed.
+///
+/// # Panics
+///
+/// This function never panics.
+#[cfg(feature = "web-api")]
+async fn ab_test_create_handler(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AbTestCreateRequest>,
+) -> impl IntoResponse {
+    use crate::ab_test::{AbTestConfig, SuccessMetric};
+    use crate::templates::PromptTemplate;
+
+    if req.name.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "experiment name must not be empty"})),
+        )
+            .into_response();
+    }
+
+    let metric = match req.success_metric.to_lowercase().as_str() {
+        "output_length" | "length" => SuccessMetric::OutputLength,
+        "latency" => SuccessMetric::Latency,
+        "user_rating" | "rating" => SuccessMetric::UserRating,
+        other => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!("unknown success_metric '{other}'; use output_length | latency | user_rating")
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let cfg = AbTestConfig {
+        name: req.name.clone(),
+        variant_a: PromptTemplate::builder(format!("{}-a", req.name))
+            .body(req.variant_a_body)
+            .build(),
+        variant_b: PromptTemplate::builder(format!("{}-b", req.name))
+            .body(req.variant_b_body)
+            .build(),
+        traffic_split: req.traffic_split,
+        success_metric: metric,
+        min_samples: req.min_samples,
+    };
+
+    state.ab_runner.register(cfg);
+    info!(name = %req.name, "ab_test: experiment registered via REST API");
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "registered",
+            "name": req.name,
+            "traffic_split": req.traffic_split,
+            "min_samples": req.min_samples,
+        })),
+    )
+        .into_response()
+}
+
+/// `GET /api/v1/ab-tests/:name/results`
+///
+/// Return the current statistical result for the named experiment.
+///
+/// Returns `200` with the result JSON, `202` when the experiment exists but
+/// does not yet have enough samples, or `404` when no experiment is registered
+/// under `name`.
+///
+/// # Panics
+///
+/// This function never panics.
+#[cfg(feature = "web-api")]
+async fn ab_test_results_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    // Check existence first.
+    let counts = match state.ab_runner.sample_counts(&name) {
+        Some(c) => c,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": "experiment_not_found",
+                    "name": name,
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let (mean_a, mean_b) = state
+        .ab_runner
+        .current_means(&name)
+        .unwrap_or((0.0, 0.0));
+
+    match state.ab_runner.analyse(&name) {
+        Some(result) => {
+            let winner_str = match result.winner {
+                Some(crate::ab_test::Variant::A) => "A",
+                Some(crate::ab_test::Variant::B) => "B",
+                None => "none",
+            };
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "name": name,
+                    "status": "significant",
+                    "winner": winner_str,
+                    "confidence": result.confidence,
+                    "p_value": result.p_value,
+                    "effect_size": result.effect_size,
+                    "samples_a": result.samples_a,
+                    "samples_b": result.samples_b,
+                    "mean_a": result.mean_a,
+                    "mean_b": result.mean_b,
+                })),
+            )
+                .into_response()
+        }
+        None => {
+            // Experiment exists but insufficient samples.
+            (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({
+                    "name": name,
+                    "status": "insufficient_samples",
+                    "samples_a": counts.0,
+                    "samples_b": counts.1,
+                    "mean_a": mean_a,
+                    "mean_b": mean_b,
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// `DELETE /api/v1/ab-tests/:name`
+///
+/// Remove the named experiment and discard all accumulated data.
+///
+/// Returns `200` on success, `404` when no experiment is registered under `name`.
+///
+/// # Panics
+///
+/// This function never panics.
+#[cfg(feature = "web-api")]
+async fn ab_test_delete_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    if state.ab_runner.delete(&name) {
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "deleted", "name": name})),
+        )
+            .into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "experiment_not_found",
+                "name": name,
+            })),
+        )
+            .into_response()
+    }
+}
+
 /// `GET /live`  -  Kubernetes liveness probe.
 ///
 /// Always returns `200 {"status":"alive"}` as long as the process is running.

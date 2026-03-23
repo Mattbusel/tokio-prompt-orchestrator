@@ -16,6 +16,25 @@ Five-stage bounded-backpressure DAG with deduplication, circuit breakers, rate l
 
 ## What's New
 
+### v1.4.0 — Prompt A/B Testing Framework and Semantic Deduplication
+
+This release adds two major data-science primitives for production LLM deployments:
+
+| Feature | Module | What it does |
+|---------|--------|--------------|
+| **Prompt A/B Testing** | `ab_test` | Statistically rigorous variant testing with consistent hashing (same user → same variant), Welch's t-test significance testing, Cohen's d effect size, and REST API |
+| **Semantic Deduplication** | `enhanced::semantic_dedup` | SimHash LSH near-duplicate detection — catches paraphrases and minor edits that bypass exact-match dedup |
+
+Both features are available without any optional feature flags.
+
+### REST API — A/B Tests
+
+```text
+POST   /api/v1/ab-tests                   Create or replace an experiment
+GET    /api/v1/ab-tests/:name/results     Get current statistical result
+DELETE /api/v1/ab-tests/:name             Remove experiment and discard samples
+```
+
 ### v1.3.0 — Plugin Stage System, DLQ Replay Binary, and Cron Scheduler
 
 This release breaks the rigidity of the five-stage DAG by adding three major extensibility layers:
@@ -103,6 +122,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 | **Multi-turn cascading inference (tool calls)** | **`cascade::CascadeEngine`** | **Yes** |
 | **Named pipeline fleet with prompt routing** | **`multi_pipeline::MultiPipelineRouter`** | **Yes** |
 | **Kalman-filter adaptive worker pool** | **`adaptive_pool::AdaptivePool`** | **Yes** |
+| **Prompt A/B testing with Welch's t-test** | **`ab_test::AbTestRunner`** | **Yes** |
+| **Semantic near-duplicate detection (SimHash)** | **`enhanced::SemanticDeduplicator`** | **Yes** |
 
 ```rust,no_run
 use std::collections::HashMap;
@@ -156,7 +177,9 @@ The pipeline is a five-stage directed acyclic graph of bounded async channels. E
                  |  Stage 3: Inference      |  cap: 1024
                  |  (model worker pool)     |
                  |                          |
-                 |  Deduplication           |
+                 |  Exact-match Dedup       |
+                 |  Semantic Dedup (LSH)    |  <-- NEW: SimHash near-duplicate detection
+                 |  A/B Test Assignment     |  <-- NEW: consistent hashing variant split
                  |  Circuit Breaker         |
                  |  Retry + Backoff         |
                  |  Rate Limiter            |
@@ -182,7 +205,9 @@ The pipeline is a five-stage directed acyclic graph of bounded async channels. E
 
 | Layer | What it does |
 |-------|-------------|
-| **Deduplication** | In-flight requests with identical prompts are coalesced into a single API call; all waiting callers receive the same result |
+| **Exact-match Deduplication** | In-flight requests with identical prompts are coalesced into a single API call; all waiting callers receive the same result |
+| **Semantic Deduplication** | `SemanticDeduplicator` uses 64-bit SimHash fingerprints over token-level shingles to catch near-duplicate prompts (paraphrases, punctuation variants) before they reach the model |
+| **A/B Test Assignment** | `AbTestRunner` uses consistent FNV-1a hashing to map `(experiment, user_id)` pairs to variants deterministically; same user always sees same variant |
 | **Circuit Breaker** | Opens on consecutive failures, enters half-open probe mode after configurable timeout |
 | **Multi-provider Cascade Fallback** | `ProviderCascade` chains an ordered list of providers (primary → secondary → tertiary); open breakers are skipped automatically; per-provider latency and success-rate metrics tracked |
 | **Retry + Jitter** | Exponential backoff with full jitter — prevents synchronized retry storms |

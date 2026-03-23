@@ -115,6 +115,32 @@ pub struct App {
 
     /// Set to true when a live metrics fetch fails; false on success.
     pub metrics_fetch_error: bool,
+
+    // ── A/B test dashboard state ──────────────────────────────────────────────
+
+    /// Snapshot of active A/B experiments for the TUI panel.
+    ///
+    /// Each entry is `(experiment_name, samples_a, samples_b, mean_a, mean_b, winner)`.
+    pub ab_test_snapshot: Vec<AbTestEntry>,
+}
+
+/// A/B test status snapshot for TUI display.
+#[derive(Debug, Clone)]
+pub struct AbTestEntry {
+    /// Experiment name.
+    pub name: String,
+    /// Samples collected for variant A.
+    pub samples_a: usize,
+    /// Samples collected for variant B.
+    pub samples_b: usize,
+    /// Current mean score for variant A.
+    pub mean_a: f64,
+    /// Current mean score for variant B.
+    pub mean_b: f64,
+    /// Current winning variant, if statistically significant.
+    pub winner: Option<&'static str>,
+    /// Two-tailed p-value (available after min_samples is reached).
+    pub p_value: Option<f64>,
 }
 
 /// Depth of a bounded channel between two pipeline stages.
@@ -269,6 +295,8 @@ impl App {
             tick_rate,
 
             metrics_fetch_error: false,
+
+            ab_test_snapshot: Vec::new(),
         }
     }
 
