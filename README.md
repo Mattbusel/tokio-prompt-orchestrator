@@ -86,7 +86,7 @@ cargo run --features full,tui --bin tui
 
 ```toml
 [dependencies]
-tokio-prompt-orchestrator = "1.2"
+tokio-prompt-orchestrator = "1.3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
@@ -184,11 +184,14 @@ The pipeline is a five-stage directed acyclic graph of bounded async channels. E
 |-------|-------------|
 | **Deduplication** | In-flight requests with identical prompts are coalesced into a single API call; all waiting callers receive the same result |
 | **Circuit Breaker** | Opens on consecutive failures, enters half-open probe mode after configurable timeout |
+| **Multi-provider Cascade Fallback** | `ProviderCascade` chains an ordered list of providers (primary → secondary → tertiary); open breakers are skipped automatically; per-provider latency and success-rate metrics tracked |
 | **Retry + Jitter** | Exponential backoff with full jitter — prevents synchronized retry storms |
 | **Rate Limiter** | Token-bucket guard at the pipeline entry point |
 | **Dead-letter Queue** | Shed requests land in a ring buffer for inspection and replay |
-| **Priority Queue** | Four-level priority scheduler (Critical / High / Normal / Low) |
+| **DLQ Replay Scheduler** | `DlqReplayScheduler` re-injects DLQ entries with exponential backoff; supports per-session replay and age-based eviction |
+| **Priority Queue** | Four-level priority scheduler (Critical / High / Normal / Low) with deadline-aware pop that skips expired requests |
 | **Cache Layer** | TTL LRU cache for inference results (requires `caching` feature + Redis) |
+| **Provider Health Dashboard** | `ProviderHealthBuilder` aggregates per-provider p50/p95 latency, 1-hour success rate, and consecutive-failure count; serialises to JSON for REST health endpoints |
 
 ### Self-Improving Control Loop (optional)
 
@@ -1134,6 +1137,234 @@ println!("Workers: {}, estimated depth: {:.1}, latency EMA: {:.0}ms",
 ```
 
 The Kalman filter converges to the true queue depth in ~5–10 observations, ignoring single-sample spikes that would cause naive reactive controllers to thrash.
+
+---
+
+## Custom Plugin Stage System
+
+The plugin system lets you inject custom async logic at any of the **10 hook points** (before/after each of the 5 pipeline stages) without forking the codebase.
+
+### Core types
+
+| Type | Description |
+|------|-------------|
+| `StagePlugin` | Async trait — implement `process(PluginInput) -> PluginOutput` |
+| `PluginInput` | Request ID, session ID, payload (JSON), metadata map |
+| `PluginOutput` | Modified input + status: `Continue`, `Abort`, or `Error` |
+| `PluginPosition` | `Before(PipelineStage)` or `After(PipelineStage)` |
+| `PluginChain` | Ordered list of plugins at one position; runs serially |
+| `PluginRegistry` | Global runtime store; add/remove plugins at any time |
+
+### Writing a plugin
+
+```rust,no_run
+use tokio_prompt_orchestrator::plugin::{StagePlugin, PluginInput, PluginOutput};
+use async_trait::async_trait;
+
+/// Logs when the inference stage is entered.
+struct InferenceLogger;
+
+#[async_trait]
+impl StagePlugin for InferenceLogger {
+    fn name(&self) -> &'static str { "inference-logger" }
+
+    async fn process(&self, input: PluginInput) -> PluginOutput {
+        tracing::info!(request_id = %input.request_id, "entering inference stage");
+        // Return passthrough — input is forwarded unchanged.
+        PluginOutput::passthrough(input)
+    }
+}
+```
+
+### Registering plugins
+
+```rust,no_run
+use std::sync::Arc;
+use tokio_prompt_orchestrator::{PipelineStage, plugin::{PluginRegistry, PluginPosition}};
+
+let mut registry = PluginRegistry::new();
+
+// Run InferenceLogger before every inference call.
+registry.register(
+    PluginPosition::Before(PipelineStage::Inference),
+    Arc::new(InferenceLogger),
+);
+
+println!("Total plugins: {}", registry.total_plugin_count());
+// [("before:inference", 1)]
+println!("{:#?}", registry.summary());
+```
+
+### Short-circuiting the chain
+
+Return `PluginOutput::abort(input)` to stop the remaining plugins at that position. The pipeline stage itself still runs; only the pre/post hook chain is interrupted. Use `PluginOutput::error(input, "reason")` to signal a hard failure the caller can route to the DLQ.
+
+---
+
+## Dead-Letter Queue Replay Binary
+
+The `replay` binary reads failed request records from a dead-letter queue dump (NDJSON format) and resubmits them through the running orchestrator's HTTP API.
+
+### Building
+
+```bash
+cargo build --release --bin replay
+```
+
+### Usage
+
+```bash
+# Replay all entries from a DLQ export file
+./target/release/replay --queue-file dlq.ndjson
+
+# Read from stdin, increase retry budget
+cat dlq.ndjson | ./target/release/replay --max-retries 5
+
+# Target a non-default orchestrator URL with auth
+./target/release/replay \
+  --queue-file dlq.ndjson \
+  --orchestrator-url http://prod-node:8080 \
+  --api-key "$API_KEY"
+
+# Dry-run: parse and validate without submitting
+./target/release/replay --queue-file dlq.ndjson --dry-run
+```
+
+### CLI flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--queue-file` / `-f` | stdin | Path to NDJSON file; omit or `-` for stdin |
+| `--max-retries` | `3` | Max retry attempts per request (exponential back-off) |
+| `--orchestrator-url` | `http://127.0.0.1:8080` | Running orchestrator base URL |
+| `--api-key` | env `API_KEY` | Bearer token for authenticated deployments |
+| `--dry-run` | false | Parse and list entries without submitting |
+| `--delay-ms` | `50` | Milliseconds between successive submissions |
+| `--request-timeout-secs` | `30` | Per-HTTP-request timeout |
+
+### NDJSON format
+
+Two formats are accepted per line:
+
+**Full infer request** (matches `POST /api/v1/infer`):
+```json
+{"prompt":"Summarise this document","session_id":"s1","metadata":{},"deadline_secs":60}
+```
+
+**Raw DroppedRequest** (from `GET /api/v1/debug/dlq`):
+```json
+{"request_id":"req-abc","session_id":"s1","reason":"backpressure","dropped_at":1711900000}
+```
+
+### Progress display
+
+```text
+[########################################] 100/100 ok:97 fail:2 skip:1
+
+Replay complete: 100 submitted, 97 succeeded, 2 failed, 1 skipped.
+```
+
+The binary exits with code `1` when any requests fail after all retries.
+
+---
+
+## Cron Scheduler
+
+The `scheduler` module lets you register named prompt templates with a cron-like schedule. A background Tokio task wakes at the right wall-clock minute and injects each matching prompt directly into the pipeline.
+
+### Cron expression syntax
+
+Two-field mini-cron: `"MINUTE HOUR"`.
+
+| Expression | Fires |
+|-----------|-------|
+| `* *` | Every minute |
+| `*/5 *` | Every 5 minutes |
+| `0 *` | On the hour, every hour |
+| `0 9` | Every day at 09:00 |
+| `30 6` | Every day at 06:30 |
+| `*/15 8` | Every 15 minutes during the 8 o'clock hour |
+
+### Library usage
+
+```rust,no_run
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use tokio_prompt_orchestrator::PromptRequest;
+use tokio_prompt_orchestrator::scheduler::{Scheduler, ScheduledPrompt};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (tx, _rx) = mpsc::channel::<PromptRequest>(256);
+    let scheduler = Arc::new(Scheduler::new(tx));
+
+    // Every 5 minutes
+    scheduler.add(
+        ScheduledPrompt::new("health-check", "*/5 *", "Are you operational?")?
+    ).await?;
+
+    // Every day at 09:00
+    scheduler.add(
+        ScheduledPrompt::new("daily-summary", "0 9", "Summarise yesterday's logs.")?
+            .with_session("summary-session")
+            .with_metadata("source", "scheduler")
+    ).await?;
+
+    let handle = scheduler.spawn();
+
+    // Runtime management
+    for p in scheduler.list().await {
+        println!("{}: {} enabled={}", p.id, p.schedule, p.enabled);
+    }
+
+    handle.abort();
+    Ok(())
+}
+```
+
+### Web API integration (requires `--features web-api`)
+
+```rust,no_run
+use axum::Router;
+use tokio_prompt_orchestrator::scheduler::{Scheduler, SchedulerState, scheduler_routes};
+
+let state = SchedulerState::new(scheduler.clone());
+let app: Router = Router::new().merge(scheduler_routes(state));
+```
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/v1/schedule` | Register a new scheduled prompt |
+| `GET` | `/api/v1/schedule` | List all scheduled prompts |
+| `DELETE` | `/api/v1/schedule/:id` | Remove a scheduled prompt |
+| `PATCH` | `/api/v1/schedule/:id/enable` | Re-enable a paused prompt |
+| `PATCH` | `/api/v1/schedule/:id/disable` | Pause without deleting |
+
+#### Create a schedule
+
+```bash
+curl -X POST http://localhost:8080/api/v1/schedule \
+  -H "Content-Type: application/json" \
+  -d '{"name":"hourly-ping","schedule":"0 *","prompt_template":"Ping — respond OK."}'
+```
+
+Response:
+```json
+{"id":"550e8400-e29b-41d4-a716-446655440000","name":"hourly-ping","schedule":"0 *","enabled":true,"prompt_preview":"Ping — respond OK."}
+```
+
+#### Disable / re-enable
+
+```bash
+curl -X PATCH http://localhost:8080/api/v1/schedule/550e8400-e29b-41d4-a716-446655440000/disable
+curl -X PATCH http://localhost:8080/api/v1/schedule/550e8400-e29b-41d4-a716-446655440000/enable
+```
+
+#### Delete
+
+```bash
+curl -X DELETE http://localhost:8080/api/v1/schedule/550e8400-e29b-41d4-a716-446655440000
+```
 
 ---
 
