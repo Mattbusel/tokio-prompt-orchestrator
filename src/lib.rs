@@ -172,6 +172,8 @@ pub mod intent_classifier;
 pub mod response_validator;
 pub mod prompt_versioning;
 pub mod multi_modal;
+pub mod persona_manager;
+pub mod chain_of_thought;
 
 // Re-exports
 pub use cache::{CacheConfig, CacheEntry, CacheStats, PromptCache};
