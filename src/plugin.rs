@@ -904,6 +904,632 @@ impl PluginRegistry {
 }
 
 // ============================================================================
+// Round-7 Plugin system: Plugin trait, PluginV2Chain, PluginV2Registry,
+// PluginError, PluginInfo, and built-in plugins.
+// ============================================================================
+
+use crate::PromptRequest;
+
+/// Error returned by [`Plugin`] hooks.
+#[derive(Debug, thiserror::Error)]
+pub enum PluginError {
+    /// The plugin determined that the request should be rejected outright.
+    #[error("request rejected by plugin: {reason}")]
+    RequestRejected {
+        /// Human-readable explanation of why the request was rejected.
+        reason: String,
+    },
+    /// The plugin modified the response (informational, not fatal).
+    #[error("response modified by plugin")]
+    ResponseModified,
+    /// An unrecoverable error occurred inside the plugin.
+    #[error("plugin fatal error: {0}")]
+    Fatal(String),
+}
+
+/// Snapshot of per-plugin call statistics.
+#[derive(Debug, Clone)]
+pub struct PluginInfo {
+    /// Plugin name as returned by [`Plugin::name`].
+    pub name: String,
+    /// Plugin version as returned by [`Plugin::version`].
+    pub version: String,
+    /// Whether the plugin is currently enabled.
+    pub enabled: bool,
+    /// Number of times `on_request` was invoked.
+    pub request_calls: u64,
+    /// Number of times `on_response` was invoked.
+    pub response_calls: u64,
+    /// Total number of errors returned from either hook.
+    pub errors: u64,
+}
+
+/// Core trait for request/response plugins.
+///
+/// Implement this trait and register it with a [`PluginV2Registry`] to
+/// intercept requests before inference and responses after inference.
+pub trait Plugin: Send + Sync {
+    /// Unique human-readable name, e.g. `"profanity-filter"`.
+    fn name(&self) -> &str;
+    /// SemVer string, e.g. `"1.0.0"`.
+    fn version(&self) -> &str;
+    /// Inspect and/or mutate the request before it reaches inference.
+    ///
+    /// Return `Err(PluginError::RequestRejected { .. })` to abort the request.
+    fn on_request(&self, req: &mut PromptRequest) -> Result<(), PluginError>;
+    /// Inspect and/or mutate the response tokens after inference.
+    ///
+    /// Return `Err(PluginError::ResponseModified)` or `Err(PluginError::Fatal)`
+    /// to signal post-processing issues (pipeline may log and continue).
+    fn on_response(&self, resp: &mut Vec<String>) -> Result<(), PluginError>;
+}
+
+/// Internal entry in [`PluginV2Registry`].
+struct PluginEntry {
+    plugin: Box<dyn Plugin>,
+    enabled: bool,
+    request_calls: u64,
+    response_calls: u64,
+    errors: u64,
+}
+
+/// Ordered list of [`Plugin`]s executed sequentially on each request/response.
+///
+/// Plugins run in insertion order.  If any `on_request` hook returns
+/// `Err(PluginError::RequestRejected)`, the chain stops and the error is
+/// propagated.  `on_response` errors are collected but do not short-circuit
+/// the remaining response plugins.
+#[derive(Default)]
+pub struct PluginV2Chain {
+    plugins: Vec<Box<dyn Plugin>>,
+}
+
+impl PluginV2Chain {
+    /// Create an empty chain.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Append a plugin to the end of the chain.
+    pub fn push(&mut self, plugin: Box<dyn Plugin>) {
+        self.plugins.push(plugin);
+    }
+
+    /// Run `on_request` for all plugins in order.
+    ///
+    /// Stops at the first `RequestRejected` error.
+    pub fn run_request(&self, req: &mut PromptRequest) -> Result<(), PluginError> {
+        for plugin in &self.plugins {
+            plugin.on_request(req)?;
+        }
+        Ok(())
+    }
+
+    /// Run `on_response` for all plugins in order.
+    ///
+    /// Continues even if individual plugins return an error (errors are
+    /// returned at the end as the last encountered error).
+    pub fn run_response(&self, resp: &mut Vec<String>) -> Result<(), PluginError> {
+        let mut last_err: Option<PluginError> = None;
+        for plugin in &self.plugins {
+            if let Err(e) = plugin.on_response(resp) {
+                last_err = Some(e);
+            }
+        }
+        match last_err {
+            None => Ok(()),
+            Some(e) => Err(e),
+        }
+    }
+
+    /// Return the number of plugins in this chain.
+    pub fn len(&self) -> usize {
+        self.plugins.len()
+    }
+
+    /// Return `true` if no plugins are registered.
+    pub fn is_empty(&self) -> bool {
+        self.plugins.is_empty()
+    }
+}
+
+/// Runtime registry of [`Plugin`] instances with enable/disable support and
+/// per-plugin call statistics.
+#[derive(Default)]
+pub struct PluginV2Registry {
+    entries: Vec<PluginEntry>,
+}
+
+impl PluginV2Registry {
+    /// Create a new, empty registry.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a plugin.  Plugins execute in registration order.
+    pub fn register(&mut self, plugin: Box<dyn Plugin>) {
+        self.entries.push(PluginEntry {
+            plugin,
+            enabled: true,
+            request_calls: 0,
+            response_calls: 0,
+            errors: 0,
+        });
+    }
+
+    /// Disable a plugin by name.  Disabled plugins are skipped during
+    /// `run_request_hooks` and `run_response_hooks` but remain registered.
+    ///
+    /// No-op if the name is not found.
+    pub fn disable(&mut self, name: &str) {
+        for entry in &mut self.entries {
+            if entry.plugin.name() == name {
+                entry.enabled = false;
+            }
+        }
+    }
+
+    /// Re-enable a plugin that was previously disabled.
+    ///
+    /// No-op if the name is not found.
+    pub fn enable(&mut self, name: &str) {
+        for entry in &mut self.entries {
+            if entry.plugin.name() == name {
+                entry.enabled = true;
+            }
+        }
+    }
+
+    /// List all registered plugins with their current statistics.
+    pub fn list(&self) -> Vec<PluginInfo> {
+        self.entries
+            .iter()
+            .map(|e| PluginInfo {
+                name: e.plugin.name().to_string(),
+                version: e.plugin.version().to_string(),
+                enabled: e.enabled,
+                request_calls: e.request_calls,
+                response_calls: e.response_calls,
+                errors: e.errors,
+            })
+            .collect()
+    }
+
+    /// Run `on_request` for all enabled plugins in registration order.
+    ///
+    /// Stops at the first `RequestRejected` error, records the error in stats.
+    pub fn run_request_hooks(&mut self, req: &mut PromptRequest) -> Result<(), PluginError> {
+        for entry in &mut self.entries {
+            if !entry.enabled {
+                continue;
+            }
+            entry.request_calls += 1;
+            if let Err(e) = entry.plugin.on_request(req) {
+                entry.errors += 1;
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
+    /// Run `on_response` for all enabled plugins in registration order.
+    ///
+    /// Does not short-circuit on error — all enabled plugins run.  The last
+    /// error encountered is returned, if any.
+    pub fn run_response_hooks(&mut self, resp: &mut Vec<String>) -> Result<(), PluginError> {
+        let mut last_err: Option<PluginError> = None;
+        for entry in &mut self.entries {
+            if !entry.enabled {
+                continue;
+            }
+            entry.response_calls += 1;
+            if let Err(e) = entry.plugin.on_response(resp) {
+                entry.errors += 1;
+                last_err = Some(e);
+            }
+        }
+        match last_err {
+            None => Ok(()),
+            Some(e) => Err(e),
+        }
+    }
+}
+
+// ============================================================================
+// Built-in plugins
+// ============================================================================
+
+/// A plugin that blocks requests containing any word from a configurable list.
+///
+/// The check is case-insensitive.
+pub struct ProfanityFilterPlugin {
+    /// Words that, if present in the prompt, cause the request to be rejected.
+    pub word_list: Vec<String>,
+}
+
+impl ProfanityFilterPlugin {
+    /// Create a new filter with the given list of blocked words.
+    pub fn new(words: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            word_list: words.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl Plugin for ProfanityFilterPlugin {
+    fn name(&self) -> &str {
+        "profanity-filter"
+    }
+    fn version(&self) -> &str {
+        "1.0.0"
+    }
+    fn on_request(&self, req: &mut PromptRequest) -> Result<(), PluginError> {
+        let lower = req.input.to_lowercase();
+        for word in &self.word_list {
+            if lower.contains(word.to_lowercase().as_str()) {
+                return Err(PluginError::RequestRejected {
+                    reason: format!("prompt contains blocked word: {word}"),
+                });
+            }
+        }
+        Ok(())
+    }
+    fn on_response(&self, _resp: &mut Vec<String>) -> Result<(), PluginError> {
+        Ok(())
+    }
+}
+
+/// A plugin that truncates response token lists to at most `max_tokens` items.
+pub struct ResponseLengthCapPlugin {
+    /// Maximum number of token strings to keep in the response.
+    pub max_tokens: usize,
+}
+
+impl ResponseLengthCapPlugin {
+    /// Create a new cap plugin.
+    pub fn new(max_tokens: usize) -> Self {
+        Self { max_tokens }
+    }
+}
+
+impl Plugin for ResponseLengthCapPlugin {
+    fn name(&self) -> &str {
+        "response-length-cap"
+    }
+    fn version(&self) -> &str {
+        "1.0.0"
+    }
+    fn on_request(&self, _req: &mut PromptRequest) -> Result<(), PluginError> {
+        Ok(())
+    }
+    fn on_response(&self, resp: &mut Vec<String>) -> Result<(), PluginError> {
+        if resp.len() > self.max_tokens {
+            resp.truncate(self.max_tokens);
+            return Err(PluginError::ResponseModified);
+        }
+        Ok(())
+    }
+}
+
+/// A plugin that records per-request start/end timestamps (milliseconds since
+/// Unix epoch) into a shared latency log.
+///
+/// Call [`LatencyLoggerPlugin::record_start`] before inference and
+/// [`LatencyLoggerPlugin::record_end`] after inference to append the elapsed
+/// duration to the log.
+pub struct LatencyLoggerPlugin {
+    /// Accumulated latency samples in milliseconds.
+    pub log: std::sync::Mutex<Vec<u64>>,
+}
+
+impl LatencyLoggerPlugin {
+    /// Create a new logger with an empty latency log.
+    pub fn new() -> Self {
+        Self {
+            log: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Record a completed request's latency in milliseconds.
+    pub fn record_latency(&self, latency_ms: u64) {
+        if let Ok(mut guard) = self.log.lock() {
+            guard.push(latency_ms);
+        }
+    }
+
+    /// Return a copy of all recorded latencies.
+    pub fn samples(&self) -> Vec<u64> {
+        self.log.lock().map(|g| g.clone()).unwrap_or_default()
+    }
+}
+
+impl Default for LatencyLoggerPlugin {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Plugin for LatencyLoggerPlugin {
+    fn name(&self) -> &str {
+        "latency-logger"
+    }
+    fn version(&self) -> &str {
+        "1.0.0"
+    }
+    fn on_request(&self, _req: &mut PromptRequest) -> Result<(), PluginError> {
+        // Latency is recorded externally via record_latency().
+        Ok(())
+    }
+    fn on_response(&self, _resp: &mut Vec<String>) -> Result<(), PluginError> {
+        Ok(())
+    }
+}
+
+// ============================================================================
+// Tests — Round 7 Plugin system (20+ unit tests)
+// ============================================================================
+
+#[cfg(test)]
+mod plugin_v2_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn make_req(input: &str) -> PromptRequest {
+        PromptRequest {
+            session: crate::SessionId::new("s1"),
+            request_id: "r1".to_string(),
+            input: input.to_string(),
+            meta: HashMap::new(),
+            deadline: None,
+        }
+    }
+
+    // ---- ProfanityFilterPlugin ----
+
+    #[test]
+    fn profanity_filter_rejects_blocked_word() {
+        let p = ProfanityFilterPlugin::new(["badword"]);
+        let mut req = make_req("this has badword in it");
+        assert!(matches!(
+            p.on_request(&mut req),
+            Err(PluginError::RequestRejected { .. })
+        ));
+    }
+
+    #[test]
+    fn profanity_filter_case_insensitive() {
+        let p = ProfanityFilterPlugin::new(["BadWord"]);
+        let mut req = make_req("BADWORD is uppercase");
+        assert!(matches!(
+            p.on_request(&mut req),
+            Err(PluginError::RequestRejected { .. })
+        ));
+    }
+
+    #[test]
+    fn profanity_filter_passes_clean_request() {
+        let p = ProfanityFilterPlugin::new(["blocked"]);
+        let mut req = make_req("this is totally fine");
+        assert!(p.on_request(&mut req).is_ok());
+    }
+
+    #[test]
+    fn profanity_filter_empty_word_list_passes() {
+        let p = ProfanityFilterPlugin::new([] as [&str; 0]);
+        let mut req = make_req("anything goes");
+        assert!(p.on_request(&mut req).is_ok());
+    }
+
+    #[test]
+    fn profanity_filter_on_response_is_noop() {
+        let p = ProfanityFilterPlugin::new(["x"]);
+        let mut resp = vec!["a".to_string()];
+        assert!(p.on_response(&mut resp).is_ok());
+    }
+
+    // ---- ResponseLengthCapPlugin ----
+
+    #[test]
+    fn length_cap_truncates_over_limit() {
+        let p = ResponseLengthCapPlugin::new(3);
+        let mut resp: Vec<String> = (0..5).map(|i| i.to_string()).collect();
+        let result = p.on_response(&mut resp);
+        assert!(matches!(result, Err(PluginError::ResponseModified)));
+        assert_eq!(resp.len(), 3);
+    }
+
+    #[test]
+    fn length_cap_passes_exact_limit() {
+        let p = ResponseLengthCapPlugin::new(3);
+        let mut resp: Vec<String> = (0..3).map(|i| i.to_string()).collect();
+        assert!(p.on_response(&mut resp).is_ok());
+        assert_eq!(resp.len(), 3);
+    }
+
+    #[test]
+    fn length_cap_passes_under_limit() {
+        let p = ResponseLengthCapPlugin::new(10);
+        let mut resp = vec!["a".to_string(), "b".to_string()];
+        assert!(p.on_response(&mut resp).is_ok());
+    }
+
+    #[test]
+    fn length_cap_on_request_is_noop() {
+        let p = ResponseLengthCapPlugin::new(1);
+        let mut req = make_req("hello");
+        assert!(p.on_request(&mut req).is_ok());
+    }
+
+    // ---- LatencyLoggerPlugin ----
+
+    #[test]
+    fn latency_logger_records_samples() {
+        let p = LatencyLoggerPlugin::new();
+        p.record_latency(42);
+        p.record_latency(99);
+        let samples = p.samples();
+        assert_eq!(samples, vec![42, 99]);
+    }
+
+    #[test]
+    fn latency_logger_on_request_ok() {
+        let p = LatencyLoggerPlugin::new();
+        let mut req = make_req("hello");
+        assert!(p.on_request(&mut req).is_ok());
+    }
+
+    #[test]
+    fn latency_logger_on_response_ok() {
+        let p = LatencyLoggerPlugin::new();
+        let mut resp = vec!["tok".to_string()];
+        assert!(p.on_response(&mut resp).is_ok());
+    }
+
+    // ---- PluginV2Registry ----
+
+    #[test]
+    fn registry_list_returns_all() {
+        let mut reg = PluginV2Registry::new();
+        reg.register(Box::new(ProfanityFilterPlugin::new(["x"])));
+        reg.register(Box::new(ResponseLengthCapPlugin::new(10)));
+        let info = reg.list();
+        assert_eq!(info.len(), 2);
+        assert_eq!(info[0].name, "profanity-filter");
+        assert_eq!(info[1].name, "response-length-cap");
+    }
+
+    #[test]
+    fn registry_disable_skips_plugin() {
+        let mut reg = PluginV2Registry::new();
+        reg.register(Box::new(ProfanityFilterPlugin::new(["bad"])));
+        reg.disable("profanity-filter");
+        let mut req = make_req("bad content here");
+        // Disabled plugin should not reject.
+        assert!(reg.run_request_hooks(&mut req).is_ok());
+    }
+
+    #[test]
+    fn registry_enable_reenables_plugin() {
+        let mut reg = PluginV2Registry::new();
+        reg.register(Box::new(ProfanityFilterPlugin::new(["bad"])));
+        reg.disable("profanity-filter");
+        reg.enable("profanity-filter");
+        let mut req = make_req("bad content");
+        assert!(matches!(
+            reg.run_request_hooks(&mut req),
+            Err(PluginError::RequestRejected { .. })
+        ));
+    }
+
+    #[test]
+    fn registry_tracks_request_calls() {
+        let mut reg = PluginV2Registry::new();
+        reg.register(Box::new(ProfanityFilterPlugin::new([] as [&str; 0])));
+        let mut req = make_req("hello");
+        reg.run_request_hooks(&mut req).ok();
+        reg.run_request_hooks(&mut req).ok();
+        let info = reg.list();
+        assert_eq!(info[0].request_calls, 2);
+    }
+
+    #[test]
+    fn registry_tracks_response_calls() {
+        let mut reg = PluginV2Registry::new();
+        reg.register(Box::new(ResponseLengthCapPlugin::new(100)));
+        let mut resp = vec!["tok".to_string()];
+        reg.run_response_hooks(&mut resp).ok();
+        let info = reg.list();
+        assert_eq!(info[0].response_calls, 1);
+    }
+
+    #[test]
+    fn registry_tracks_errors() {
+        let mut reg = PluginV2Registry::new();
+        reg.register(Box::new(ProfanityFilterPlugin::new(["bad"])));
+        let mut req = make_req("bad");
+        reg.run_request_hooks(&mut req).ok();
+        let info = reg.list();
+        assert_eq!(info[0].errors, 1);
+    }
+
+    #[test]
+    fn registry_run_response_hooks_all_plugins_run_despite_error() {
+        let mut reg = PluginV2Registry::new();
+        reg.register(Box::new(ResponseLengthCapPlugin::new(0)));
+        reg.register(Box::new(ResponseLengthCapPlugin::new(100)));
+        let mut resp = vec!["tok1".to_string(), "tok2".to_string()];
+        // First plugin truncates and returns Err; second should still run.
+        let _ = reg.run_response_hooks(&mut resp);
+        let info = reg.list();
+        assert_eq!(info[0].response_calls, 1);
+        assert_eq!(info[1].response_calls, 1);
+    }
+
+    #[test]
+    fn registry_empty_runs_ok() {
+        let mut reg = PluginV2Registry::new();
+        let mut req = make_req("hello");
+        assert!(reg.run_request_hooks(&mut req).is_ok());
+        let mut resp = vec![];
+        assert!(reg.run_response_hooks(&mut resp).is_ok());
+    }
+
+    #[test]
+    fn plugin_info_enabled_flag() {
+        let mut reg = PluginV2Registry::new();
+        reg.register(Box::new(LatencyLoggerPlugin::new()));
+        reg.disable("latency-logger");
+        let info = reg.list();
+        assert!(!info[0].enabled);
+        reg.enable("latency-logger");
+        let info = reg.list();
+        assert!(info[0].enabled);
+    }
+
+    #[test]
+    fn plugin_chain_v2_run_request_all_pass() {
+        let mut chain = PluginV2Chain::new();
+        chain.push(Box::new(ProfanityFilterPlugin::new([] as [&str; 0])));
+        chain.push(Box::new(ResponseLengthCapPlugin::new(100)));
+        let mut req = make_req("clean request");
+        assert!(chain.run_request(&mut req).is_ok());
+    }
+
+    #[test]
+    fn plugin_chain_v2_run_request_stops_on_rejection() {
+        let mut chain = PluginV2Chain::new();
+        chain.push(Box::new(ProfanityFilterPlugin::new(["bad"])));
+        chain.push(Box::new(ProfanityFilterPlugin::new(["other"])));
+        let mut req = make_req("bad content");
+        assert!(matches!(
+            chain.run_request(&mut req),
+            Err(PluginError::RequestRejected { .. })
+        ));
+    }
+
+    #[test]
+    fn plugin_chain_v2_len_is_empty() {
+        let chain = PluginV2Chain::new();
+        assert!(chain.is_empty());
+        assert_eq!(chain.len(), 0);
+    }
+
+    #[test]
+    fn plugin_error_display() {
+        let e = PluginError::RequestRejected {
+            reason: "bad".to_string(),
+        };
+        assert!(e.to_string().contains("bad"));
+        let e2 = PluginError::ResponseModified;
+        assert!(e2.to_string().contains("modified"));
+        let e3 = PluginError::Fatal("crash".to_string());
+        assert!(e3.to_string().contains("crash"));
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

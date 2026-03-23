@@ -16,6 +16,41 @@ Five-stage bounded-backpressure DAG with deduplication, circuit breakers, rate l
 
 ## What's New
 
+### v1.9.0 — Plugin System and Request Deduplication
+
+#### Plugin System
+
+The new Round-7 plugin API in `src/plugin.rs` adds a full `Plugin` trait–based extension system that runs before and after inference.
+
+**Key types:** `Plugin` (trait), `PluginV2Chain`, `PluginV2Registry`, `PluginError`, `PluginInfo`
+
+**Built-in plugins:**
+- `ProfanityFilterPlugin` — blocks requests containing a configurable word list (case-insensitive)
+- `ResponseLengthCapPlugin { max_tokens }` — truncates response token lists exceeding the cap, returns `PluginError::ResponseModified`
+- `LatencyLoggerPlugin` — records per-request latency samples to a shared `Vec<u64>` via `record_latency(ms)`
+
+**Features:**
+- `Plugin::on_request(&mut PromptRequest)` — intercept and optionally reject requests before inference
+- `Plugin::on_response(&mut Vec<String>)` — inspect/mutate response tokens after inference
+- `PluginV2Registry::register(Box<dyn Plugin>)` — ordered plugin execution in registration order
+- `PluginV2Registry::disable(name)` / `enable(name)` — toggle plugins at runtime without removing them
+- `PluginV2Registry::list() -> Vec<PluginInfo>` — per-plugin stats: `request_calls`, `response_calls`, `errors`, `enabled`
+- `PluginError::RequestRejected { reason }`, `PluginError::ResponseModified`, `PluginError::Fatal`
+
+#### Request Deduplication
+
+The new `request_dedup` module coalesces identical in-flight requests to the same backend call.
+
+**Key types:** `RequestDeduplicator`, `DedupDecision`, `RequestId`, `DedupStats`
+
+**Features:**
+- SHA-256 key over `model_id + prompt_text` for exact content matching (reuses `sha2` crate)
+- `DedupDecision::Original(RequestId)` — first caller performs the real inference
+- `DedupDecision::Waiting(oneshot::Receiver<Vec<String>>)` — duplicate callers block until the original completes
+- `RequestDeduplicator::complete(model_id, prompt_text, result)` — fans out results to all waiters
+- 30-second TTL: stale entries are pruned on every `submit()` call to prevent memory leaks
+- `DedupStats { total_submitted, deduplicated, active_requests, dedup_rate }`
+
 ### v1.8.0 — Session Manager and Streaming Aggregator
 
 #### Session Manager

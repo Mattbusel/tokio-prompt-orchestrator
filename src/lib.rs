@@ -107,6 +107,7 @@ pub mod load_balancer;
 pub mod template;
 pub mod metrics;
 pub mod plugin;
+pub mod request_dedup;
 pub mod routing;
 pub mod scheduler;
 pub mod security;
