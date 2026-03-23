@@ -1,6 +1,6 @@
 //! Enhanced resilience and performance features for the pipeline.
 //!
-//! This module groups six production-grade primitives that operate at the
+//! This module groups production-grade primitives that operate at the
 //! nanosecond-to-microsecond range and are safe to use concurrently across
 //! multiple pipeline stages:
 //!
@@ -12,6 +12,8 @@
 //! | [`priority`] | Four-level priority queue for request scheduling |
 //! | [`rate_limit`] | Token-bucket rate limiter with configurable burst |
 //! | [`retry`] | Exponential back-off with jitter and configurable attempt cap |
+//! | [`smart_batch`] | Adaptive micro-batching with prefix-based similarity grouping |
+//! | [`tournament`] | Multi-provider tournament: fan-out and return the best response |
 //!
 //! All types are `Clone` and `Send + Sync`, suitable for sharing across Tokio tasks.
 
@@ -23,6 +25,8 @@ pub mod dedup;
 pub mod priority;
 pub mod rate_limit;
 pub mod retry;
+pub mod smart_batch;
+pub mod tournament;
 
 // Re-exports
 pub use adaptive_timeout::AdaptiveTimeout;
@@ -33,3 +37,8 @@ pub use dedup::{dedup_key, DeduplicationResult, DeduplicationToken, Deduplicator
 pub use priority::{Priority, PriorityQueue};
 pub use rate_limit::RateLimiter;
 pub use retry::RetryPolicy;
+pub use smart_batch::{BatchConfig, BatcherStats, SmartBatcher};
+pub use tournament::{
+    FastestResponseScorer, KeywordDensityScorer, LongestResponseScorer, ResponseScorer,
+    TournamentConfig, TournamentResult, TournamentRunner, TournamentStats,
+};

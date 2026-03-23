@@ -55,11 +55,13 @@
 //! |--------|-------------|
 //! | [`stages`] | Five pipeline stage implementations and channel wiring |
 //! | [`worker`] | [`ModelWorker`] trait and five production implementations |
-//! | [`enhanced`] | Resilience primitives: circuit breaker, dedup, retry, cache, rate limiter |
+//! | [`enhanced`] | Resilience primitives: circuit breaker, dedup, retry, cache, rate limiter, smart batching, tournament mode |
 //! | [`metrics`] | Prometheus metrics initialisation and helper functions |
 //! | [`config`] | TOML-deserialisable [`PipelineConfig`] with hot-reload support |
-//! | [`routing`] | [`ModelRouter`] for complexity-scored local/cloud routing |
+//! | [`routing`] | [`ModelRouter`] for complexity-scored routing; [`ArbitrageEngine`] for SLA-aware cheapest-provider selection; [`PoolSizer`] for adaptive worker scaling |
+//! | [`security`] | [`PromptGuard`] — prompt injection and jailbreak detection middleware (zero external I/O) |
 //! | [`coordination`] | Agent fleet management and task claiming |
+//! | [`session`] | Multi-turn conversation context manager — auto-injects history per session |
 //! | `self_tune` | PID controllers and telemetry bus (feature: `self-tune`) |
 //! | `self_modify` | Task generation and validation gate (feature: `self-modify`) |
 //! | `intelligence` | Learned router and autoscaler (feature: `intelligence`) |
@@ -71,6 +73,9 @@
 //!
 //! [`PipelineConfig`]: config::PipelineConfig
 //! [`ModelRouter`]: routing::router::ModelRouter
+//! [`ArbitrageEngine`]: routing::ArbitrageEngine
+//! [`PoolSizer`]: routing::PoolSizer
+//! [`PromptGuard`]: security::PromptGuard
 
 #![doc = include_str!("../README.md")]
 
@@ -78,12 +83,16 @@ use std::collections::HashMap;
 use thiserror::Error;
 
 pub mod config;
+pub mod conversation;
 pub mod coordination;
 #[cfg(feature = "distributed")]
 pub mod distributed;
 pub mod enhanced;
+pub mod templates;
 pub mod metrics;
 pub mod routing;
+pub mod security;
+pub mod session;
 pub mod stages;
 pub mod worker;
 
@@ -119,8 +128,15 @@ pub mod self_improve_loop;
 pub mod tui;
 
 // Re-exports
+pub use conversation::{
+    ConversationConfig, ConversationManager, PromptFormat, Role, Turn,
+};
 pub use stages::{
     spawn_pipeline, spawn_pipeline_with_config, LogSink, OutputSink, PipelineHandles, SinkError,
+};
+pub use templates::{
+    AbExperiment, ExperimentReport, ExperimentVariant, PromptTemplate, TemplateError,
+    TemplateRegistry,
 };
 pub use worker::{
     stream_worker, AnthropicWorker, EchoWorker, LlamaCppWorker, LoadBalancedWorker, ModelWorker,

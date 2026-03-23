@@ -107,6 +107,9 @@ pub struct App {
     /// Log scroll offset (0 = follow latest, >0 = scrolled up by N lines).
     pub log_scroll_offset: usize,
 
+    /// Minimum log level to display. Entries below this level are hidden.
+    pub log_min_level: LogLevel,
+
     /// Data update interval.
     pub tick_rate: Duration,
 
@@ -171,6 +174,18 @@ pub enum LogLevel {
     Error,
     /// Debug-level message.
     Debug,
+}
+
+impl LogLevel {
+    /// Returns the numeric priority (higher = more severe).
+    pub fn priority(self) -> u8 {
+        match self {
+            LogLevel::Debug => 0,
+            LogLevel::Info => 1,
+            LogLevel::Warn => 2,
+            LogLevel::Error => 3,
+        }
+    }
 }
 
 impl App {
@@ -249,6 +264,7 @@ impl App {
 
             log_entries: VecDeque::with_capacity(LOG_ENTRIES_CAP),
             log_scroll_offset: 0,
+            log_min_level: LogLevel::Debug,
 
             tick_rate,
 
@@ -265,6 +281,27 @@ impl App {
         self.log_entries.clear();
         self.tick_count = 0;
         self.log_scroll_offset = 0;
+    }
+
+    /// Cycles the log minimum level filter: Debug -> Info -> Warn -> Error -> Debug.
+    pub fn cycle_log_level(&mut self) {
+        self.log_min_level = match self.log_min_level {
+            LogLevel::Debug => LogLevel::Info,
+            LogLevel::Info => LogLevel::Warn,
+            LogLevel::Warn => LogLevel::Error,
+            LogLevel::Error => LogLevel::Debug,
+        };
+        self.log_scroll_offset = 0; // reset scroll when filter changes
+    }
+
+    /// Returns a label for the current minimum log level filter.
+    pub fn log_level_label(&self) -> &'static str {
+        match self.log_min_level {
+            LogLevel::Debug => "ALL",
+            LogLevel::Info => "INFO+",
+            LogLevel::Warn => "WARN+",
+            LogLevel::Error => "ERROR",
+        }
     }
 
     /// Scrolls log view up by one line.

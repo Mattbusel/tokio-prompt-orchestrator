@@ -21,13 +21,17 @@
 //! - Cross-node routing (future distributed module)
 //! - Semantic understanding of prompt quality (heuristic-only)
 
+pub mod arbitrage;
 pub mod config;
 pub mod cost_tracker;
+pub mod pool_sizer;
 pub mod router;
 pub mod scorer;
 
 // Re-exports for convenience
+pub use arbitrage::{ArbitrageEngine, ProviderProfile, ProviderSnapshot};
 pub use config::RoutingConfig;
 pub use cost_tracker::{CostSnapshot, CostTracker, SessionBudgetTracker};
+pub use pool_sizer::{PoolSizer, PoolSizerConfig, ScaleAction, ScaleRecommendation};
 pub use router::{ModelRouter, RoutingDecision};
 pub use scorer::{ComplexityScorer, ScoreBreakdown};
