@@ -190,6 +190,8 @@ pub mod output_cache;
 pub mod pipeline_builder;
 pub mod prompt_safety;
 pub mod experiment_runner;
+pub mod prompt_template;
+pub mod response_classifier;
 
 // Re-exports
 pub use cache::{CacheConfig, CacheEntry, CacheStats, PromptCache};
