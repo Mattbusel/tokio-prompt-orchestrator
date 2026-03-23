@@ -88,6 +88,8 @@ use thiserror::Error;
 
 pub mod ab_test;
 pub mod adaptive_pool;
+pub mod admission_control;
+pub mod circuit_breaker;
 pub mod cache;
 pub mod cascade;
 pub mod compression;
