@@ -181,6 +181,8 @@ pub mod streaming_processor;
 pub mod provider_manager;
 pub mod context_compression;
 pub mod prompt_router;
+pub mod tool_call_parser;
+pub mod session_manager;
 
 // Re-exports
 pub use cache::{CacheConfig, CacheEntry, CacheStats, PromptCache};
