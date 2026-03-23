@@ -5,6 +5,48 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-03-22
+
+### Added
+
+- **Multi-provider cascade fallback** (`src/routing/cascade.rs`): new
+  `ProviderCascade` type that chains an ordered list of `(WorkerKind,
+  CircuitBreakerConfig)` pairs and tries primary → secondary → tertiary on
+  failure. Skips providers whose circuit breaker is currently open. Records
+  per-provider latency and success-rate atomics. Exposes Prometheus counters
+  `cascade_attempts_total{provider}` and `cascade_failures_total{provider}`.
+  Returns `CascadeResult { provider_used, attempts, total_latency_ms, value }`.
+  Re-exported from `routing::cascade` and `routing`.
+
+- **Deadline-aware priority queue** (`src/enhanced/priority.rs`): new
+  `PriorityQueue::pop_with_deadline_check` method that skips requests whose
+  `deadline` has already passed. Each expired request increments the new
+  `expired_total: Arc<AtomicUsize>` field and emits a `tracing::warn!`.
+  `QueueStats` gains a matching `expired_total: usize` field. The existing
+  `pop` method is unchanged for backward compatibility.
+
+- **DLQ replay scheduler** (`src/enhanced/dlq_replay.rs`): new
+  `DlqReplayScheduler` type that wraps dead-letter queue entries and adds
+  `replay_all(sender)`, `replay_by_session(session_id, sender)`, and
+  `age_out(max_age)`. Uses exponential backoff (2^attempts seconds, capped at
+  60 s) between retry sends. Exposes Prometheus counters `dlq_replayed_total`
+  and `dlq_aged_out_total`. Re-exported from `enhanced`.
+
+- **Provider health dashboard** (`src/routing/health.rs`): new
+  `ProviderHealthBuilder` and `ProviderHealthSnapshot` types that aggregate
+  per-provider health data — `last_success_at`, `last_failure_at`,
+  `consecutive_failures`, `success_rate_1h`, `p50_latency_ms`,
+  `p95_latency_ms` — and expose a `to_json()` method for REST endpoint
+  integration. Re-exported from `routing`.
+
+### Changed
+
+- `Cargo.toml`: version bumped from `1.2.0` to `1.3.0`.
+- `src/enhanced.rs`: added `pub mod dlq_replay` and re-exports for
+  `DlqReplayScheduler`, `ReplayEntry`, and `QueueStats`.
+- `src/routing/mod.rs`: added `pub mod cascade` and `pub mod health` with
+  corresponding re-exports.
+
 ## [Unreleased]
 
 ### Added
