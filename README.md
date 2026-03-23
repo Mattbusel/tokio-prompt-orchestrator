@@ -16,6 +16,70 @@ Five-stage bounded-backpressure DAG with deduplication, circuit breakers, rate l
 
 ## What's New
 
+### v1.6.0 — Load Balancer and Template Engine
+
+#### Load Balancer
+
+The new `load_balancer` module provides a thread-safe, weighted round-robin load balancer for multi-model deployments.
+
+**Key types:** `LoadBalancer`, `ModelEndpoint`, `BalancerConfig`, `LoadBalancerStats`, `EndpointStats`
+
+- **Weighted round-robin** — smooth Nginx-style algorithm: each endpoint's `current_weight` grows by its `weight` on every selection; the winner has `total_weight` subtracted.
+- **Health tracking** — `mark_failure(id)` after 3 consecutive failures marks an endpoint unhealthy; `mark_success(id, latency_ms)` recovers it immediately.
+- **Failover** — when `failover = true`, unhealthy endpoints are skipped; `select()` returns `None` only when *all* endpoints are unhealthy.
+- **Latency EMA** — exponential moving average (α = 0.2) of observed latencies per endpoint.
+- **REST endpoint:** `GET /api/v1/load-balancer/stats`
+
+```rust
+use tokio_prompt_orchestrator::{LoadBalancer, BalancerConfig, ModelEndpoint};
+
+let lb = LoadBalancer::new(BalancerConfig {
+    endpoints: vec![
+        ModelEndpoint { id: "gpt-4o".into(), url: "https://api.openai.com/v1".into(),
+                        weight: 2, max_rps: 100.0, healthy: true, latency_p99_ms: 0.0 },
+        ModelEndpoint { id: "claude-3".into(), url: "https://api.anthropic.com/v1".into(),
+                        weight: 1, max_rps: 50.0, healthy: true, latency_p99_ms: 0.0 },
+    ],
+    ..Default::default()
+});
+
+let ep = lb.select().unwrap(); // weighted round-robin
+lb.mark_success(&ep.id, 42.0);
+```
+
+#### Template Engine
+
+The new `template` module provides a `{{variable}}` prompt template engine with filter support.
+
+**Key types:** `PromptTemplate`, `TemplateContext`, `TemplateValue`, `TemplateLibrary`, `TemplateError`
+
+Supported filters:
+| Filter | Example | Effect |
+|--------|---------|--------|
+| `upper` | `{{name \| upper}}` | Convert to uppercase |
+| `lower` | `{{name \| lower}}` | Convert to lowercase |
+| `truncate:N` | `{{text \| truncate:100}}` | Truncate to N characters |
+| `default:"val"` | `{{x \| default:"n/a"}}` | Use fallback when variable is missing |
+
+**REST endpoints:**
+- `POST /api/v1/templates` — register a named template `{"name":"...", "template":"..."}`
+- `GET /api/v1/templates` — list all registered template names
+- `POST /api/v1/templates/:name/render` — render `{"variables": {"key": "value"}}`
+
+```rust
+use tokio_prompt_orchestrator::{TemplateLibrary, TemplateContext, TemplateValue};
+
+let mut lib = TemplateLibrary::new();
+lib.register("summarise", "Summarise in {{max_words | default:\"50\"}} words:\n\n{{text}}").unwrap();
+
+let mut ctx = TemplateContext::new();
+ctx.set("text", TemplateValue::Text("The quick brown fox...".into()));
+
+let rendered = lib.render("summarise", &ctx).unwrap();
+```
+
+---
+
 ### v1.5.0 — Circuit Breaker Adaptive Backoff, Token Budget Middleware, SimHash Dedup
 
 | Feature | Module | What it does |

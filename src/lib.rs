@@ -103,6 +103,8 @@ pub mod distributed;
 pub mod enhanced;
 pub mod multi_pipeline;
 pub mod templates;
+pub mod load_balancer;
+pub mod template;
 pub mod metrics;
 pub mod plugin;
 pub mod routing;
@@ -171,6 +173,10 @@ pub use worker::{
 pub use failover::FailoverChain;
 pub use provider_health::{ProviderHealth, ProviderHealthMonitor};
 pub use smart_router::{ModelPricing, RoutingDecision, RoutingRequirements, SmartRouter};
+pub use load_balancer::{
+    BalancerConfig, EndpointStats, LoadBalancer, LoadBalancerStats, ModelEndpoint,
+};
+pub use template::{TemplateContext, TemplateLibrary, TemplateValue};
 
 /// Orchestrator-specific errors.
 ///

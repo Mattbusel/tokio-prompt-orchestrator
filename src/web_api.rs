@@ -552,6 +552,10 @@ struct AppState {
     /// Set to `true` when a shutdown signal has been received.  New inference
     /// requests are rejected with HTTP 503 while this is `true`.
     shutting_down: Arc<AtomicBool>,
+    /// Shared prompt template library.
+    template_library: Arc<std::sync::RwLock<crate::template::TemplateLibrary>>,
+    /// Load balancer for model endpoints.
+    load_balancer: Arc<crate::load_balancer::LoadBalancer>,
     /// Instant the server started — used for uptime calculation in health checks.
     started_at: Instant,
     /// Per-session token budget tracker — backs the `/v1/sessions/{id}/budget` endpoints.
@@ -680,6 +684,12 @@ pub async fn start_server(
         ab_runner: Arc::new(crate::ab_test::AbTestRunner::new()),
         prompt_cache: crate::cache::PromptCache::new(crate::cache::CacheConfig::default()),
         rate_limiter: crate::rate_limiter::RateLimiter::new(vec![]),
+        template_library: Arc::new(std::sync::RwLock::new(
+            crate::template::TemplateLibrary::new(),
+        )),
+        load_balancer: Arc::new(crate::load_balancer::LoadBalancer::new(
+            crate::load_balancer::BalancerConfig::default(),
+        )),
     });
 
     // Collector task: receives pipeline output and writes results into the tracker.
@@ -715,6 +725,10 @@ pub async fn start_server(
         .route("/api/v1/cache/stats", get(cache_stats_handler))
         .route("/api/v1/cache", axum::routing::delete(cache_flush_handler))
         .route("/api/v1/rate-limiter/stats", get(rate_limiter_stats_handler))
+        .route("/api/v1/templates", post(template_register_handler))
+        .route("/api/v1/templates", get(template_list_handler))
+        .route("/api/v1/templates/:name/render", post(template_render_handler))
+        .route("/api/v1/load-balancer/stats", get(load_balancer_stats_handler))
         .route("/v1/sessions/:session_id/budget", get(session_budget_handler))
         .route("/v1/sessions/:session_id/budget/reset", post(session_budget_reset_handler))
         .route("/health", get(health_handler))
@@ -3247,4 +3261,159 @@ async fn rate_limiter_stats_handler(State(state): State<Arc<AppState>>) -> impl 
         })
         .collect();
     Json(RateLimiterStatsResponse { models })
+}
+
+// ============================================================================
+// Template Engine Handlers
+// ============================================================================
+
+/// `POST /api/v1/templates` — Register a named prompt template.
+#[cfg(feature = "web-api")]
+async fn template_register_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let name = match body.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "missing 'name' field"})),
+            )
+                .into_response()
+        }
+    };
+    let template_str = match body.get("template").and_then(|v| v.as_str()) {
+        Some(t) => t.to_string(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "missing 'template' field"})),
+            )
+                .into_response()
+        }
+    };
+
+    let mut lib = match state.template_library.write() {
+        Ok(g) => g,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "template library lock poisoned"})),
+            )
+                .into_response()
+        }
+    };
+
+    match lib.register(name.clone(), &template_str) {
+        Ok(()) => Json(serde_json::json!({"registered": name})).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /api/v1/templates` — List all registered template names.
+#[cfg(feature = "web-api")]
+async fn template_list_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let lib = match state.template_library.read() {
+        Ok(g) => g,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "template library lock poisoned"})),
+            )
+                .into_response()
+        }
+    };
+    let mut names = lib.list();
+    names.sort();
+    Json(serde_json::json!({"templates": names})).into_response()
+}
+
+/// `POST /api/v1/templates/:name/render` — Render a named template.
+#[cfg(feature = "web-api")]
+async fn template_render_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    use crate::template::{TemplateContext, TemplateValue};
+
+    let lib = match state.template_library.read() {
+        Ok(g) => g,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "template library lock poisoned"})),
+            )
+                .into_response()
+        }
+    };
+
+    let mut ctx = TemplateContext::new();
+    if let Some(vars) = body.get("variables").and_then(|v| v.as_object()) {
+        for (k, v) in vars {
+            let tv = match v {
+                serde_json::Value::String(s) => TemplateValue::Text(s.clone()),
+                serde_json::Value::Number(n) => {
+                    TemplateValue::Number(n.as_f64().unwrap_or(0.0))
+                }
+                serde_json::Value::Bool(b) => TemplateValue::Bool(*b),
+                serde_json::Value::Array(arr) => {
+                    let items: Vec<String> = arr
+                        .iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect();
+                    TemplateValue::List(items)
+                }
+                _ => TemplateValue::Text(v.to_string()),
+            };
+            ctx.set(k.clone(), tv);
+        }
+    }
+
+    match lib.render(&name, &ctx) {
+        Ok(rendered) => Json(serde_json::json!({"rendered": rendered})).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+// ============================================================================
+// Load Balancer Stats Handler
+// ============================================================================
+
+/// `GET /api/v1/load-balancer/stats` — Return current load balancer statistics.
+#[cfg(feature = "web-api")]
+async fn load_balancer_stats_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let stats = state.load_balancer.stats();
+    let by_endpoint: serde_json::Map<String, serde_json::Value> = stats
+        .by_endpoint
+        .into_iter()
+        .map(|(id, ep)| {
+            (
+                id,
+                serde_json::json!({
+                    "requests": ep.requests,
+                    "failures": ep.failures,
+                    "consecutive_failures": ep.consecutive_failures,
+                    "avg_latency_ms": ep.avg_latency_ms,
+                    "is_healthy": ep.is_healthy,
+                }),
+            )
+        })
+        .collect();
+
+    Json(serde_json::json!({
+        "total_requests": stats.total_requests,
+        "unhealthy_count": stats.unhealthy_count,
+        "by_endpoint": by_endpoint,
+    }))
+    .into_response()
 }
