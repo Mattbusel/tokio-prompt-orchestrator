@@ -62,8 +62,9 @@ pub fn truncate_with_ellipsis(s: &str, max_width: usize) -> String {
 /// * `area` - Rectangular area allocated for this widget.
 /// * `app` - Application state containing log entries.
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
+    let title = format!(" LOG [{}] ", app.log_level_label());
     let block = Block::default()
-        .title(" LOG ")
+        .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
     let inner = block.inner(area);
@@ -72,9 +73,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let visible_count = inner.height as usize;
     let max_line_width = inner.width as usize;
 
+    let min_priority = app.log_min_level.priority();
     let entries: Vec<&crate::tui::app::LogEntry> = app
         .log_entries
         .iter()
+        .filter(|e| e.level.priority() >= min_priority)
         .rev()
         .take(visible_count)
         .collect::<Vec<_>>()

@@ -10,7 +10,7 @@
 
 **Production-grade, multi-core Tokio orchestration for LLM inference pipelines.**
 
-Five-stage bounded-backpressure DAG with deduplication, circuit breakers, rate limiting, and an optional autonomous self-improving control loop. Supports Anthropic, OpenAI, llama.cpp, vLLM, and any custom backend. Exposes REST, WebSocket, SSE, MCP (Claude Desktop), Prometheus metrics, and OpenTelemetry distributed tracing.
+Five-stage bounded-backpressure DAG with deduplication, circuit breakers, rate limiting, **prompt injection/jailbreak detection**, **provider arbitrage** (cheapest provider meeting your latency SLA), **adaptive worker pool sizing**, and an optional autonomous self-improving control loop. Supports Anthropic, OpenAI, llama.cpp, vLLM, and any custom backend. Exposes REST, WebSocket, SSE, MCP (Claude Desktop), Prometheus metrics, and OpenTelemetry distributed tracing.
 
 ---
 
@@ -23,6 +23,8 @@ Running LLM inference in production at scale exposes a class of problems that a 
 - **Latency tail management**: A slow model response blocks an unbounded goroutine/thread pool. Bounded async channels propagate backpressure instead.
 - **Cost opacity**: Nobody knows which prompt pattern is eating the budget until the invoice arrives.
 - **Manual tuning**: Worker counts, buffer sizes, retry delays — these need continuous adjustment as traffic patterns shift.
+- **Prompt injection**: Adversarial users can override system instructions or extract secrets — without a guard the model becomes a liability.
+- **Provider lock-in**: All requests go to one provider even when another is cheaper and equally fast for your SLA.
 
 This crate solves all of the above out of the box, with zero unsafe code and a compile-time feature flag for each subsystem.
 
@@ -71,6 +73,20 @@ cargo run --features full,tui --bin tui
 tokio-prompt-orchestrator = "1.2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
+
+**New capabilities at a glance:**
+
+| What | Module | No extra deps |
+|------|--------|:---:|
+| Block prompt injection / jailbreaks | `security::PromptGuard` | Yes |
+| Route to cheapest provider within latency SLA | `routing::ArbitrageEngine` | Yes |
+| Auto-scale worker pool from queue depth | `routing::PoolSizer` | Yes |
+| Multi-turn conversation memory | `session::SessionContext` | Yes |
+| Smart micro-batching for GPU servers | `enhanced::SmartBatcher` | Yes |
+| Fan-out tournament for quality ranking | `enhanced::TournamentRunner` | Yes |
+| **Multi-turn cascading inference (tool calls)** | **`cascade::CascadeEngine`** | **Yes** |
+| **Named pipeline fleet with prompt routing** | **`multi_pipeline::MultiPipelineRouter`** | **Yes** |
+| **Kalman-filter adaptive worker pool** | **`adaptive_pool::AdaptivePool`** | **Yes** |
 
 ```rust,no_run
 use std::collections::HashMap;
@@ -830,6 +846,9 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full guide.
 - **prometheus 0.13**: Has RUSTSEC-2024-0437 (protobuf DoS). Mitigated by API key auth on `/metrics`. Migration to 0.14 blocked by `prometheus::proto` API removal — tracked internally for Q3 2026.
 - **Request replay UI**: Dead-letter queue replay works via API; a TUI panel for it is planned.
 - **Per-stage circuit breaker metrics**: Currently aggregated; per-stage breakdown is planned.
+- **PromptGuard embedding mode**: Current detection is lexical (no external deps). A future optional mode will use local embedding models for semantic similarity detection.
+- **ArbitrageEngine + circuit breaker integration**: A future release will auto-exclude circuit-breaker-open providers from the arbitrage candidate set.
+- **PoolSizer → pipeline integration**: Currently advisory only. Future versions will wire `PoolSizer` directly to the pipeline stage worker count.
 
 ---
 

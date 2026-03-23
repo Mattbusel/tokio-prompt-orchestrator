@@ -30,6 +30,8 @@ pub enum InputEvent {
     ScrollUp,
     /// User pressed down arrow to scroll log.
     ScrollDown,
+    /// User cycled log level filter (l key).
+    CycleLogLevel,
     /// A terminal resize occurred.
     Resize(u16, u16),
     /// No actionable event within the poll window.
@@ -75,6 +77,7 @@ pub fn apply_event(app: &mut App, event: InputEvent) {
         InputEvent::Help => app.show_help = !app.show_help,
         InputEvent::ScrollUp => app.scroll_log_up(),
         InputEvent::ScrollDown => app.scroll_log_down(),
+        InputEvent::CycleLogLevel => app.cycle_log_level(),
         InputEvent::Resize(_, _) | InputEvent::None => {}
     }
 }
@@ -91,6 +94,7 @@ fn translate_key(key: KeyEvent) -> InputEvent {
         KeyCode::Char('p') | KeyCode::Char('P') | KeyCode::Char(' ') => InputEvent::Pause,
         KeyCode::Char('r') | KeyCode::Char('R') => InputEvent::Reset,
         KeyCode::Char('h') | KeyCode::Char('H') | KeyCode::Char('?') => InputEvent::Help,
+        KeyCode::Char('l') | KeyCode::Char('L') => InputEvent::CycleLogLevel,
         KeyCode::Esc => InputEvent::Quit,
         KeyCode::Up => InputEvent::ScrollUp,
         KeyCode::Down => InputEvent::ScrollDown,

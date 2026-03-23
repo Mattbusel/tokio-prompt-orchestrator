@@ -62,6 +62,9 @@
 //! | [`security`] | [`PromptGuard`] — prompt injection and jailbreak detection middleware (zero external I/O) |
 //! | [`coordination`] | Agent fleet management and task claiming |
 //! | [`session`] | Multi-turn conversation context manager — auto-injects history per session |
+//! | [`cascade`] | Multi-turn cascading inference engine — tool call loops with pluggable executors |
+//! | [`multi_pipeline`] | Named pipeline fleet with heuristic prompt classification and per-class routing |
+//! | [`adaptive_pool`] | Kalman-filter adaptive worker pool controller — predicts queue depth and recommends scale events |
 //! | `self_tune` | PID controllers and telemetry bus (feature: `self-tune`) |
 //! | `self_modify` | Task generation and validation gate (feature: `self-modify`) |
 //! | `intelligence` | Learned router and autoscaler (feature: `intelligence`) |
@@ -82,15 +85,20 @@
 use std::collections::HashMap;
 use thiserror::Error;
 
+pub mod adaptive_pool;
+pub mod cascade;
 pub mod config;
 pub mod conversation;
 pub mod coordination;
 #[cfg(feature = "distributed")]
 pub mod distributed;
 pub mod enhanced;
+pub mod multi_pipeline;
 pub mod templates;
 pub mod metrics;
+pub mod plugin;
 pub mod routing;
+pub mod scheduler;
 pub mod security;
 pub mod session;
 pub mod stages;
