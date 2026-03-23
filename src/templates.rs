@@ -76,11 +76,28 @@ impl PromptTemplate {
 
     /// Render the template body by substituting `vars` for each `{{key}}`.
     ///
+    /// In addition to simple `{{variable}}` interpolation this method handles:
+    ///
+    /// - **Conditional blocks** `{{#if condition}}...{{/if}}` — the block is
+    ///   included if `vars` contains a key equal to `condition` whose value is
+    ///   non-empty and not the literal string `"false"` or `"0"`.
+    ///
+    /// - **Loop blocks** `{{#each items}}...{{/each}}` — the block is repeated
+    ///   once for each item in a comma-separated list stored under the key
+    ///   `items`.  Inside the block `{{this}}` is replaced with the current
+    ///   item and `{{@index}}` with the zero-based index.
+    ///
     /// Variables present in the template but absent from `vars` fall back to
     /// the template's own default value. If no default exists the placeholder
     /// is replaced with an empty string.
     pub fn render(&self, vars: &HashMap<&str, &str>) -> String {
-        let mut output = self.body.clone();
+        // Step 1 — process {{#each items}}...{{/each}} blocks
+        let mut output = render_each_blocks(&self.body, vars);
+
+        // Step 2 — process {{#if condition}}...{{/if}} blocks
+        output = render_if_blocks(&output, vars);
+
+        // Step 3 — simple variable substitution
         for (key, default) in &self.variables {
             let placeholder = format!("{{{{{key}}}}}");
             let value = vars
@@ -574,6 +591,119 @@ pub struct VariantReport {
 // Helpers
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Block rendering helpers
+// ---------------------------------------------------------------------------
+
+/// Evaluate a condition value: truthy when non-empty and not `"false"`/`"0"`.
+fn is_truthy(value: &str) -> bool {
+    !value.is_empty() && value != "false" && value != "0"
+}
+
+/// Process all `{{#if condition}}...{{/if}}` blocks in `template`.
+///
+/// - The block is **included** (without the tags) when the condition is truthy.
+/// - The block is **removed** (including the tags) when the condition is falsy.
+/// - Nested `{{#if}}` blocks are **not** supported — they are left as-is.
+fn render_if_blocks(template: &str, vars: &HashMap<&str, &str>) -> String {
+    let mut output = template.to_string();
+
+    loop {
+        // Find the next {{#if <condition>}} tag
+        let open_start = match output.find("{{#if ") {
+            Some(i) => i,
+            None => break,
+        };
+        let tag_end = match output[open_start..].find("}}") {
+            Some(j) => open_start + j + 2,
+            None => break,
+        };
+
+        // Extract the condition name from between "{{#if " and "}}"
+        let condition = output[open_start + 6..tag_end - 2].trim().to_string();
+
+        // Locate the matching {{/if}}
+        let close_tag = "{{/if}}";
+        let close_start = match output[tag_end..].find(close_tag) {
+            Some(k) => tag_end + k,
+            None => break, // malformed template — stop processing
+        };
+        let close_end = close_start + close_tag.len();
+
+        // Body is the content between the opening and closing tags
+        let body = output[tag_end..close_start].to_string();
+
+        // Decide what to replace the whole block with
+        let condition_value = vars.get(condition.as_str()).copied().unwrap_or("");
+        let replacement = if is_truthy(condition_value) {
+            body
+        } else {
+            String::new()
+        };
+
+        output = format!("{}{}{}", &output[..open_start], replacement, &output[close_end..]);
+    }
+
+    output
+}
+
+/// Process all `{{#each items}}...{{/each}}` blocks in `template`.
+///
+/// The value of `items` in `vars` is treated as a **comma-separated list**.
+/// Each element is trimmed before use.  Inside the block:
+///
+/// - `{{this}}` — replaced with the current item's value.
+/// - `{{@index}}` — replaced with the zero-based integer index.
+///
+/// If `items` is absent or empty the entire block is removed.
+fn render_each_blocks(template: &str, vars: &HashMap<&str, &str>) -> String {
+    let mut output = template.to_string();
+
+    loop {
+        // Find the next {{#each <list_key>}} tag
+        let open_start = match output.find("{{#each ") {
+            Some(i) => i,
+            None => break,
+        };
+        let tag_end = match output[open_start..].find("}}") {
+            Some(j) => open_start + j + 2,
+            None => break,
+        };
+
+        // Extract the list key from between "{{#each " and "}}"
+        let list_key = output[open_start + 8..tag_end - 2].trim().to_string();
+
+        // Locate the matching {{/each}}
+        let close_tag = "{{/each}}";
+        let close_start = match output[tag_end..].find(close_tag) {
+            Some(k) => tag_end + k,
+            None => break, // malformed — stop
+        };
+        let close_end = close_start + close_tag.len();
+
+        // The body template for each iteration
+        let body_template = output[tag_end..close_start].to_string();
+
+        // Expand
+        let items_str = vars.get(list_key.as_str()).copied().unwrap_or("");
+        let mut expanded = String::new();
+
+        if !items_str.is_empty() {
+            for (idx, item) in items_str.split(',').enumerate() {
+                let item = item.trim();
+                let iter_body = body_template
+                    .replace("{{this}}", item)
+                    .replace("{{@index}}", &idx.to_string());
+                expanded.push_str(&iter_body);
+            }
+        }
+
+        output = format!("{}{}{}", &output[..open_start], expanded, &output[close_end..]);
+    }
+
+    output
+}
+
 /// Extract placeholder names from a `{{…}}` template string.
 fn extract_placeholders(s: &str) -> Vec<String> {
     let mut vars = Vec::new();
@@ -747,5 +877,99 @@ tags    = ["greeting"]
         assert_eq!(metrics[0].requests, 2);
         assert_eq!(metrics[0].successes, 2);
         assert!((metrics[0].avg_latency_ms() - 110.0).abs() < 0.01);
+    }
+
+    // -----------------------------------------------------------------------
+    // Block rendering tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_if_block_truthy() {
+        let t = PromptTemplate::builder("t_if")
+            .body("Prefix. {{#if show_extra}}Extra content.{{/if}} Suffix.")
+            .build();
+        let mut vars = HashMap::new();
+        vars.insert("show_extra", "true");
+        assert_eq!(t.render(&vars), "Prefix. Extra content. Suffix.");
+    }
+
+    #[test]
+    fn test_if_block_falsy() {
+        let t = PromptTemplate::builder("t_if_false")
+            .body("Prefix. {{#if show_extra}}Extra content.{{/if}} Suffix.")
+            .build();
+        let mut vars = HashMap::new();
+        vars.insert("show_extra", "false");
+        assert_eq!(t.render(&vars), "Prefix.  Suffix.");
+    }
+
+    #[test]
+    fn test_if_block_missing_var_is_falsy() {
+        let t = PromptTemplate::builder("t_if_missing")
+            .body("A{{#if missing}}B{{/if}}C")
+            .build();
+        let vars = HashMap::new();
+        assert_eq!(t.render(&vars), "AC");
+    }
+
+    #[test]
+    fn test_if_block_zero_is_falsy() {
+        let t = PromptTemplate::builder("t_if_zero")
+            .body("{{#if count}}has items{{/if}}")
+            .build();
+        let mut vars = HashMap::new();
+        vars.insert("count", "0");
+        assert_eq!(t.render(&vars), "");
+    }
+
+    #[test]
+    fn test_each_block_basic() {
+        let t = PromptTemplate::builder("t_each")
+            .body("Items: {{#each fruits}}- {{this}}\n{{/each}}")
+            .build();
+        let mut vars = HashMap::new();
+        vars.insert("fruits", "apple, banana, cherry");
+        let result = t.render(&vars);
+        assert!(result.contains("- apple"));
+        assert!(result.contains("- banana"));
+        assert!(result.contains("- cherry"));
+    }
+
+    #[test]
+    fn test_each_block_index() {
+        let t = PromptTemplate::builder("t_each_idx")
+            .body("{{#each items}}{{@index}}:{{this}} {{/each}}")
+            .build();
+        let mut vars = HashMap::new();
+        vars.insert("items", "a,b,c");
+        let result = t.render(&vars);
+        assert!(result.contains("0:a"));
+        assert!(result.contains("1:b"));
+        assert!(result.contains("2:c"));
+    }
+
+    #[test]
+    fn test_each_block_empty_list() {
+        let t = PromptTemplate::builder("t_each_empty")
+            .body("before{{#each items}}{{this}}{{/each}}after")
+            .build();
+        let mut vars = HashMap::new();
+        vars.insert("items", "");
+        assert_eq!(t.render(&vars), "beforeafter");
+    }
+
+    #[test]
+    fn test_if_and_each_combined() {
+        let t = PromptTemplate::builder("t_combined")
+            .body("{{#if show}}List: {{#each items}}{{this}} {{/each}}{{/if}}")
+            .build();
+        let mut vars = HashMap::new();
+        vars.insert("show", "yes");
+        vars.insert("items", "x,y,z");
+        let result = t.render(&vars);
+        assert!(result.contains("List:"));
+        assert!(result.contains("x"));
+        assert!(result.contains("y"));
+        assert!(result.contains("z"));
     }
 }

@@ -550,6 +550,8 @@ struct AppState {
     shutting_down: Arc<AtomicBool>,
     /// Instant the server started — used for uptime calculation in health checks.
     started_at: Instant,
+    /// Per-session token budget tracker — backs the `/v1/sessions/{id}/budget` endpoints.
+    session_budget: Arc<crate::session::SessionBudget>,
 }
 
 // ============================================================================
@@ -668,6 +670,7 @@ pub async fn start_server(
         metrics_key,
         shutting_down,
         started_at: Instant::now(),
+        session_budget: Arc::new(crate::session::SessionBudget::new()),
     });
 
     // Collector task: receives pipeline output and writes results into the tracker.
@@ -697,7 +700,10 @@ pub async fn start_server(
         .route("/api/v1/debug/dlq", get(debug_dlq_handler))
         .route("/api/v1/debug/dedup-index", get(debug_dedup_handler))
         .route("/api/v1/debug/pipeline", get(debug_pipeline_handler))
+        .route("/v1/sessions/:session_id/budget", get(session_budget_handler))
+        .route("/v1/sessions/:session_id/budget/reset", post(session_budget_reset_handler))
         .route("/health", get(health_handler))
+        .route("/v1/health", get(health_handler))
         .route("/live", get(live_handler))
         .route("/ready", get(ready_handler))
         .route("/version", get(version_handler))
@@ -827,6 +833,7 @@ async fn auth_middleware(
     // Public endpoints that do not require authentication.
     let req_path = req.uri().path().to_owned();
     let is_public = req_path == "/health"
+        || req_path == "/v1/health"
         || req_path == "/live"
         || req_path == "/ready"
         || req_path == "/version"
@@ -1764,6 +1771,68 @@ async fn health_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse
     };
 
     (status_code, Json(body)).into_response()
+}
+
+/// `GET /v1/sessions/:session_id/budget`  -  Return current budget state for a session.
+///
+/// Returns a [`crate::session::SessionBudgetSnapshot`] for the given session.
+/// If the session has no registered limits, returns `404`.
+///
+/// # Panics
+///
+/// This function never panics.
+#[cfg(feature = "web-api")]
+async fn session_budget_handler(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> impl IntoResponse {
+    match state.session_budget.snapshot(&session_id) {
+        Some(snap) => (StatusCode::OK, Json(serde_json::to_value(snap).unwrap_or_default()))
+            .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "session_not_found",
+                "message": format!("No budget registered for session '{session_id}'"),
+            })),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /v1/sessions/:session_id/budget/reset`  -  Reset accumulated spend to zero.
+///
+/// Zeroes the token spend counter for the session without removing its limits.
+/// Returns `200` on success, `404` if the session is unknown.
+///
+/// # Panics
+///
+/// This function never panics.
+#[cfg(feature = "web-api")]
+async fn session_budget_reset_handler(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> impl IntoResponse {
+    // Verify the session exists before resetting
+    if state.session_budget.snapshot(&session_id).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "session_not_found",
+                "message": format!("No budget registered for session '{session_id}'"),
+            })),
+        )
+            .into_response();
+    }
+    state.session_budget.reset_session(&session_id);
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "reset",
+            "session_id": session_id,
+        })),
+    )
+        .into_response()
 }
 
 /// `GET /live`  -  Kubernetes liveness probe.

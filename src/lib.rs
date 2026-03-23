@@ -90,6 +90,9 @@ pub mod cascade;
 pub mod config;
 pub mod conversation;
 pub mod coordination;
+pub mod failover;
+pub mod provider_health;
+pub mod smart_router;
 #[cfg(feature = "distributed")]
 pub mod distributed;
 pub mod enhanced;
@@ -151,6 +154,9 @@ pub use worker::{
     stream_worker, AnthropicWorker, EchoWorker, LlamaCppWorker, LoadBalancedWorker, ModelWorker,
     OpenAiWorker, VllmWorker,
 };
+pub use failover::FailoverChain;
+pub use provider_health::{ProviderHealth, ProviderHealthMonitor};
+pub use smart_router::{ModelPricing, RoutingDecision, RoutingRequirements, SmartRouter};
 
 /// Orchestrator-specific errors.
 ///
