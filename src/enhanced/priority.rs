@@ -35,8 +35,9 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::sync::atomic::{AtomicUsize, Ordering as AOrdering};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::Mutex;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::PromptRequest;
 
@@ -128,6 +129,13 @@ impl Ord for PrioritizedRequest {
 /// [`PriorityQueue::with_capacity`] for custom sizing.  When the queue is full,
 /// [`PriorityQueue::push`] returns `Err(`[`QueueError::QueueFull`]`)`.
 ///
+/// # Deadline enforcement
+///
+/// Use [`PriorityQueue::pop_with_deadline_check`] to automatically skip
+/// requests whose deadline has already passed.  Each skipped request is
+/// counted in `expired_total` (accessible via [`QueueStats`]) and a
+/// `tracing::warn!` is emitted.
+///
 /// # Thread safety
 ///
 /// `PriorityQueue` is `Clone + Send + Sync`.  All clones share the same
@@ -169,6 +177,8 @@ pub struct PriorityQueue {
     count_normal: Arc<AtomicUsize>,
     count_high: Arc<AtomicUsize>,
     count_critical: Arc<AtomicUsize>,
+    /// Total number of requests skipped due to deadline expiry (lock-free).
+    expired_total: Arc<AtomicUsize>,
 }
 
 impl PriorityQueue {
@@ -192,6 +202,7 @@ impl PriorityQueue {
             count_normal: Arc::new(AtomicUsize::new(0)),
             count_high: Arc::new(AtomicUsize::new(0)),
             count_critical: Arc::new(AtomicUsize::new(0)),
+            expired_total: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -268,6 +279,56 @@ impl PriorityQueue {
         })
     }
 
+    /// Remove and return the highest-priority request whose deadline has not
+    /// yet passed.
+    ///
+    /// Requests are popped in priority order (highest first, then FIFO).
+    /// Any request whose `deadline` is `Some(t)` and `t < Instant::now()` is
+    /// silently discarded: the `expired_total` counter is incremented, a
+    /// `tracing::warn!` is emitted, and the next candidate is checked.
+    ///
+    /// Requests with `deadline = None` are never expired.
+    ///
+    /// # Returns
+    ///
+    /// `Some((priority, request))` for the first non-expired request found,
+    /// or `None` if the queue is empty or all remaining requests have expired.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
+    pub async fn pop_with_deadline_check(&self) -> Option<(Priority, PromptRequest)> {
+        let now = Instant::now();
+        let mut heap = self.heap.lock().await;
+
+        loop {
+            let pr = heap.pop()?;
+            self.counter_for(pr.priority)
+                .fetch_sub(1, AOrdering::Relaxed);
+
+            if let Some(deadline) = pr.request.deadline {
+                if deadline < now {
+                    self.expired_total.fetch_add(1, AOrdering::Relaxed);
+                    warn!(
+                        request_id = %pr.request.request_id,
+                        session_id = %pr.request.session,
+                        priority = ?pr.priority,
+                        "priority queue: dropping expired request (deadline passed)"
+                    );
+                    continue;
+                }
+            }
+
+            debug!(
+                priority = ?pr.priority,
+                sequence = pr.sequence,
+                queue_size = heap.len(),
+                "request dequeued (deadline check)"
+            );
+            return Some((pr.priority, pr.request));
+        }
+    }
+
     /// Get current queue size
     pub async fn len(&self) -> usize {
         self.heap.lock().await.len()
@@ -300,7 +361,12 @@ impl PriorityQueue {
             by_priority.insert(Priority::Critical, critical);
         }
         let total = low + normal + high + critical;
-        QueueStats { total, by_priority }
+        let expired_total = self.expired_total.load(AOrdering::Relaxed);
+        QueueStats {
+            total,
+            by_priority,
+            expired_total,
+        }
     }
 
     /// Clear all requests
@@ -345,6 +411,9 @@ pub struct QueueStats {
     pub total: usize,
     /// Breakdown of request counts keyed by priority level.
     pub by_priority: std::collections::HashMap<Priority, usize>,
+    /// Cumulative count of requests skipped because their deadline had passed,
+    /// recorded by [`PriorityQueue::pop_with_deadline_check`].
+    pub expired_total: usize,
 }
 
 #[cfg(test)]
@@ -717,5 +786,116 @@ mod tests {
 
         queue.pop().await;
         assert_eq!(queue.len().await, 0);
+    }
+
+    // ── Deadline-check tests ──────────────────────────────────────────────
+
+    fn create_expired_request(id: &str) -> PromptRequest {
+        PromptRequest {
+            session: SessionId::new(id),
+            request_id: format!("test-{id}"),
+            input: id.to_string(),
+            meta: HashMap::new(),
+            // Deadline already in the past.
+            deadline: Some(Instant::now() - std::time::Duration::from_secs(1)),
+        }
+    }
+
+    fn create_request_with_future_deadline(id: &str) -> PromptRequest {
+        PromptRequest {
+            session: SessionId::new(id),
+            request_id: format!("test-{id}"),
+            input: id.to_string(),
+            meta: HashMap::new(),
+            deadline: Some(Instant::now() + std::time::Duration::from_secs(3600)),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pop_with_deadline_check_skips_expired() {
+        let queue = PriorityQueue::new();
+
+        queue
+            .push(Priority::Normal, create_expired_request("expired"))
+            .await
+            .unwrap();
+        queue
+            .push(Priority::Normal, create_request("live"))
+            .await
+            .unwrap();
+
+        // expired request should be skipped, live returned.
+        let result = queue.pop_with_deadline_check().await;
+        let (_, req) = result.expect("live request should be returned");
+        assert_eq!(req.input, "live");
+
+        // Queue should now be empty.
+        assert!(queue.pop_with_deadline_check().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_pop_with_deadline_check_all_expired_returns_none() {
+        let queue = PriorityQueue::new();
+
+        queue
+            .push(Priority::High, create_expired_request("e1"))
+            .await
+            .unwrap();
+        queue
+            .push(Priority::Low, create_expired_request("e2"))
+            .await
+            .unwrap();
+
+        assert!(queue.pop_with_deadline_check().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_pop_with_deadline_check_no_deadline_always_passes() {
+        let queue = PriorityQueue::new();
+
+        queue
+            .push(Priority::Critical, create_request("no-deadline"))
+            .await
+            .unwrap();
+
+        let result = queue.pop_with_deadline_check().await;
+        assert!(result.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_pop_with_deadline_check_future_deadline_passes() {
+        let queue = PriorityQueue::new();
+
+        queue
+            .push(
+                Priority::Normal,
+                create_request_with_future_deadline("future"),
+            )
+            .await
+            .unwrap();
+
+        let result = queue.pop_with_deadline_check().await;
+        assert!(result.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_expired_total_in_stats() {
+        let queue = PriorityQueue::new();
+
+        queue
+            .push(Priority::Normal, create_expired_request("x"))
+            .await
+            .unwrap();
+        queue
+            .push(Priority::Normal, create_expired_request("y"))
+            .await
+            .unwrap();
+
+        // Drain both (they expire).
+        queue.pop_with_deadline_check().await;
+
+        let stats = queue.stats().await;
+        assert_eq!(stats.expired_total, 2);
+        assert_eq!(stats.total, 0);
     }
 }

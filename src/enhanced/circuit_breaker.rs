@@ -113,6 +113,12 @@ struct CircuitState {
     last_state_change: Instant,
     /// Recent results (true = success, false = failure)
     recent_results: VecDeque<bool>,
+    /// Number of consecutive half-open probe failures.
+    ///
+    /// Drives exponential backoff: the probe interval after the Nth failed
+    /// probe is `timeout * 2^min(probe_failures, 6)` (capped at 64×).
+    /// Resets to 0 when the circuit successfully closes.
+    probe_failures: usize,
 }
 
 /// Current state of a circuit breaker.
@@ -169,6 +175,7 @@ impl CircuitBreaker {
                 last_failure_time: None,
                 last_state_change: Instant::now(),
                 recent_results: VecDeque::new(),
+                probe_failures: 0,
             })),
             config: CircuitBreakerConfig {
                 failure_threshold,
@@ -248,16 +255,24 @@ impl CircuitBreaker {
 
             match state.status {
                 CircuitStatus::Open => {
-                    // Check if timeout elapsed
+                    // Exponential backoff: each failed half-open probe doubles the
+                    // wait, capped at 64× the base timeout.  This prevents flapping
+                    // when a downstream service recovers slowly.
                     if let Some(last_failure) = state.last_failure_time {
-                        if last_failure.elapsed() >= self.config.timeout {
+                        let backoff_factor = 1u32 << state.probe_failures.min(6);
+                        let probe_interval = self.config.timeout * backoff_factor;
+                        if last_failure.elapsed() >= probe_interval {
                             // Try half-open  -  clear window so success-rate is
                             // calculated only from post-recovery requests.
                             state.status = CircuitStatus::HalfOpen;
                             state.recent_results.clear();
                             state.failures = 0;
                             state.last_state_change = Instant::now();
-                            info!("circuit breaker: transitioning to half-open");
+                            info!(
+                                probe_failures = state.probe_failures,
+                                backoff_factor = backoff_factor,
+                                "circuit breaker: transitioning to half-open"
+                            );
                             crate::metrics::inc_cb_transition("half_open");
                         } else {
                             // Still open, reject
@@ -309,6 +324,7 @@ impl CircuitBreaker {
                     state.status = CircuitStatus::Closed;
                     state.failures = 0;
                     state.successes = 0;
+                    state.probe_failures = 0; // Service recovered — reset backoff
                     state.last_state_change = Instant::now();
                     info!(
                         success_rate = success_rate,
@@ -358,10 +374,17 @@ impl CircuitBreaker {
                 }
             }
             CircuitStatus::HalfOpen => {
-                // Failure in half-open, go back to open
+                // Failure in half-open — go back to open and back off longer.
+                state.probe_failures = state.probe_failures.saturating_add(1);
                 state.status = CircuitStatus::Open;
                 state.last_state_change = Instant::now();
-                warn!("circuit breaker: reopening (half-open test failed)");
+                let next_backoff = 1u32 << state.probe_failures.min(6);
+                warn!(
+                    probe_failures = state.probe_failures,
+                    next_wait_factor = next_backoff,
+                    "circuit breaker: reopening (half-open test failed — next probe in {}× timeout)",
+                    next_backoff
+                );
                 crate::metrics::inc_cb_transition("open");
             }
             _ => {}
@@ -418,6 +441,7 @@ impl CircuitBreaker {
             successes: state.successes,
             success_rate: self.calculate_success_rate(&state),
             time_in_current_state: state.last_state_change.elapsed(),
+            probe_failures: state.probe_failures,
         }
     }
 
@@ -427,6 +451,7 @@ impl CircuitBreaker {
         state.status = CircuitStatus::Closed;
         state.failures = 0;
         state.successes = 0;
+        state.probe_failures = 0;
         state.recent_results.clear();
         state.last_state_change = Instant::now();
         info!("circuit breaker: manually reset to closed");
@@ -457,6 +482,10 @@ pub struct CircuitBreakerStats {
     pub success_rate: f64,
     /// Wall-clock time spent in the current state.
     pub time_in_current_state: Duration,
+    /// Consecutive half-open probe failures.  The next probe interval is
+    /// `timeout * 2^min(probe_failures, 6)`.  Zero when the circuit is
+    /// closed or has not yet attempted any half-open probes.
+    pub probe_failures: usize,
 }
 
 #[cfg(test)]

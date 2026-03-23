@@ -615,6 +615,151 @@ Sessions expire after a configurable TTL (default 30 min).  When history grows b
 
 ---
 
+### Conversation History Manager
+
+The `conversation` module provides a standalone multi-turn conversation manager with automatic token-budget enforcement and history compression. Unlike `SessionContext`, it gives you full control over prompt formatting and works independently of the pipeline.
+
+```rust,no_run
+use tokio_prompt_orchestrator::{
+    conversation::{ConversationManager, ConversationConfig, PromptFormat},
+    SessionId,
+};
+
+#[tokio::main]
+async fn main() {
+    let mgr = ConversationManager::new(ConversationConfig {
+        max_tokens: 6_000,     // compress when history exceeds this budget
+        recency_keep: 4,       // always keep last 4 turns verbatim
+        system_prompt: Some("You are a helpful assistant.".into()),
+        format: PromptFormat::ChatMl,  // ChatMl | Markdown | Inline
+        ..Default::default()
+    });
+
+    let sid = SessionId::new("user-42");
+
+    // Record turns
+    mgr.push_user(&sid, "What is async Rust?").await;
+    mgr.push_assistant(&sid, "Async Rust uses Futures and executors…").await;
+
+    // Build a complete prompt with history injected automatically
+    let prompt = mgr.build_prompt(&sid, "Show me a code example.").await;
+
+    // Introspect
+    println!("Turns: {}", mgr.turn_count(&sid).await);
+    println!("Tokens: {}", mgr.token_count(&sid).await);
+
+    // Export as JSON for persistence / replay
+    let json = mgr.export_json(&sid).await.unwrap();
+
+    // Evict sessions inactive longer than TTL (call hourly)
+    mgr.evict_stale().await;
+}
+```
+
+**When to use `ConversationManager` vs `SessionContext`:**
+
+| | `ConversationManager` | `SessionContext` |
+|---|---|---|
+| Format control | ChatML / Markdown / Inline | Fixed |
+| Token budget | Configurable with auto-compress | Turn-count based |
+| Pipeline integration | Manual (you call `build_prompt`) | Automatic via `enrich()` |
+| Export / import | JSON | No |
+| Best for | Libraries, chatbots, custom apps | Drop-in pipeline enrichment |
+
+---
+
+### Versioned Prompt Templates with A/B Testing
+
+The `templates` module provides a hot-reloadable registry of named, versioned prompt templates with `{{variable}}` substitution and built-in traffic-splitting A/B experiments.
+
+```rust,no_run
+use tokio_prompt_orchestrator::templates::{
+    PromptTemplate, TemplateRegistry, AbExperiment, ExperimentVariant,
+};
+use std::collections::HashMap;
+
+fn main() {
+    let registry = TemplateRegistry::new();
+
+    // Register two competing prompt variants
+    registry.register(
+        PromptTemplate::builder("summarise-v1")
+            .version("v1")
+            .system("You are a concise summariser.")
+            .body("Summarise in {{max_words}} words:\n\n{{text}}")
+            .var_default("max_words", "50")
+            .tag("summarisation")
+            .build(),
+    );
+    registry.register(
+        PromptTemplate::builder("summarise-v2")
+            .version("v2")
+            .body("Extract the {{num_points}} most important points from:\n\n{{text}}")
+            .var_default("num_points", "3")
+            .build(),
+    );
+
+    // Set up a 70/30 A/B experiment
+    let exp = AbExperiment::new("summarise-ab", vec![
+        ExperimentVariant {
+            template_name: "summarise-v1".into(),
+            weight: 70.0,
+            label: "control".into(),
+        },
+        ExperimentVariant {
+            template_name: "summarise-v2".into(),
+            weight: 30.0,
+            label: "treatment".into(),
+        },
+    ]);
+
+    // Route each request
+    let idx = exp.pick_variant(rand::random::<f64>());  // 0.0..1.0
+    exp.record_request(idx);
+
+    let mut vars = HashMap::new();
+    vars.insert("text", "The quick brown fox jumped over the lazy dog.");
+    let prompt = registry.render(&exp.variants[idx].template_name, &vars).unwrap();
+
+    // Record outcome (latency_ms, quality 0.0–1.0)
+    exp.record_success(idx, 280, 0.92);
+
+    // Significance test — returns None until each variant has >= 30 samples
+    if let Some(p) = exp.significance(0, 1) {
+        println!("p-value: {p:.4}  (< 0.05 = statistically significant)");
+    }
+
+    // Full JSON report
+    let report = exp.report();
+    println!("{}", serde_json::to_string_pretty(&report).unwrap());
+}
+```
+
+**Load from TOML** (supports hot-reload via config watcher):
+
+```toml
+# templates.toml
+[[templates]]
+name        = "classify"
+version     = "v1"
+system      = "You are a text classifier."
+body        = "Classify as one of {{categories}}:\n\n{{text}}"
+description = "Zero-shot text classification"
+tags        = ["classification", "nlp"]
+
+[[templates]]
+name = "translate"
+body = "Translate to {{target_lang}}:\n\n{{text}}"
+```
+
+```rust,no_run
+let toml = std::fs::read_to_string("templates.toml")?;
+let n = registry.load_toml(&toml)?;
+println!("Loaded {n} templates");
+```
+
+---
+
 ### Smart Adaptive Batching
 
 The `enhanced::smart_batch` module collects requests into micro-batches and dispatches them together, maximising GPU utilisation on batch-capable inference servers (vLLM, SGLang, llama.cpp with `--cont-batching`).

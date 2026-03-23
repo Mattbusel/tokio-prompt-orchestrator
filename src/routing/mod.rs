@@ -22,16 +22,20 @@
 //! - Semantic understanding of prompt quality (heuristic-only)
 
 pub mod arbitrage;
+pub mod cascade;
 pub mod config;
 pub mod cost_tracker;
+pub mod health;
 pub mod pool_sizer;
 pub mod router;
 pub mod scorer;
 
 // Re-exports for convenience
 pub use arbitrage::{ArbitrageEngine, ProviderProfile, ProviderSnapshot};
+pub use cascade::{CascadeEntry, CascadeError, CascadeResult, CircuitBreakerConfig, ProviderCascade};
 pub use config::RoutingConfig;
 pub use cost_tracker::{CostSnapshot, CostTracker, SessionBudgetTracker};
+pub use health::{ProviderHealthBuilder, ProviderHealthSnapshot, ProviderMetrics};
 pub use pool_sizer::{PoolSizer, PoolSizerConfig, ScaleAction, ScaleRecommendation};
 pub use router::{ModelRouter, RoutingDecision};
 pub use scorer::{ComplexityScorer, ScoreBreakdown};
