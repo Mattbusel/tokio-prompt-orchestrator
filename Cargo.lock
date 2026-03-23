@@ -3798,6 +3798,7 @@ dependencies = [
  "rand 0.8.5",
  "ratatui",
  "redis",
+ "regex",
  "reqwest",
  "rmcp",
  "schemars 0.8.22",

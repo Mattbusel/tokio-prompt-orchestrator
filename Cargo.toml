@@ -82,6 +82,9 @@ nonzero_ext = { version = "0.3", optional = true }
 # Optional core affinity pinning
 core_affinity = { version = "0.8", optional = true }
 
+# Regex engine for RegexReplaceStage in pipeline.rs
+regex = "1"
+
 # SHA-256 for prompt cache content-addressing
 sha2 = "0.10"
 hex = "0.4"

@@ -16,6 +16,56 @@ Five-stage bounded-backpressure DAG with deduplication, circuit breakers, rate l
 
 ## What's New
 
+### v1.7.0 — Prompt Pipeline and Audit Log
+
+#### Prompt Pipeline
+
+The new `pipeline` module provides a composable, ordered sequence of text-transformation stages.  Each stage is async and receives the previous stage's output as its input.
+
+**Key types:** `Pipeline`, `PipelineBuilder`, `PromptPipelineStage` (trait), `PipelineStats`, `PipelineResult`, `PipelineError`
+
+**Built-in stages:**
+- `TrimStage` — strips leading/trailing whitespace
+- `TruncateStage { max_chars }` — truncates at the last word boundary within the limit
+- `PrependStage { prefix }` — prepends a system-prompt or context prefix
+- `AppendStage { suffix }` — appends a context or citation suffix
+- `RegexReplaceStage { pattern, replacement }` — regex substitution (powered by the `regex` crate; pattern compiled once at construction)
+- `LanguageDetectStage` — heuristic ASCII/Latin vs. other-script detector; tags output with `[lang:en]` or `[lang:other]`
+
+**Example:**
+```rust
+use tokio_prompt_orchestrator::pipeline::{PipelineBuilder, TrimStage, TruncateStage, PrependStage};
+
+let pipeline = PipelineBuilder::new()
+    .add(TrimStage)
+    .add(TruncateStage { max_chars: 2000 })
+    .add(PrependStage { prefix: "System: answer concisely.\n\n".to_string() })
+    .build();
+
+let result = pipeline.run("  User question here  ".to_string()).await?;
+println!("{} chars in {}ms", result.stats.output_len, result.stats.elapsed_ms);
+```
+
+#### Audit Log
+
+The new `audit` module provides an append-only, capacity-bounded audit log for LLM inference requests and responses.  Entries can be filtered, queried, and bulk-exported as JSONL.
+
+**Key types:** `AuditLog`, `AuditEntry`, `AuditFilter`, `AuditStats`, `AuditQueryResponse`, `AuditStatsResponse`
+
+- **Append-only with eviction** — `AuditLog::new(capacity)` evicts the oldest entry when full (ring-buffer semantics via `VecDeque`).
+- **Flexible filtering** — `AuditFilter` combines `since`, `model_id`, `cache_hit`, and `min_latency_ms` predicates with AND semantics.
+- **JSONL export** — `export_jsonl(&mut dyn Write)` streams every entry as a newline-delimited JSON object, suitable for ingestion by log aggregators.
+- **Aggregate stats** — `AuditLog::stats()` returns `AuditStats` with cache-hit rate, average latency, and per-model entry counts.
+
+**HTTP endpoints** (when served via `web_api`):
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/v1/audit` | Query entries; optional `?model_id=`, `?cache_hit=`, `?min_latency_ms=` params |
+| GET | `/api/v1/audit/stats` | Aggregate statistics JSON |
+| GET | `/api/v1/audit/export` | Download all entries as JSONL |
+
+---
+
 ### v1.6.0 — Load Balancer and Template Engine
 
 #### Load Balancer

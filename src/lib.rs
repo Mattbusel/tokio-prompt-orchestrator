@@ -146,6 +146,8 @@ pub mod self_improve_loop;
 #[cfg(feature = "tui")]
 pub mod tui;
 
+pub mod audit;
+pub mod pipeline;
 pub mod cost_optimizer;
 pub mod prompt_optimizer;
 pub mod trace_export;
@@ -177,6 +179,12 @@ pub use load_balancer::{
     BalancerConfig, EndpointStats, LoadBalancer, LoadBalancerStats, ModelEndpoint,
 };
 pub use template::{TemplateContext, TemplateLibrary, TemplateValue};
+pub use pipeline::{
+    AppendStage, LanguageDetectStage, Pipeline, PipelineBuilder, PipelineError, PipelineResult,
+    PipelineStats, PrependStage, RegexReplaceStage, TrimStage, TruncateStage,
+};
+pub use pipeline::PipelineStage as PromptPipelineStage;
+pub use audit::{AuditEntry, AuditFilter, AuditLog, AuditQueryResponse, AuditStats, AuditStatsResponse};
 
 /// Orchestrator-specific errors.
 ///
