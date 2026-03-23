@@ -158,6 +158,8 @@ pub mod prompt_optimizer;
 pub mod trace_export;
 pub mod trace_ui;
 pub mod webhooks;
+pub mod priority_queue;
+pub mod hot_config;
 
 // Re-exports
 pub use cache::{CacheConfig, CacheEntry, CacheStats, PromptCache};
