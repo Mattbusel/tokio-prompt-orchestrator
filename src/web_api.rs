@@ -1632,23 +1632,138 @@ async fn pipeline_status_handler(State(state): State<Arc<AppState>>) -> Json<ser
     }))
 }
 
-/// `GET /health`  -  Health check endpoint.
+/// `GET /health`  -  Structured health check endpoint.
+///
+/// Returns a detailed JSON object covering:
+/// - Overall status (`"healthy"` or `"degraded"`)
+/// - Per pipeline-stage health (queue depth percentage, circuit breaker state)
+/// - Worker pool health (pending / capacity)
+/// - Memory usage estimate (RSS via `/proc/self/status` on Linux; 0 elsewhere)
+/// - Uptime in seconds
+/// - Server version
+///
+/// HTTP status codes:
+/// - `200 OK` — all stages healthy
+/// - `503 Service Unavailable` — circuit breaker is open or server is shutting down
 ///
 /// # Panics
 ///
 /// This function never panics.
 #[cfg(feature = "web-api")]
 async fn health_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let cb_open = state.circuit_breaker.is_open_sync();
-    if cb_open {
-        (StatusCode::SERVICE_UNAVAILABLE,
-         Json(serde_json::json!({"status":"degraded","reason":"circuit_breaker_open","version":env!("CARGO_PKG_VERSION")})))
-            .into_response()
+    let cb_open      = state.circuit_breaker.is_open_sync();
+    let cb_half_open = state.circuit_breaker.is_half_open_sync();
+    let shutting_down = state.shutting_down.load(AtomicOrdering::Relaxed);
+
+    let circuit_state = if cb_open {
+        "open"
+    } else if cb_half_open {
+        "half_open"
     } else {
-        (StatusCode::OK,
-         Json(serde_json::json!({"status":"healthy","version":env!("CARGO_PKG_VERSION")})))
-            .into_response()
-    }
+        "closed"
+    };
+
+    // Queue depth for the inbound pipeline channel
+    let queue_max      = state.pipeline_tx.max_capacity();
+    let queue_free     = state.pipeline_tx.capacity();
+    let queue_used     = queue_max.saturating_sub(queue_free);
+    let queue_depth_pct: f64 = if queue_max > 0 {
+        (queue_used as f64 / queue_max as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    // In-flight request tracker
+    let tracker_total = state.tracker.status.len();
+    let tracker_max   = state.tracker.max_entries;
+    let tracker_pct: f64 = if tracker_max > 0 {
+        (tracker_total as f64 / tracker_max as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    let pending = state
+        .tracker
+        .status
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.value().status,
+                RequestStatus::Pending | RequestStatus::Processing
+            )
+        })
+        .count();
+
+    // Uptime
+    let uptime_secs = state.started_at.elapsed().as_secs();
+
+    // Best-effort memory estimate (RSS) — Linux only.
+    // On other platforms we report 0 rather than failing.
+    let memory_rss_bytes: u64 = {
+        #[cfg(target_os = "linux")]
+        {
+            std::fs::read_to_string("/proc/self/status")
+                .ok()
+                .and_then(|s| {
+                    s.lines()
+                        .find(|l| l.starts_with("VmRSS:"))
+                        .and_then(|l| l.split_whitespace().nth(1))
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .map(|kb| kb * 1024)
+                })
+                .unwrap_or(0)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            0u64
+        }
+    };
+
+    // Dead-letter queue depth
+    let dlq_depth = state.dlq.len();
+
+    let overall_status = if cb_open || shutting_down {
+        "degraded"
+    } else {
+        "healthy"
+    };
+
+    let body = serde_json::json!({
+        "status": overall_status,
+        "version": env!("CARGO_PKG_VERSION"),
+        "uptime_secs": uptime_secs,
+        "shutting_down": shutting_down,
+        "pipeline": {
+            "inbound_queue": {
+                "used": queue_used,
+                "capacity": queue_max,
+                "depth_pct": (queue_depth_pct * 10.0).round() / 10.0,
+            },
+            "circuit_breaker": {
+                "state": circuit_state,
+                "is_open": cb_open,
+            },
+            "dead_letter_queue_depth": dlq_depth,
+        },
+        "worker_pool": {
+            "pending_requests": pending,
+            "tracker_used": tracker_total,
+            "tracker_capacity": tracker_max,
+            "tracker_depth_pct": (tracker_pct * 10.0).round() / 10.0,
+        },
+        "memory": {
+            "rss_bytes": memory_rss_bytes,
+            "rss_mb": (memory_rss_bytes as f64 / (1024.0 * 1024.0) * 10.0).round() / 10.0,
+        },
+    });
+
+    let status_code = if cb_open || shutting_down {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::OK
+    };
+
+    (status_code, Json(body)).into_response()
 }
 
 /// `GET /live`  -  Kubernetes liveness probe.
