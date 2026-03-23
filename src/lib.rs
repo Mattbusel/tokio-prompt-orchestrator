@@ -198,6 +198,7 @@ pub mod model_registry;
 pub mod prompt_validator;
 pub mod cache_warmer;
 pub mod token_counter;
+pub mod ab_testing;
 
 // Re-exports
 pub use cache::{CacheConfig, CacheEntry, CacheStats, PromptCache};

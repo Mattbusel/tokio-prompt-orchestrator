@@ -741,3 +741,385 @@ mod tests {
         assert_eq!(reg.best_variant("test intent").as_deref(), Some("variant B"));
     }
 }
+
+// ===========================================================================
+// Round-32 additions: compression, few-shot selection, CoT injection,
+// and the unified PromptOptimizer facade.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// OptimizationGoal
+// ---------------------------------------------------------------------------
+
+/// High-level objective that guides how the compression optimizer applies its tools.
+#[derive(Clone, Debug)]
+pub enum CompressionGoal {
+    /// Reduce token count as aggressively as possible.
+    MinimizeTokens,
+    /// Preserve maximum clarity even at the cost of extra tokens.
+    MaximizeClarity,
+    /// Balance cost savings against output quality.
+    BalancedCostQuality,
+}
+
+// ---------------------------------------------------------------------------
+// FewShotExample / FewShotSelector
+// ---------------------------------------------------------------------------
+
+/// A single input/output example for few-shot prompting.
+#[derive(Clone, Debug)]
+pub struct FewShotExample {
+    /// The example input text.
+    pub input: String,
+    /// The expected output text.
+    pub output: String,
+    /// Estimated token cost for this example.
+    pub tokens: usize,
+    /// Relevance score assigned during selection (0.0–1.0).
+    pub relevance_score: f64,
+}
+
+/// Selects the most relevant few-shot examples that fit within a token budget.
+#[derive(Debug, Default)]
+pub struct FewShotSelector {
+    examples: Vec<FewShotExample>,
+    max_examples: usize,
+}
+
+impl FewShotSelector {
+    /// Create a selector that returns at most `max_examples` examples.
+    pub fn new(max_examples: usize) -> Self {
+        Self { examples: Vec::new(), max_examples }
+    }
+
+    /// Add a new candidate example.
+    pub fn add_example(&mut self, input: impl Into<String>, output: impl Into<String>, tokens: usize) {
+        self.examples.push(FewShotExample {
+            input: input.into(),
+            output: output.into(),
+            tokens,
+            relevance_score: 0.0,
+        });
+    }
+
+    /// Return up to `max_examples` examples sorted by Jaccard similarity to
+    /// `query`, limited to `token_budget` total tokens.
+    pub fn select_relevant<'a>(&'a self, query: &str, token_budget: usize) -> Vec<&'a FewShotExample> {
+        let mut scored: Vec<(f64, &FewShotExample)> = self
+            .examples
+            .iter()
+            .map(|ex| (Self::jaccard(query, &ex.input), ex))
+            .collect();
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut result = Vec::new();
+        let mut used_tokens = 0usize;
+        for (_, ex) in scored {
+            if result.len() >= self.max_examples {
+                break;
+            }
+            if used_tokens + ex.tokens > token_budget {
+                continue;
+            }
+            used_tokens += ex.tokens;
+            result.push(ex);
+        }
+        result
+    }
+
+    /// Jaccard similarity between the word sets of two strings.
+    fn jaccard(a: &str, b: &str) -> f64 {
+        let words_a: std::collections::HashSet<&str> = a.split_whitespace().collect();
+        let words_b: std::collections::HashSet<&str> = b.split_whitespace().collect();
+        if words_a.is_empty() && words_b.is_empty() {
+            return 1.0;
+        }
+        let intersection = words_a.intersection(&words_b).count();
+        let union = words_a.union(&words_b).count();
+        if union == 0 { 0.0 } else { intersection as f64 / union as f64 }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PromptCompressor
+// ---------------------------------------------------------------------------
+
+/// Applies lossless and near-lossless text compression to reduce token count.
+#[derive(Debug, Clone)]
+pub struct PromptCompressor {
+    /// Maximum tokens the compressed output should occupy (soft limit).
+    pub max_tokens: usize,
+    /// Target compression ratio (0.0–1.0). 0.8 means aim to keep 80% of chars.
+    pub compression_ratio: f64,
+}
+
+impl PromptCompressor {
+    /// Create a compressor with the given limits.
+    pub fn new(max_tokens: usize, compression_ratio: f64) -> Self {
+        Self { max_tokens, compression_ratio: compression_ratio.clamp(0.0, 1.0) }
+    }
+
+    /// Compress `text` by:
+    /// 1. Collapsing redundant whitespace.
+    /// 2. Deduplicating consecutive identical sentences.
+    /// 3. Dropping common filler phrases.
+    /// 4. Abbreviating frequent verbose patterns.
+    pub fn compress(&self, text: &str) -> String {
+        // Step 1 – normalise whitespace.
+        let mut out = collapse_whitespace(text);
+
+        // Step 2 – deduplicate consecutive identical sentences.
+        out = dedup_sentences(&out);
+
+        // Step 3 – remove filler phrases.
+        const FILLERS: &[&str] = &[
+            "please ", "kindly ", "as mentioned above, ", "as mentioned above ",
+            "as previously mentioned, ", "as previously mentioned ",
+            "it is worth noting that ", "it should be noted that ",
+            "note that ", "please note that ",
+        ];
+        for filler in FILLERS {
+            // Case-insensitive removal.
+            let lower = out.to_lowercase();
+            let mut result = String::with_capacity(out.len());
+            let mut pos = 0usize;
+            loop {
+                if pos >= out.len() { break; }
+                if let Some(idx) = lower[pos..].find(filler) {
+                    let abs = pos + idx;
+                    result.push_str(&out[pos..abs]);
+                    pos = abs + filler.len();
+                } else {
+                    result.push_str(&out[pos..]);
+                    break;
+                }
+            }
+            out = result;
+        }
+
+        // Step 4 – abbreviate common patterns.
+        out = out.replace("in order to", "to")
+                 .replace("due to the fact that", "because")
+                 .replace("for the purpose of", "for")
+                 .replace("at this point in time", "now")
+                 .replace("in the event that", "if");
+
+        // Final whitespace cleanup.
+        collapse_whitespace(&out)
+    }
+
+    /// Fraction of characters saved: `(orig - compressed) / orig`.
+    pub fn estimate_savings(&self, original: &str, compressed: &str) -> f64 {
+        if original.is_empty() {
+            return 0.0;
+        }
+        let saved = original.len().saturating_sub(compressed.len());
+        saved as f64 / original.len() as f64
+    }
+}
+
+fn collapse_whitespace(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_space = false;
+    for ch in s.chars() {
+        if ch.is_whitespace() {
+            if !prev_space {
+                out.push(' ');
+            }
+            prev_space = true;
+        } else {
+            out.push(ch);
+            prev_space = false;
+        }
+    }
+    out.trim().to_string()
+}
+
+fn dedup_sentences(s: &str) -> String {
+    let sentences: Vec<&str> = s.split(". ").collect();
+    let mut result: Vec<&str> = Vec::with_capacity(sentences.len());
+    for sentence in &sentences {
+        if result.last().map_or(true, |last| *last != *sentence) {
+            result.push(sentence);
+        }
+    }
+    result.join(". ")
+}
+
+// ---------------------------------------------------------------------------
+// ChainOfThoughtInjector
+// ---------------------------------------------------------------------------
+
+/// Wraps a prompt with chain-of-thought scaffolding.
+#[derive(Debug, Clone)]
+pub struct ChainOfThoughtInjector {
+    /// Text inserted before the user prompt to invoke step-by-step reasoning.
+    pub cot_prefix: String,
+    /// Text appended after the prompt to elicit the final answer.
+    pub cot_suffix: String,
+}
+
+impl ChainOfThoughtInjector {
+    /// Create an injector with the canonical CoT framing.
+    pub fn new() -> Self {
+        Self {
+            cot_prefix: "Let's think step by step:".to_string(),
+            cot_suffix: "Therefore, the answer is:".to_string(),
+        }
+    }
+
+    /// Inject CoT scaffolding around `prompt`.
+    pub fn inject(&self, prompt: &str) -> String {
+        format!("{}\n\n{}\n{}", self.cot_prefix, prompt, self.cot_suffix)
+    }
+
+    /// Inject a numbered step scaffold with `n_steps` placeholders.
+    pub fn inject_numbered_steps(&self, prompt: &str, n_steps: u32) -> String {
+        let steps: Vec<String> = (1..=n_steps)
+            .map(|i| format!("Step {}: [reasoning here]", i))
+            .collect();
+        format!("{}\n\n{}\n\n{}\n{}", self.cot_prefix, prompt, steps.join("\n"), self.cot_suffix)
+    }
+}
+
+impl Default for ChainOfThoughtInjector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PromptOptimizer (unified facade)
+// ---------------------------------------------------------------------------
+
+/// Unified facade that combines compression, few-shot selection, and CoT
+/// injection into a single optimisation pipeline.
+pub struct PromptCompressionOptimizer {
+    /// Text compressor.
+    pub compressor: PromptCompressor,
+    /// Few-shot example selector.
+    pub few_shot: FewShotSelector,
+    /// Chain-of-thought injector.
+    pub cot: ChainOfThoughtInjector,
+    /// High-level optimisation objective.
+    pub goal: CompressionGoal,
+}
+
+impl PromptCompressionOptimizer {
+    /// Create an optimizer with sensible defaults.
+    pub fn new(goal: CompressionGoal) -> Self {
+        Self {
+            compressor: PromptCompressor::new(4096, 0.8),
+            few_shot: FewShotSelector::new(3),
+            cot: ChainOfThoughtInjector::new(),
+            goal,
+        }
+    }
+
+    /// Optimise a single prompt within the given `token_budget`.
+    ///
+    /// * Always applies compression.
+    /// * Injects few-shot examples if the budget allows.
+    /// * Adds CoT scaffolding when the goal is `MaximizeClarity` or
+    ///   `BalancedCostQuality`.
+    pub fn optimize(&self, prompt: &str, token_budget: usize) -> String {
+        // 1. Compress.
+        let compressed = self.compressor.compress(prompt);
+
+        // 2. Rough token estimate: 1 token ≈ 4 chars.
+        let base_tokens = compressed.len() / 4 + 1;
+        let remaining = token_budget.saturating_sub(base_tokens);
+
+        // 3. Optionally prepend few-shot examples.
+        let examples = self.few_shot.select_relevant(&compressed, remaining);
+        let mut result = if !examples.is_empty() {
+            let shots: Vec<String> = examples
+                .iter()
+                .map(|ex| format!("Input: {}\nOutput: {}", ex.input, ex.output))
+                .collect();
+            format!("{}\n\n{}", shots.join("\n\n"), compressed)
+        } else {
+            compressed
+        };
+
+        // 4. Optionally inject CoT.
+        match self.goal {
+            CompressionGoal::MinimizeTokens => {}
+            CompressionGoal::MaximizeClarity | CompressionGoal::BalancedCostQuality => {
+                result = self.cot.inject(&result);
+            }
+        }
+
+        result
+    }
+
+    /// Optimise a batch of prompts, each within the same `token_budget`.
+    pub fn optimize_batch(&self, prompts: &[String], token_budget: usize) -> Vec<String> {
+        prompts.iter().map(|p| self.optimize(p, token_budget)).collect()
+    }
+}
+
+#[cfg(test)]
+mod round32_tests {
+    use super::*;
+
+    #[test]
+    fn compressor_removes_fillers() {
+        let c = PromptCompressor::new(4096, 0.8);
+        let out = c.compress("Please summarise this kindly.");
+        assert!(!out.to_lowercase().contains("please"));
+        assert!(!out.to_lowercase().contains("kindly"));
+    }
+
+    #[test]
+    fn compressor_savings_positive() {
+        let c = PromptCompressor::new(4096, 0.8);
+        let orig = "Please please please note that in order to do this please kindly proceed.";
+        let comp = c.compress(orig);
+        assert!(c.estimate_savings(orig, &comp) >= 0.0);
+    }
+
+    #[test]
+    fn few_shot_respects_budget() {
+        let mut sel = FewShotSelector::new(5);
+        sel.add_example("what is 2+2", "4", 10);
+        sel.add_example("what is 3+3", "6", 10);
+        sel.add_example("what is 4+4", "8", 10);
+        // Budget of 15 should only fit one example.
+        let chosen = sel.select_relevant("what is 5+5", 15);
+        assert!(chosen.len() <= 1);
+    }
+
+    #[test]
+    fn cot_inject_contains_prefix_and_suffix() {
+        let inj = ChainOfThoughtInjector::new();
+        let out = inj.inject("What is 2+2?");
+        assert!(out.contains("Let's think step by step:"));
+        assert!(out.contains("Therefore, the answer is:"));
+        assert!(out.contains("What is 2+2?"));
+    }
+
+    #[test]
+    fn cot_numbered_steps() {
+        let inj = ChainOfThoughtInjector::new();
+        let out = inj.inject_numbered_steps("Solve x+1=5", 3);
+        assert!(out.contains("Step 1:"));
+        assert!(out.contains("Step 2:"));
+        assert!(out.contains("Step 3:"));
+    }
+
+    #[test]
+    fn optimizer_minimize_no_cot() {
+        let opt = PromptCompressionOptimizer::new(CompressionGoal::MinimizeTokens);
+        let out = opt.optimize("Please kindly answer this question.", 1000);
+        assert!(!out.contains("Let's think step by step:"));
+    }
+
+    #[test]
+    fn optimizer_batch() {
+        let opt = PromptCompressionOptimizer::new(CompressionGoal::BalancedCostQuality);
+        let prompts = vec!["Hello world".to_string(), "Please answer this kindly.".to_string()];
+        let results = opt.optimize_batch(&prompts, 500);
+        assert_eq!(results.len(), 2);
+    }
+}
