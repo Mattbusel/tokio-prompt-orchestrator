@@ -154,6 +154,8 @@ pub mod self_improve_loop;
 pub mod tui;
 
 pub mod audit;
+pub mod feedback_loop;
+pub mod conversation_graph;
 pub mod pipeline;
 pub mod cost_optimizer;
 pub mod prompt_optimizer;
