@@ -29,6 +29,7 @@ pub mod health;
 pub mod pool_sizer;
 pub mod router;
 pub mod scorer;
+pub mod semantic;
 
 // Re-exports for convenience
 pub use arbitrage::{ArbitrageEngine, ProviderProfile, ProviderSnapshot};
@@ -39,3 +40,4 @@ pub use health::{ProviderHealthBuilder, ProviderHealthSnapshot, ProviderMetrics}
 pub use pool_sizer::{PoolSizer, PoolSizerConfig, ScaleAction, ScaleRecommendation};
 pub use router::{ModelRouter, RoutingDecision};
 pub use scorer::{ComplexityScorer, ScoreBreakdown};
+pub use semantic::{ClassificationResult, RoutingCategory, SemanticRouter, SemanticRouterConfig};

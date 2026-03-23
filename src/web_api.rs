@@ -548,6 +548,8 @@ struct AppState {
     /// Set to `true` when a shutdown signal has been received.  New inference
     /// requests are rejected with HTTP 503 while this is `true`.
     shutting_down: Arc<AtomicBool>,
+    /// Instant the server started — used for uptime calculation in health checks.
+    started_at: Instant,
 }
 
 // ============================================================================
@@ -665,6 +667,7 @@ pub async fn start_server(
         circuit_breaker,
         metrics_key,
         shutting_down,
+        started_at: Instant::now(),
     });
 
     // Collector task: receives pipeline output and writes results into the tracker.

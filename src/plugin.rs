@@ -74,6 +74,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{debug, warn};
 
 // ============================================================================
@@ -440,7 +441,171 @@ impl PluginChain {
 }
 
 // ============================================================================
-// PluginRegistry
+// PluginContext — passed to pre/post inference hooks
+// ============================================================================
+
+/// Metrics snapshot passed to pre- and post-inference hooks.
+///
+/// Values are best-effort estimates at the time the hook fires.  Hooks must
+/// not modify any field — the struct is `Clone` for convenience only.
+#[derive(Debug, Clone)]
+pub struct HookMetrics {
+    /// Elapsed wall-clock time since the request entered the pipeline (ms).
+    pub elapsed_ms: u64,
+    /// Approximate number of prompt tokens (provider-reported or estimated).
+    pub prompt_tokens: Option<u64>,
+    /// Approximate number of completion tokens.
+    pub completion_tokens: Option<u64>,
+    /// Estimated cost of this request in USD (0.0 if not available).
+    pub estimated_cost_usd: f64,
+}
+
+/// Rich context passed to every pre- and post-inference hook.
+///
+/// Hooks receive a shared reference to this struct; they cannot modify the
+/// pipeline payload directly — they should use the returned [`PluginOutput`]
+/// mechanism for that.  The hook context is purely informational.
+#[derive(Debug, Clone)]
+pub struct PluginContext {
+    /// Unique ID for the in-flight request.
+    pub request_id: String,
+    /// Session the request belongs to.
+    pub session_id: String,
+    /// The raw prompt/payload as submitted to the pipeline stage.
+    pub request_payload: Value,
+    /// The model response, if available (only set for post-inference hooks).
+    pub response_payload: Option<Value>,
+    /// Performance / cost metrics for this request.
+    pub metrics: HookMetrics,
+    /// Arbitrary metadata forwarded from the original [`crate::PromptRequest`].
+    pub metadata: HashMap<String, String>,
+}
+
+impl PluginContext {
+    /// Build a pre-inference context (no response yet).
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
+    #[must_use]
+    pub fn pre_inference(
+        request_id: impl Into<String>,
+        session_id: impl Into<String>,
+        request_payload: Value,
+        metadata: HashMap<String, String>,
+        elapsed_ms: u64,
+    ) -> Self {
+        Self {
+            request_id: request_id.into(),
+            session_id: session_id.into(),
+            request_payload,
+            response_payload: None,
+            metrics: HookMetrics {
+                elapsed_ms,
+                prompt_tokens: None,
+                completion_tokens: None,
+                estimated_cost_usd: 0.0,
+            },
+            metadata,
+        }
+    }
+
+    /// Build a post-inference context (response is available).
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
+    #[must_use]
+    pub fn post_inference(
+        request_id: impl Into<String>,
+        session_id: impl Into<String>,
+        request_payload: Value,
+        response_payload: Value,
+        metadata: HashMap<String, String>,
+        elapsed_ms: u64,
+        prompt_tokens: Option<u64>,
+        completion_tokens: Option<u64>,
+        estimated_cost_usd: f64,
+    ) -> Self {
+        Self {
+            request_id: request_id.into(),
+            session_id: session_id.into(),
+            request_payload,
+            response_payload: Some(response_payload),
+            metrics: HookMetrics {
+                elapsed_ms,
+                prompt_tokens,
+                completion_tokens,
+                estimated_cost_usd,
+            },
+            metadata,
+        }
+    }
+
+    /// Convert this context into a [`PluginInput`] for use with `PluginChain::run`.
+    ///
+    /// The `request_payload` becomes the chain `payload`; `response_payload`
+    /// (if present) is injected into `metadata` under the key `"response_payload_json"`.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
+    #[must_use]
+    pub fn into_plugin_input(self) -> PluginInput {
+        let mut metadata = self.metadata;
+        if let Some(resp) = self.response_payload {
+            metadata.insert(
+                "response_payload_json".to_string(),
+                resp.to_string(),
+            );
+        }
+        metadata.insert(
+            "elapsed_ms".to_string(),
+            self.metrics.elapsed_ms.to_string(),
+        );
+        if let Some(pt) = self.metrics.prompt_tokens {
+            metadata.insert("prompt_tokens".to_string(), pt.to_string());
+        }
+        if let Some(ct) = self.metrics.completion_tokens {
+            metadata.insert("completion_tokens".to_string(), ct.to_string());
+        }
+        PluginInput {
+            request_id: self.request_id,
+            session_id: self.session_id,
+            payload: self.request_payload,
+            metadata,
+        }
+    }
+}
+
+// ============================================================================
+// InferenceHook trait — simpler API for pre/post hooks
+// ============================================================================
+
+/// A focused hook trait for code that only needs to intercept inference
+/// before or after it happens, without needing the full [`StagePlugin`]
+/// position system.
+///
+/// Hooks are registered via [`PluginRegistry::register_pre_hook`] and
+/// [`PluginRegistry::register_post_hook`].  They are called with a rich
+/// [`PluginContext`] rather than the generic [`PluginInput`].
+#[async_trait]
+pub trait InferenceHook: Send + Sync {
+    /// Human-readable name for logging/metrics.
+    fn name(&self) -> &'static str;
+
+    /// Called with the full inference context.  Return `Ok(())` to continue;
+    /// return `Err(msg)` to abort the pipeline and return the error to the caller.
+    ///
+    /// # Errors
+    ///
+    /// Return an `Err` string to signal that the hook detected an unrecoverable
+    /// problem (e.g., budget exceeded, PII detected).
+    async fn call(&self, ctx: &PluginContext) -> Result<(), String>;
+}
+
+// ============================================================================
+// PluginRegistry — extended with pre/post hook support
 // ============================================================================
 
 /// Global runtime registry for [`StagePlugin`] instances.
@@ -485,6 +650,10 @@ impl PluginChain {
 #[derive(Default)]
 pub struct PluginRegistry {
     chains: HashMap<PluginPositionKey, PluginChain>,
+    /// Pre-inference hooks, executed in registration order before inference.
+    pre_hooks: Vec<(String, Arc<dyn InferenceHook>)>,
+    /// Post-inference hooks, executed in registration order after inference.
+    post_hooks: Vec<(String, Arc<dyn InferenceHook>)>,
 }
 
 /// Stable key type used as the `HashMap` key for [`PluginPosition`].
@@ -520,6 +689,124 @@ impl PluginRegistry {
             .entry(PluginPositionKey(position))
             .or_insert_with(|| PluginChain::new(position));
         chain.push(plugin);
+    }
+
+    /// Register a pre-inference hook by name.
+    ///
+    /// Pre-hooks are called in registration order immediately before inference.
+    /// If any hook returns `Err`, the pipeline aborts with that error message.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
+    pub fn register_pre_hook(&mut self, hook: Arc<dyn InferenceHook>) {
+        let name = hook.name().to_string();
+        debug!(hook = %name, "registered pre-inference hook");
+        self.pre_hooks.push((name, hook));
+    }
+
+    /// Register a post-inference hook by name.
+    ///
+    /// Post-hooks are called in registration order immediately after a
+    /// successful inference.  Errors are logged but do not abort the response.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
+    pub fn register_post_hook(&mut self, hook: Arc<dyn InferenceHook>) {
+        let name = hook.name().to_string();
+        debug!(hook = %name, "registered post-inference hook");
+        self.post_hooks.push((name, hook));
+    }
+
+    /// Unregister a plugin by name from the pre-hook list.
+    ///
+    /// Removes the first matching hook. No-op if the name is not found.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
+    pub fn unregister_pre_hook(&mut self, name: &str) {
+        self.pre_hooks.retain(|(n, _)| n != name);
+    }
+
+    /// Unregister a plugin by name from the post-hook list.
+    ///
+    /// Removes the first matching hook. No-op if the name is not found.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
+    pub fn unregister_post_hook(&mut self, name: &str) {
+        self.post_hooks.retain(|(n, _)| n != name);
+    }
+
+    /// Run all registered pre-inference hooks in order.
+    ///
+    /// Returns `Ok(())` if all hooks pass.  Returns `Err(message)` at the
+    /// first hook that signals a failure; remaining hooks are not called.
+    ///
+    /// Each hook is run with a per-hook timeout of `hook_timeout` to prevent
+    /// a slow hook from blocking the pipeline indefinitely.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error message from the first failing hook.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
+    pub async fn run_pre_hooks(
+        &self,
+        ctx: &PluginContext,
+        hook_timeout: Duration,
+    ) -> Result<(), String> {
+        for (name, hook) in &self.pre_hooks {
+            let result = tokio::time::timeout(hook_timeout, hook.call(ctx)).await;
+            match result {
+                Ok(Ok(())) => {
+                    debug!(hook = %name, "pre-inference hook passed");
+                }
+                Ok(Err(msg)) => {
+                    warn!(hook = %name, error = %msg, "pre-inference hook rejected request");
+                    return Err(msg);
+                }
+                Err(_elapsed) => {
+                    let msg = format!("pre-inference hook '{name}' timed out");
+                    warn!(hook = %name, "pre-inference hook timed out");
+                    return Err(msg);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Run all registered post-inference hooks in order.
+    ///
+    /// Unlike pre-hooks, post-hook errors are logged but do not abort the
+    /// caller — the response has already been produced.  Each hook still
+    /// receives the full [`PluginContext`] (including `response_payload`).
+    ///
+    /// Each hook is run with a per-hook timeout of `hook_timeout`.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
+    pub async fn run_post_hooks(&self, ctx: &PluginContext, hook_timeout: Duration) {
+        for (name, hook) in &self.post_hooks {
+            let result = tokio::time::timeout(hook_timeout, hook.call(ctx)).await;
+            match result {
+                Ok(Ok(())) => {
+                    debug!(hook = %name, "post-inference hook completed");
+                }
+                Ok(Err(msg)) => {
+                    warn!(hook = %name, error = %msg, "post-inference hook reported error (non-fatal)");
+                }
+                Err(_elapsed) => {
+                    warn!(hook = %name, "post-inference hook timed out (non-fatal)");
+                }
+            }
+        }
     }
 
     /// Remove all plugins registered at `position`.
@@ -595,6 +882,24 @@ impl PluginRegistry {
             .collect();
         pairs.sort_by(|a, b| a.0.cmp(&b.0));
         pairs
+    }
+
+    /// Return the number of registered pre-inference hooks.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
+    pub fn pre_hook_count(&self) -> usize {
+        self.pre_hooks.len()
+    }
+
+    /// Return the number of registered post-inference hooks.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
+    pub fn post_hook_count(&self) -> usize {
+        self.post_hooks.len()
     }
 }
 

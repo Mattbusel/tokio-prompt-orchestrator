@@ -72,8 +72,12 @@
 //! }
 //! ```
 
+pub mod budget;
 pub mod context;
 
+pub use budget::{
+    BudgetError, BudgetOutcome, SessionBudget, SessionBudgetSnapshot, SessionLimits,
+};
 pub use context::{
     ConversationTurn, SessionAction, SessionConfig, SessionContext, SessionStats, TurnRole,
 };
