@@ -168,6 +168,8 @@ pub mod observability;
 pub mod retry_policy;
 pub mod worker_pool;
 pub mod model_selector;
+pub mod intent_classifier;
+pub mod response_validator;
 
 // Re-exports
 pub use cache::{CacheConfig, CacheEntry, CacheStats, PromptCache};
