@@ -95,6 +95,8 @@ pub mod cascade;
 pub mod compression;
 pub mod config;
 pub mod conversation;
+pub mod conversation_state;
+pub mod eval_harness;
 pub mod coordination;
 pub mod failover;
 pub mod provider_health;
