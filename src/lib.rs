@@ -85,8 +85,10 @@
 use std::collections::HashMap;
 use thiserror::Error;
 
+pub mod ab_test;
 pub mod adaptive_pool;
 pub mod cascade;
+pub mod compression;
 pub mod config;
 pub mod conversation;
 pub mod coordination;
