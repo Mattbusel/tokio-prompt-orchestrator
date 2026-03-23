@@ -1,653 +1,359 @@
-//! # Token Bucket Rate Limiter
+//! Token-bucket and sliding-window rate limiter per model.
 //!
-//! Per-model token bucket rate limiter with configurable capacity and refill
-//! rate.  Supports both non-blocking (`try_acquire`) and async waiting
-//! (`acquire`) modes.
-//!
-//! ## Design
-//!
-//! Each model gets its own [`TokenBucket`].  Tokens are refilled continuously
-//! based on wall-clock time elapsed since the last check.  The bucket is
-//! represented by a `f64` count of available tokens, which is clamped to
-//! `[0.0, burst_capacity]` on every access.
-//!
-//! The [`RateLimiter`] holds all per-model buckets in a `HashMap` behind an
-//! `Arc<Mutex<...>>` so it can be shared across async tasks.
-//!
-//! ## Example
-//!
-//! ```
-//! use tokio_prompt_orchestrator::rate_limiter::{BucketConfig, RateLimiter};
-//!
-//! let configs = vec![BucketConfig {
-//!     model_id: "gpt-4o".to_string(),
-//!     requests_per_second: 10.0,
-//!     burst_capacity: 20,
-//! }];
-//! let limiter = RateLimiter::new(configs);
-//! assert!(limiter.try_acquire("gpt-4o").is_ok());
-//! ```
+//! Provides [`RateLimiterRegistry`] which holds a [`ModelRateLimiter`] for
+//! each registered model.  Each model limiter combines a [`TokenBucket`]
+//! (burst-capable refilling bucket) with a [`SlidingWindow`] (rolling
+//! request-count check) so that both instantaneous bursts and sustained
+//! throughput are controlled.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::{Mutex, RwLock};
+use std::time::Instant;
 
 use thiserror::Error;
 
-// ── Config ────────────────────────────────────────────────────────────────────
+// ── RateLimitError ────────────────────────────────────────────────────────────
 
-/// Per-model token bucket configuration.
-#[derive(Debug, Clone)]
-pub struct BucketConfig {
-    /// Model identifier this bucket is associated with.
-    pub model_id: String,
-    /// Steady-state refill rate in tokens per second.
-    pub requests_per_second: f64,
-    /// Maximum number of tokens the bucket can hold (burst allowance).
-    pub burst_capacity: u32,
-}
-
-// ── Error ─────────────────────────────────────────────────────────────────────
-
-/// Errors returned by [`RateLimiter::try_acquire`].
-#[derive(Error, Debug, Clone, PartialEq, Eq)]
+/// Errors returned when a rate-limit check fails.
+#[derive(Debug, Error)]
 pub enum RateLimitError {
-    /// No bucket is configured for the requested model.
-    #[error("unknown model: no rate-limit bucket configured for '{0}'")]
-    UnknownModel(String),
-    /// Bucket has no tokens available right now.
-    #[error("rate limit exceeded for model (retry after {wait_ms} ms)")]
-    BucketEmpty {
-        /// Approximate milliseconds until at least one token is available.
-        wait_ms: u64,
+    /// The token bucket has been exhausted; caller should retry after the
+    /// indicated delay.
+    #[error("token bucket exhausted; retry after {retry_after_ms} ms")]
+    TokenBucketExhausted {
+        /// Approximate milliseconds until enough tokens are available.
+        retry_after_ms: u64,
     },
+    /// The sliding-window request count has been exceeded; caller should wait
+    /// until the window resets.
+    #[error("sliding window limit exceeded; window resets in {reset_at_ms} ms")]
+    WindowLimitExceeded {
+        /// Milliseconds until the oldest slot falls out of the window.
+        reset_at_ms: u64,
+    },
+    /// No limiter has been registered for the given model.
+    #[error("no rate limiter registered for model '{0}'")]
+    UnknownModel(String),
 }
 
-// ── Per-model bucket ──────────────────────────────────────────────────────────
+// ── RateLimiterConfig ─────────────────────────────────────────────────────────
 
-struct TokenBucket {
-    /// Current number of available tokens.
-    tokens: f64,
-    /// Refill rate in tokens per second.
-    refill_rate: f64,
-    /// Maximum tokens the bucket can hold.
-    capacity: f64,
-    /// Last time tokens were refilled.
-    last_refill: Instant,
-    /// Cumulative requests that were allowed.
-    requests_allowed: u64,
-    /// Cumulative requests that were denied (bucket empty).
-    requests_denied: u64,
+/// Configuration used when registering a model with the [`RateLimiterRegistry`].
+#[derive(Debug, Clone)]
+pub struct RateLimiterConfig {
+    /// Maximum requests allowed per minute in the sliding window.
+    pub requests_per_minute: u32,
+    /// Maximum tokens allowed per minute in the token bucket.
+    pub tokens_per_minute: u64,
+    /// Burst multiplier applied to `tokens_per_minute` to derive bucket
+    /// capacity (e.g. `2.0` allows a burst up to 2× the per-minute quota).
+    pub burst_multiplier: f64,
+}
+
+// ── TokenBucket ───────────────────────────────────────────────────────────────
+
+/// Refilling token bucket.
+///
+/// Tokens are stored as a signed 64-bit integer (scaled by 1000 to allow
+/// sub-token precision) and refilled lazily on every call to
+/// [`TokenBucket::try_consume`].
+pub struct TokenBucket {
+    /// Maximum tokens the bucket can hold (scaled ×1000).
+    capacity: u64,
+    /// Current token count (scaled ×1000); stored as `i64` for atomic CAS.
+    tokens: AtomicI64,
+    /// Tokens added per millisecond (scaled ×1000).
+    refill_rate: u64,
+    /// Wall-clock time of the last refill.
+    last_refill: Mutex<Instant>,
 }
 
 impl TokenBucket {
-    fn new(config: &BucketConfig) -> Self {
-        let capacity = config.burst_capacity as f64;
+    /// Create a new bucket with the given capacity (in whole tokens) and a
+    /// per-minute refill rate.  The bucket starts full.
+    pub fn new(capacity_tokens: u64, tokens_per_minute: u64) -> Self {
+        let capacity_scaled = capacity_tokens.saturating_mul(1_000);
+        // refill_rate in (tokens * 1000) per ms
+        let refill_rate = tokens_per_minute.saturating_mul(1_000) / 60_000;
         Self {
-            tokens: capacity, // start full
-            refill_rate: config.requests_per_second,
-            capacity,
-            last_refill: Instant::now(),
-            requests_allowed: 0,
-            requests_denied: 0,
+            capacity: capacity_scaled,
+            tokens: AtomicI64::new(capacity_scaled as i64),
+            refill_rate,
+            last_refill: Mutex::new(Instant::now()),
         }
     }
 
-    /// Refill tokens based on elapsed time.
-    fn refill(&mut self) {
-        let now = Instant::now();
-        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
-        self.tokens = (self.tokens + elapsed * self.refill_rate).min(self.capacity);
-        self.last_refill = now;
-    }
-
-    /// Non-blocking try to consume one token.
-    fn try_consume(&mut self) -> Result<(), RateLimitError> {
-        self.refill();
-        if self.tokens >= 1.0 {
-            self.tokens -= 1.0;
-            self.requests_allowed += 1;
-            Ok(())
-        } else {
-            // Calculate how long until a token becomes available.
-            let wait_secs = (1.0 - self.tokens) / self.refill_rate;
-            let wait_ms = (wait_secs * 1000.0).ceil() as u64;
-            self.requests_denied += 1;
-            Err(RateLimitError::BucketEmpty { wait_ms })
-        }
-    }
-
-    /// How many milliseconds until a token is guaranteed to be available.
-    fn wait_ms_for_token(&mut self) -> u64 {
-        self.refill();
-        if self.tokens >= 1.0 {
-            0
-        } else {
-            let wait_secs = (1.0 - self.tokens) / self.refill_rate;
-            (wait_secs * 1000.0).ceil() as u64
-        }
-    }
-}
-
-// ── Stats ─────────────────────────────────────────────────────────────────────
-
-/// Per-model statistics snapshot.
-#[derive(Debug, Clone)]
-pub struct ModelRateLimiterStats {
-    /// Model identifier.
-    pub model_id: String,
-    /// Requests that were allowed since the limiter was created.
-    pub requests_allowed: u64,
-    /// Requests that were denied (bucket empty) since the limiter was created.
-    pub requests_denied: u64,
-    /// Current token count (may be fractional).
-    pub current_tokens: f64,
-    /// Bucket capacity.
-    pub capacity: f64,
-}
-
-/// Aggregate statistics for the whole [`RateLimiter`].
-#[derive(Debug, Clone, Default)]
-pub struct RateLimiterStats {
-    /// Per-model statistics, one entry per configured model.
-    pub per_model: Vec<ModelRateLimiterStats>,
-}
-
-// ── RateLimiter ───────────────────────────────────────────────────────────────
-
-/// Shared, per-model token bucket rate limiter.
-///
-/// Clone-cheap: all clones share the same underlying buckets.
-#[derive(Clone)]
-pub struct RateLimiter {
-    buckets: Arc<Mutex<HashMap<String, TokenBucket>>>,
-}
-
-impl RateLimiter {
-    /// Create a new `RateLimiter` with one bucket per entry in `configs`.
+    /// Attempt to consume `n` tokens.
     ///
-    /// Each bucket starts full (at `burst_capacity` tokens).
-    pub fn new(configs: Vec<BucketConfig>) -> Self {
-        let mut map = HashMap::new();
-        for cfg in configs {
-            map.insert(cfg.model_id.clone(), TokenBucket::new(&cfg));
-        }
-        Self {
-            buckets: Arc::new(Mutex::new(map)),
-        }
-    }
-
-    /// Non-blocking: attempt to consume one token for `model_id`.
-    ///
-    /// # Errors
-    ///
-    /// - [`RateLimitError::UnknownModel`] — no bucket configured for this model.
-    /// - [`RateLimitError::BucketEmpty`] — bucket has no tokens right now;
-    ///   includes the estimated wait in milliseconds.
-    pub fn try_acquire(&self, model_id: &str) -> Result<(), RateLimitError> {
-        let mut buckets = self
-            .buckets
-            .lock()
-            .map_err(|_| RateLimitError::UnknownModel(model_id.to_owned()))?;
-        match buckets.get_mut(model_id) {
-            None => Err(RateLimitError::UnknownModel(model_id.to_owned())),
-            Some(bucket) => bucket.try_consume(),
-        }
-    }
-
-    /// Async: wait until a token is available for `model_id`, then consume it.
-    ///
-    /// Uses `tokio::time::sleep` to avoid spinning.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`RateLimitError::UnknownModel`] if no bucket is configured for
-    /// `model_id`.  All other errors are retried internally until a token
-    /// becomes available.
-    pub async fn acquire(&self, model_id: &str) -> Result<(), RateLimitError> {
-        loop {
-            // Calculate the wait inside a short-lived lock.
-            let wait_ms = {
-                let mut buckets = self
-                    .buckets
-                    .lock()
-                    .map_err(|_| RateLimitError::UnknownModel(model_id.to_owned()))?;
-                match buckets.get_mut(model_id) {
-                    None => return Err(RateLimitError::UnknownModel(model_id.to_owned())),
-                    Some(bucket) => bucket.wait_ms_for_token(),
-                }
-            };
-
-            if wait_ms > 0 {
-                tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+    /// Refills the bucket based on elapsed time first, then deducts `n`.
+    /// Returns `true` if the tokens were available and consumed, `false`
+    /// otherwise (bucket remains unchanged on failure).
+    pub fn try_consume(&self, n: u64) -> bool {
+        // Refill
+        let elapsed_ms = {
+            let mut guard = self.last_refill.lock().unwrap();
+            let now = Instant::now();
+            let ms = now.duration_since(*guard).as_millis() as u64;
+            if ms > 0 {
+                *guard = now;
             }
-
-            // Try again after sleeping.
-            match self.try_acquire(model_id) {
-                Ok(()) => return Ok(()),
-                Err(RateLimitError::BucketEmpty { .. }) => continue,
-                Err(e) => return Err(e),
-            }
-        }
-    }
-
-    /// Return a statistics snapshot for all configured models.
-    pub fn stats(&self) -> RateLimiterStats {
-        let mut buckets = match self.buckets.lock() {
-            Ok(g) => g,
-            Err(_) => return RateLimiterStats::default(),
+            ms
         };
-        let per_model = buckets
-            .iter_mut()
-            .map(|(model_id, bucket)| {
-                bucket.refill();
-                ModelRateLimiterStats {
-                    model_id: model_id.clone(),
-                    requests_allowed: bucket.requests_allowed,
-                    requests_denied: bucket.requests_denied,
-                    current_tokens: bucket.tokens,
-                    capacity: bucket.capacity,
+
+        let add = (elapsed_ms.saturating_mul(self.refill_rate)) as i64;
+        if add > 0 {
+            let cap = self.capacity as i64;
+            // Clamp to capacity
+            let _ = self.tokens.fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                Some((cur + add).min(cap))
+            });
+        }
+
+        // Try to consume
+        let needed = (n.saturating_mul(1_000)) as i64;
+        self.tokens
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                if cur >= needed {
+                    Some(cur - needed)
+                } else {
+                    None
                 }
             })
-            .collect();
-        RateLimiterStats { per_model }
+            .is_ok()
+    }
+
+    /// Estimated milliseconds until `n` tokens are available.
+    pub fn retry_after_ms(&self, n: u64) -> u64 {
+        let cur = self.tokens.load(Ordering::Acquire);
+        let needed = (n.saturating_mul(1_000)) as i64;
+        if cur >= needed {
+            return 0;
+        }
+        let deficit = (needed - cur) as u64;
+        if self.refill_rate == 0 {
+            return u64::MAX;
+        }
+        deficit / self.refill_rate + 1
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+// ── SlidingWindow ─────────────────────────────────────────────────────────────
+
+/// Rolling-window request counter.
+///
+/// Tracks `(timestamp, token_count)` slots and enforces a maximum request
+/// count over the configured window.
+pub struct SlidingWindow {
+    /// Window width in milliseconds.
+    window_ms: u64,
+    /// Slots of `(arrival_instant, token_count)`.
+    slots: VecDeque<(Instant, u64)>,
+    /// Maximum number of requests allowed within the window.
+    max_count: u32,
+}
+
+impl SlidingWindow {
+    /// Create a new sliding window.
+    pub fn new(window_ms: u64, max_count: u32) -> Self {
+        Self {
+            window_ms,
+            slots: VecDeque::new(),
+            max_count,
+        }
+    }
+
+    /// Evict slots that have fallen outside the current window.
+    fn evict(&mut self) {
+        let now = Instant::now();
+        let cutoff_ms = self.window_ms;
+        while let Some(&(ts, _)) = self.slots.front() {
+            if now.duration_since(ts).as_millis() as u64 >= cutoff_ms {
+                self.slots.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Record a new request with the given token count.
+    pub fn record(&mut self, tokens: u64) {
+        self.evict();
+        self.slots.push_back((Instant::now(), tokens));
+    }
+
+    /// Returns `true` if a new request can be admitted (count would not
+    /// exceed `max_count` after adding it).
+    pub fn check(&mut self) -> bool {
+        self.evict();
+        (self.slots.len() as u32) < self.max_count
+    }
+
+    /// Milliseconds until the oldest slot expires (0 if window is empty).
+    pub fn reset_at_ms(&mut self) -> u64 {
+        self.evict();
+        match self.slots.front() {
+            None => 0,
+            Some(&(ts, _)) => {
+                let elapsed = Instant::now().duration_since(ts).as_millis() as u64;
+                self.window_ms.saturating_sub(elapsed) + 1
+            }
+        }
+    }
+}
+
+// ── ModelRateLimiter ──────────────────────────────────────────────────────────
+
+/// Combined rate limiter for a single model.
+///
+/// Checks both the token bucket and the sliding window on every call to
+/// [`ModelRateLimiter::check_and_consume`].
+pub struct ModelRateLimiter {
+    pub(crate) token_bucket: TokenBucket,
+    pub(crate) sliding_window: Mutex<SlidingWindow>,
+    /// Model identifier.
+    pub model_id: String,
+    /// Cumulative count of requests that were throttled (either limiter).
+    pub total_throttled: AtomicU64,
+}
+
+impl ModelRateLimiter {
+    /// Create a limiter from a [`RateLimiterConfig`].
+    pub fn new(model_id: String, config: &RateLimiterConfig) -> Self {
+        let capacity = (config.tokens_per_minute as f64 * config.burst_multiplier) as u64;
+        Self {
+            token_bucket: TokenBucket::new(capacity, config.tokens_per_minute),
+            sliding_window: Mutex::new(SlidingWindow::new(60_000, config.requests_per_minute)),
+            model_id,
+            total_throttled: AtomicU64::new(0),
+        }
+    }
+
+    /// Check whether a request consuming `tokens` may proceed.
+    ///
+    /// On success, the tokens are deducted from the bucket and the request is
+    /// recorded in the sliding window.  On failure, `total_throttled` is
+    /// incremented and the appropriate [`RateLimitError`] is returned.
+    pub fn check_and_consume(&self, tokens: u64) -> Result<(), RateLimitError> {
+        // Check sliding window first (cheaper)
+        {
+            let mut win = self.sliding_window.lock().unwrap();
+            if !win.check() {
+                let reset = win.reset_at_ms();
+                self.total_throttled.fetch_add(1, Ordering::Relaxed);
+                return Err(RateLimitError::WindowLimitExceeded { reset_at_ms: reset });
+            }
+        }
+
+        // Check token bucket
+        if !self.token_bucket.try_consume(tokens) {
+            let retry = self.token_bucket.retry_after_ms(tokens);
+            self.total_throttled.fetch_add(1, Ordering::Relaxed);
+            return Err(RateLimitError::TokenBucketExhausted {
+                retry_after_ms: retry,
+            });
+        }
+
+        // Record in sliding window
+        {
+            let mut win = self.sliding_window.lock().unwrap();
+            win.record(tokens);
+        }
+
+        Ok(())
+    }
+}
+
+// ── RateLimiterRegistry ───────────────────────────────────────────────────────
+
+/// Registry that holds one [`ModelRateLimiter`] per model.
+#[derive(Default)]
+pub struct RateLimiterRegistry {
+    limiters: RwLock<HashMap<String, ModelRateLimiter>>,
+}
+
+impl RateLimiterRegistry {
+    /// Create an empty registry.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a model with the given configuration.
+    ///
+    /// Overwrites any previous limiter for the same `model_id`.
+    pub fn register(&self, model_id: String, config: RateLimiterConfig) {
+        let limiter = ModelRateLimiter::new(model_id.clone(), &config);
+        self.limiters.write().unwrap().insert(model_id, limiter);
+    }
+
+    /// Check and consume `tokens` for the given model.
+    ///
+    /// Returns [`RateLimitError::UnknownModel`] if the model has not been
+    /// registered.
+    pub fn check(&self, model_id: &str, tokens: u64) -> Result<(), RateLimitError> {
+        let guard = self.limiters.read().unwrap();
+        match guard.get(model_id) {
+            Some(lim) => lim.check_and_consume(tokens),
+            None => Err(RateLimitError::UnknownModel(model_id.to_owned())),
+        }
+    }
+
+    /// Return `(model_id, total_throttled)` pairs for all registered models.
+    pub fn stats(&self) -> Vec<(String, u64)> {
+        self.limiters
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(id, lim)| (id.clone(), lim.total_throttled.load(Ordering::Relaxed)))
+            .collect()
+    }
+}
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
-    fn make_limiter(rps: f64, burst: u32) -> RateLimiter {
-        RateLimiter::new(vec![BucketConfig {
-            model_id: "test-model".to_string(),
-            requests_per_second: rps,
-            burst_capacity: burst,
-        }])
+    #[test]
+    fn token_bucket_consume_and_exhaust() {
+        let bucket = TokenBucket::new(10, 600); // 10 tokens capacity, 600/min
+        assert!(bucket.try_consume(5));
+        assert!(bucket.try_consume(5));
+        assert!(!bucket.try_consume(1)); // exhausted
     }
 
     #[test]
-    fn test_try_acquire_success() {
-        let rl = make_limiter(10.0, 5);
-        assert!(rl.try_acquire("test-model").is_ok());
+    fn sliding_window_count_limit() {
+        let mut win = SlidingWindow::new(60_000, 3);
+        assert!(win.check());
+        win.record(1);
+        win.record(1);
+        win.record(1);
+        assert!(!win.check()); // 3 requests recorded, limit reached
     }
 
     #[test]
-    fn test_try_acquire_unknown_model() {
-        let rl = make_limiter(10.0, 5);
-        let err = rl.try_acquire("unknown").unwrap_err();
-        assert!(matches!(err, RateLimitError::UnknownModel(_)));
+    fn registry_unknown_model() {
+        let reg = RateLimiterRegistry::new();
+        assert!(matches!(
+            reg.check("unknown", 1),
+            Err(RateLimitError::UnknownModel(_))
+        ));
     }
 
     #[test]
-    fn test_bucket_empties_after_burst() {
-        let rl = make_limiter(1.0, 3);
-        for _ in 0..3 {
-            rl.try_acquire("test-model").unwrap();
-        }
-        let err = rl.try_acquire("test-model").unwrap_err();
-        assert!(matches!(err, RateLimitError::BucketEmpty { .. }));
-    }
-
-    #[test]
-    fn test_bucket_empty_returns_wait_ms() {
-        let rl = make_limiter(1.0, 1);
-        rl.try_acquire("test-model").unwrap();
-        match rl.try_acquire("test-model").unwrap_err() {
-            RateLimitError::BucketEmpty { wait_ms } => assert!(wait_ms > 0),
-            other => panic!("unexpected error: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_multiple_models() {
-        let rl = RateLimiter::new(vec![
-            BucketConfig { model_id: "m1".to_string(), requests_per_second: 10.0, burst_capacity: 5 },
-            BucketConfig { model_id: "m2".to_string(), requests_per_second: 1.0, burst_capacity: 1 },
-        ]);
-        assert!(rl.try_acquire("m1").is_ok());
-        assert!(rl.try_acquire("m2").is_ok());
-        // m2 bucket is now empty
-        assert!(rl.try_acquire("m2").is_err());
-        // m1 bucket still has tokens
-        assert!(rl.try_acquire("m1").is_ok());
-    }
-
-    #[test]
-    fn test_stats_allowed_increments() {
-        let rl = make_limiter(10.0, 5);
-        rl.try_acquire("test-model").unwrap();
-        rl.try_acquire("test-model").unwrap();
-        let stats = rl.stats();
-        let model_stats = stats.per_model.iter().find(|s| s.model_id == "test-model").unwrap();
-        assert_eq!(model_stats.requests_allowed, 2);
-        assert_eq!(model_stats.requests_denied, 0);
-    }
-
-    #[test]
-    fn test_stats_denied_increments() {
-        let rl = make_limiter(1.0, 1);
-        rl.try_acquire("test-model").unwrap();
-        let _ = rl.try_acquire("test-model"); // denied
-        let stats = rl.stats();
-        let model_stats = stats.per_model.iter().find(|s| s.model_id == "test-model").unwrap();
-        assert_eq!(model_stats.requests_denied, 1);
-    }
-
-    #[test]
-    fn test_stats_current_tokens_depletes() {
-        let rl = make_limiter(1.0, 5);
-        rl.try_acquire("test-model").unwrap();
-        let stats = rl.stats();
-        let ms = stats.per_model.iter().find(|s| s.model_id == "test-model").unwrap();
-        assert!(ms.current_tokens < 5.0);
-    }
-
-    #[test]
-    fn test_refill_over_time() {
-        let rl = make_limiter(1000.0, 1); // 1000 tokens/sec => 1 token/ms
-        rl.try_acquire("test-model").unwrap(); // empty bucket
-        std::thread::sleep(Duration::from_millis(10)); // wait ~10ms => ~10 tokens
-        // Should succeed now.
-        assert!(rl.try_acquire("test-model").is_ok());
-    }
-
-    #[test]
-    fn test_burst_capacity_respected() {
-        let rl = make_limiter(1000.0, 3);
-        // Drain all 3 tokens.
-        for _ in 0..3 {
-            rl.try_acquire("test-model").unwrap();
-        }
-        let stats = rl.stats();
-        let ms = stats.per_model.iter().find(|s| s.model_id == "test-model").unwrap();
-        assert!(ms.current_tokens < 1.0);
-    }
-
-    #[test]
-    fn test_clone_shares_buckets() {
-        let rl = make_limiter(10.0, 5);
-        let rl2 = rl.clone();
-        rl.try_acquire("test-model").unwrap();
-        let stats = rl2.stats();
-        let ms = stats.per_model.iter().find(|s| s.model_id == "test-model").unwrap();
-        assert_eq!(ms.requests_allowed, 1);
-    }
-
-    #[test]
-    fn test_error_display_unknown_model() {
-        let e = RateLimitError::UnknownModel("bad-model".to_string());
-        assert!(e.to_string().contains("bad-model"));
-    }
-
-    #[test]
-    fn test_error_display_bucket_empty() {
-        let e = RateLimitError::BucketEmpty { wait_ms: 42 };
-        assert!(e.to_string().contains("42"));
-    }
-
-    #[test]
-    fn test_stats_capacity_field() {
-        let rl = make_limiter(5.0, 10);
-        let stats = rl.stats();
-        let ms = stats.per_model.iter().find(|s| s.model_id == "test-model").unwrap();
-        assert_eq!(ms.capacity, 10.0);
-    }
-
-    #[test]
-    fn test_bucket_starts_full() {
-        let rl = make_limiter(1.0, 5);
-        let stats = rl.stats();
-        let ms = stats.per_model.iter().find(|s| s.model_id == "test-model").unwrap();
-        assert!((ms.current_tokens - 5.0).abs() < 0.1);
-    }
-
-    #[tokio::test]
-    async fn test_acquire_async_succeeds() {
-        let rl = make_limiter(100.0, 5);
-        rl.acquire("test-model").await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_acquire_async_unknown_model() {
-        let rl = make_limiter(1.0, 1);
-        let err = rl.acquire("no-such-model").await.unwrap_err();
-        assert!(matches!(err, RateLimitError::UnknownModel(_)));
-    }
-
-    #[tokio::test]
-    async fn test_acquire_waits_for_refill() {
-        // 1000 tokens/sec, burst=1 → after drain, 1ms to refill.
-        let rl = make_limiter(1000.0, 1);
-        rl.try_acquire("test-model").unwrap(); // drain
-        // acquire should wait and then succeed within a short time.
-        tokio::time::timeout(Duration::from_millis(100), rl.acquire("test-model"))
-            .await
-            .expect("timeout waiting for acquire")
-            .expect("acquire should succeed");
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Async DashMap-based rate limiter
-// ═══════════════════════════════════════════════════════════════════════════════
-
-use dashmap::DashMap;
-use std::sync::Arc as StdArc;
-
-// ── AsyncRateLimitError ───────────────────────────────────────────────────────
-
-/// Errors returned by [`AsyncRateLimiter::check_and_consume`].
-#[derive(thiserror::Error, Debug, Clone)]
-pub enum AsyncRateLimitError {
-    /// No bucket is registered for the requested model.
-    #[error("model '{0}' is not registered in the rate limiter")]
-    ModelNotRegistered(String),
-    /// The bucket does not have enough tokens for the requested amount.
-    #[error("rate limit exceeded for model '{model}': only {available:.2} tokens available")]
-    RateLimitExceeded {
-        /// The model whose limit was exceeded.
-        model: String,
-        /// How many tokens were available when the request was denied.
-        available: f64,
-    },
-}
-
-// ── TokenBucketAsync ──────────────────────────────────────────────────────────
-
-/// A single token bucket used by [`AsyncRateLimiter`].
-///
-/// Tokens are refilled continuously based on elapsed wall-clock time.
-pub struct TokenBucketAsync {
-    /// Maximum number of tokens the bucket can hold.
-    pub capacity: f64,
-    /// Current available tokens.
-    pub tokens: f64,
-    /// Refill rate in tokens per second.
-    pub refill_rate: f64,
-    /// Last refill instant.
-    pub last_refill: Instant,
-}
-
-impl TokenBucketAsync {
-    /// Create a new bucket starting full.
-    pub fn new(capacity: f64, refill_rate: f64) -> Self {
-        Self {
-            capacity,
-            tokens: capacity,
-            refill_rate,
-            last_refill: Instant::now(),
-        }
-    }
-
-    /// Refill tokens based on elapsed time, then attempt to consume `tokens`.
-    ///
-    /// Returns `true` if the tokens were consumed, `false` if the bucket has
-    /// insufficient tokens.
-    pub fn try_consume(&mut self, tokens: f64) -> bool {
-        let now = Instant::now();
-        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
-        self.tokens = (self.tokens + elapsed * self.refill_rate).min(self.capacity);
-        self.last_refill = now;
-
-        if self.tokens >= tokens {
-            self.tokens -= tokens;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Returns the number of tokens currently available (after refill).
-    pub fn available(&mut self) -> f64 {
-        let now = Instant::now();
-        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
-        self.tokens = (self.tokens + elapsed * self.refill_rate).min(self.capacity);
-        self.last_refill = now;
-        self.tokens
-    }
-}
-
-// ── AsyncRateLimiter ──────────────────────────────────────────────────────────
-
-/// Async, DashMap-backed per-model rate limiter.
-///
-/// Each model has its own [`TokenBucketAsync`] behind a `tokio::sync::Mutex`
-/// so that individual model buckets can be locked without blocking other models.
-///
-/// Clone-cheap: the inner `Arc<DashMap<...>>` is reference-counted.
-#[derive(Clone)]
-pub struct AsyncRateLimiter {
-    buckets: StdArc<DashMap<String, tokio::sync::Mutex<TokenBucketAsync>>>,
-}
-
-impl AsyncRateLimiter {
-    /// Create a new `AsyncRateLimiter` with no models registered.
-    pub fn new() -> Self {
-        Self {
-            buckets: StdArc::new(DashMap::new()),
-        }
-    }
-
-    /// Register a model with the given capacity and refill rate.
-    ///
-    /// If the model is already registered its bucket is replaced.
-    pub fn register_model(&self, model: &str, capacity: f64, refill_rate: f64) {
-        let bucket = TokenBucketAsync::new(capacity, refill_rate);
-        self.buckets
-            .insert(model.to_string(), tokio::sync::Mutex::new(bucket));
-    }
-
-    /// Attempt to consume `tokens` from the model's bucket.
-    ///
-    /// # Errors
-    ///
-    /// - [`AsyncRateLimitError::ModelNotRegistered`] — model has no bucket.
-    /// - [`AsyncRateLimitError::RateLimitExceeded`] — bucket has insufficient tokens.
-    pub async fn check_and_consume(
-        &self,
-        model: &str,
-        tokens: f64,
-    ) -> Result<(), AsyncRateLimitError> {
-        let entry = self
-            .buckets
-            .get(model)
-            .ok_or_else(|| AsyncRateLimitError::ModelNotRegistered(model.to_string()))?;
-        let mut bucket = entry.lock().await;
-        let available = bucket.available();
-        if bucket.try_consume(tokens) {
-            Ok(())
-        } else {
-            Err(AsyncRateLimitError::RateLimitExceeded {
-                model: model.to_string(),
-                available,
-            })
-        }
-    }
-}
-
-impl Default for AsyncRateLimiter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// ── Async limiter tests ───────────────────────────────────────────────────────
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod async_limiter_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_basic_consumption() {
-        let limiter = AsyncRateLimiter::new();
-        limiter.register_model("gpt-4", 10.0, 1.0);
-        assert!(limiter.check_and_consume("gpt-4", 5.0).await.is_ok());
-        assert!(limiter.check_and_consume("gpt-4", 5.0).await.is_ok());
-        // Bucket should now be empty.
-        let err = limiter.check_and_consume("gpt-4", 1.0).await.unwrap_err();
-        assert!(
-            matches!(err, AsyncRateLimitError::RateLimitExceeded { .. }),
-            "Expected RateLimitExceeded, got {err:?}"
+    fn registry_allows_then_throttles() {
+        let reg = RateLimiterRegistry::new();
+        reg.register(
+            "gpt-4o".to_string(),
+            RateLimiterConfig {
+                requests_per_minute: 2,
+                tokens_per_minute: 1_000,
+                burst_multiplier: 1.0,
+            },
         );
-    }
-
-    #[tokio::test]
-    async fn test_unregistered_model() {
-        let limiter = AsyncRateLimiter::new();
-        let err = limiter
-            .check_and_consume("unknown-model", 1.0)
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(err, AsyncRateLimitError::ModelNotRegistered(_)),
-            "Expected ModelNotRegistered"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_exceeded_limit_returns_available() {
-        let limiter = AsyncRateLimiter::new();
-        limiter.register_model("claude", 3.0, 0.001);
-        // Drain the bucket.
-        limiter.check_and_consume("claude", 3.0).await.unwrap();
-        match limiter.check_and_consume("claude", 1.0).await.unwrap_err() {
-            AsyncRateLimitError::RateLimitExceeded { available, .. } => {
-                assert!(available < 1.0, "available should be < 1 after drain, got {available}");
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_refill_over_time() {
-        let limiter = AsyncRateLimiter::new();
-        // 1000 tokens/sec → 1 token/ms.
-        limiter.register_model("fast-model", 1.0, 1000.0);
-        // Drain.
-        limiter.check_and_consume("fast-model", 1.0).await.unwrap();
-        // Wait for refill.
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        assert!(limiter.check_and_consume("fast-model", 1.0).await.is_ok());
-    }
-
-    #[test]
-    fn test_error_display_not_registered() {
-        let e = AsyncRateLimitError::ModelNotRegistered("m".to_string());
-        assert!(e.to_string().contains("'m'"));
-    }
-
-    #[test]
-    fn test_error_display_exceeded() {
-        let e = AsyncRateLimitError::RateLimitExceeded {
-            model: "m".to_string(),
-            available: 0.5,
-        };
-        assert!(e.to_string().contains("m"));
-        assert!(e.to_string().contains("0.50"));
+        assert!(reg.check("gpt-4o", 1).is_ok());
+        assert!(reg.check("gpt-4o", 1).is_ok());
+        // Third request exceeds sliding window limit of 2
+        assert!(reg.check("gpt-4o", 1).is_err());
     }
 }

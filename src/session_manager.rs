@@ -1,427 +1,248 @@
-//! Multi-session state management with idle/lifetime expiry.
+//! Session tracking and context-window management.
 //!
-//! [`SessionManager`] tracks active inference sessions, enforces message and
-//! context-entry limits, and transitions sessions through the
-//! [`SessionState`] lifecycle.
+//! [`SessionManager`] owns a collection of [`Session`] objects behind a
+//! `RwLock<HashMap>`.  Each session stores a rolling [`VecDeque`] of
+//! [`Message`] records and enforces a maximum context-token budget.
 
-use std::collections::HashMap;
-use std::fmt;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    RwLock,
+};
+use std::time::Instant;
 
-// ---------------------------------------------------------------------------
-// SessionState
-// ---------------------------------------------------------------------------
+// ── Message ───────────────────────────────────────────────────────────────────
 
-/// Lifecycle state of a session.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SessionState {
-    /// The session is actively being used.
-    Active,
-    /// The session has not seen activity within the idle window.
-    Idle,
-    /// The session exceeded its maximum lifetime and was expired automatically.
-    Expired,
-    /// The session was explicitly closed.
-    Terminated,
+/// A single turn in a conversation session.
+#[derive(Debug, Clone)]
+pub struct Message {
+    /// Conversation role, e.g. `"user"` or `"assistant"`.
+    pub role: String,
+    /// Raw text content of the message.
+    pub content: String,
+    /// Token count for this message.
+    pub tokens: usize,
+    /// Wall-clock time at which the message was recorded.
+    pub timestamp: Instant,
 }
 
-// ---------------------------------------------------------------------------
-// SessionMetadata
-// ---------------------------------------------------------------------------
+// ── Session ───────────────────────────────────────────────────────────────────
 
-/// Per-session metadata stored alongside message history.
-#[derive(Debug, Clone)]
-pub struct SessionMetadata {
+/// A conversation session with bounded context-window management.
+#[derive(Debug)]
+pub struct Session {
     /// Unique session identifier.
     pub id: String,
-    /// Unix-epoch milliseconds at which the session was created.
-    pub created_at_ms: u64,
-    /// Unix-epoch milliseconds of the last recorded activity.
-    pub last_active_ms: u64,
-    /// Current lifecycle state.
-    pub state: SessionState,
-    /// Optional caller-supplied user identifier.
-    pub user_id: Option<String>,
-    /// Model name / identifier used by this session.
+    /// Model associated with this session.
     pub model: String,
-    /// Cumulative tokens consumed across all requests in this session.
-    pub total_tokens: u64,
+    /// Ordered message history (oldest first).
+    pub messages: VecDeque<Message>,
+    /// Running sum of tokens across all messages currently in `messages`.
+    pub total_tokens: usize,
+    /// Hard ceiling on context tokens; messages are trimmed to stay below this.
+    pub max_context_tokens: usize,
+    /// Wall-clock time at which the session was created.
+    pub created_at: Instant,
+    /// Wall-clock time of the last `add_message` call.
+    pub last_active: Instant,
 }
 
-// ---------------------------------------------------------------------------
-// SessionData
-// ---------------------------------------------------------------------------
-
-/// Full session data including messages and key/value context.
-#[derive(Debug, Clone)]
-pub struct SessionData {
-    /// Session metadata.
-    pub metadata: SessionMetadata,
-    /// Ordered list of messages (prompt + completion turns).
-    pub messages: Vec<String>,
-    /// Arbitrary key/value context entries.
-    pub context: HashMap<String, String>,
-}
-
-// ---------------------------------------------------------------------------
-// SessionConfig
-// ---------------------------------------------------------------------------
-
-/// Configuration controlling session lifecycle and limits.
-#[derive(Debug, Clone)]
-pub struct SessionConfig {
-    /// Milliseconds of inactivity before a session transitions to [`SessionState::Idle`]
-    /// and is eligible for expiry via [`SessionManager::expire_idle`].
-    pub idle_timeout_ms: u64,
-    /// Maximum session lifetime in milliseconds; session is expired once exceeded.
-    pub max_lifetime_ms: u64,
-    /// Maximum number of messages that may be stored per session.
-    pub max_messages: usize,
-    /// Maximum number of context entries per session.
-    pub max_context_entries: usize,
-}
-
-impl Default for SessionConfig {
-    fn default() -> Self {
-        SessionConfig {
-            idle_timeout_ms: 5 * 60 * 1000,      // 5 minutes
-            max_lifetime_ms: 60 * 60 * 1000,     // 1 hour
-            max_messages: 1_000,
-            max_context_entries: 256,
+impl Session {
+    /// Create a new empty session.
+    fn new(id: String, model: String, max_context_tokens: usize) -> Self {
+        let now = Instant::now();
+        Self {
+            id,
+            model,
+            messages: VecDeque::new(),
+            total_tokens: 0,
+            max_context_tokens,
+            created_at: now,
+            last_active: now,
         }
+    }
+
+    /// Append a message and update the running token total.
+    ///
+    /// Trims the oldest messages first if adding `tokens` would overflow the
+    /// context window.
+    pub fn add_message(&mut self, role: String, content: String, tokens: usize) {
+        self.trim_to_fit(tokens);
+        self.total_tokens += tokens;
+        self.last_active = Instant::now();
+        self.messages.push_back(Message {
+            role,
+            content,
+            tokens,
+            timestamp: self.last_active,
+        });
+    }
+
+    /// Drop the oldest messages until `total_tokens + new_tokens` fits within
+    /// `max_context_tokens`.
+    pub fn trim_to_fit(&mut self, new_tokens: usize) {
+        while self.total_tokens + new_tokens > self.max_context_tokens {
+            if let Some(dropped) = self.messages.pop_front() {
+                self.total_tokens = self.total_tokens.saturating_sub(dropped.tokens);
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Fraction of the context window currently occupied (`0.0`–`1.0`).
+    pub fn token_utilization(&self) -> f64 {
+        if self.max_context_tokens == 0 {
+            return 0.0;
+        }
+        self.total_tokens as f64 / self.max_context_tokens as f64
+    }
+
+    /// Returns `true` if the session has not been active for longer than
+    /// `timeout_secs` seconds.
+    pub fn is_expired(&self, timeout_secs: u64) -> bool {
+        self.last_active.elapsed().as_secs() >= timeout_secs
     }
 }
 
-// ---------------------------------------------------------------------------
-// SessionError
-// ---------------------------------------------------------------------------
+// ── SessionManager ────────────────────────────────────────────────────────────
 
-/// Errors produced by [`SessionManager`] operations.
-#[derive(Debug, Clone, PartialEq)]
-pub enum SessionError {
-    /// No session with the given id exists.
-    NotFound(String),
-    /// The session has already expired or been terminated.
-    SessionExpired,
-    /// Adding a message would exceed [`SessionConfig::max_messages`].
-    TooManyMessages,
-    /// Adding a context entry would exceed [`SessionConfig::max_context_entries`].
-    TooManyContextEntries,
-}
-
-impl fmt::Display for SessionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SessionError::NotFound(id) => write!(f, "session not found: {}", id),
-            SessionError::SessionExpired => write!(f, "session has expired or been terminated"),
-            SessionError::TooManyMessages => write!(f, "session message limit exceeded"),
-            SessionError::TooManyContextEntries => write!(f, "session context entry limit exceeded"),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// SessionStats
-// ---------------------------------------------------------------------------
-
-/// Aggregate counts across all managed sessions.
-#[derive(Debug, Clone, Default)]
-pub struct SessionStats {
-    /// Total number of sessions ever created (and not yet removed from memory).
-    pub total: usize,
-    /// Sessions currently in [`SessionState::Active`].
-    pub active: usize,
-    /// Sessions currently in [`SessionState::Idle`].
-    pub idle: usize,
-    /// Sessions currently in [`SessionState::Expired`].
-    pub expired: usize,
-    /// Sessions currently in [`SessionState::Terminated`].
-    pub terminated: usize,
-}
-
-// ---------------------------------------------------------------------------
-// SessionManager
-// ---------------------------------------------------------------------------
-
-/// Manages the full lifecycle of multiple inference sessions.
+/// Thread-safe store for active [`Session`] objects.
+///
+/// Session IDs are generated from a monotonically increasing counter combined
+/// with a timestamp so they are unique and roughly sortable by creation time.
 pub struct SessionManager {
-    /// All sessions, keyed by id.
-    pub sessions: HashMap<String, SessionData>,
-    /// Configuration controlling timeouts and limits.
-    pub config: SessionConfig,
-    /// Monotonically increasing counter used to generate unique session ids.
-    pub next_id: u64,
+    sessions: RwLock<HashMap<String, Session>>,
+    counter: AtomicU64,
+}
+
+impl Default for SessionManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SessionManager {
-    /// Creates a new manager with the supplied configuration.
-    pub fn new(config: SessionConfig) -> Self {
-        SessionManager {
-            sessions: HashMap::new(),
-            config,
-            next_id: 1,
+    /// Create an empty session manager.
+    pub fn new() -> Self {
+        Self {
+            sessions: RwLock::new(HashMap::new()),
+            counter: AtomicU64::new(0),
         }
     }
 
-    /// Creates a new session and returns its id.
-    pub fn create_session(&mut self, user_id: Option<String>, model: String) -> String {
-        let id = format!("sess-{}", self.next_id);
-        self.next_id += 1;
+    /// Generate a UUID-like session ID from the current timestamp + counter.
+    fn gen_id(&self) -> String {
+        let seq = self.counter.fetch_add(1, Ordering::Relaxed);
+        // Use elapsed nanos from a fixed reference + counter for uniqueness.
+        // This avoids a dependency on `uuid` while remaining collision-free
+        // within a single process.
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        format!("sess-{ts:x}-{seq:04x}")
+    }
 
-        // Use a simple counter-based "now" sentinel; callers that need real time
-        // should pass a real timestamp via `touch`.
-        let now_ms: u64 = 0;
-
-        let metadata = SessionMetadata {
-            id: id.clone(),
-            created_at_ms: now_ms,
-            last_active_ms: now_ms,
-            state: SessionState::Active,
-            user_id,
-            model,
-            total_tokens: 0,
-        };
-
-        let data = SessionData {
-            metadata,
-            messages: Vec::new(),
-            context: HashMap::new(),
-        };
-
-        self.sessions.insert(id.clone(), data);
+    /// Create a new session for `model` with the given context-token limit.
+    ///
+    /// Returns the new session ID.
+    pub fn create_session(&self, model: &str, max_context: usize) -> String {
+        let id = self.gen_id();
+        let session = Session::new(id.clone(), model.to_owned(), max_context);
+        self.sessions.write().unwrap().insert(id.clone(), session);
         id
     }
 
-    /// Returns an immutable reference to the session data, if it exists.
-    pub fn get_session(&self, id: &str) -> Option<&SessionData> {
-        self.sessions.get(id)
-    }
-
-    /// Updates `last_active_ms` for the session and transitions it to
-    /// [`SessionState::Active`] if it was previously [`SessionState::Idle`].
-    pub fn touch(&mut self, id: &str, now_ms: u64) {
-        if let Some(session) = self.sessions.get_mut(id) {
-            session.metadata.last_active_ms = now_ms;
-            if session.metadata.state == SessionState::Idle {
-                session.metadata.state = SessionState::Active;
-            }
-        }
-    }
-
-    /// Appends a message to the session's history.
-    ///
-    /// Returns [`SessionError::TooManyMessages`] if the limit would be exceeded.
-    pub fn add_message(&mut self, id: &str, message: String) -> Result<(), SessionError> {
-        let session = self
-            .sessions
-            .get_mut(id)
-            .ok_or_else(|| SessionError::NotFound(id.to_string()))?;
-
-        if matches!(
-            session.metadata.state,
-            SessionState::Expired | SessionState::Terminated
-        ) {
-            return Err(SessionError::SessionExpired);
-        }
-
-        if session.messages.len() >= self.config.max_messages {
-            return Err(SessionError::TooManyMessages);
-        }
-
-        session.messages.push(message);
-        Ok(())
-    }
-
-    /// Inserts or updates a context entry on the session.
-    ///
-    /// Returns [`SessionError::TooManyContextEntries`] if inserting a new key
-    /// would exceed the limit.
-    pub fn set_context(
-        &mut self,
-        id: &str,
-        key: String,
-        value: String,
-    ) -> Result<(), SessionError> {
-        let config_max = self.config.max_context_entries;
-        let session = self
-            .sessions
-            .get_mut(id)
-            .ok_or_else(|| SessionError::NotFound(id.to_string()))?;
-
-        if matches!(
-            session.metadata.state,
-            SessionState::Expired | SessionState::Terminated
-        ) {
-            return Err(SessionError::SessionExpired);
-        }
-
-        // Only enforce limit when the key is new
-        if !session.context.contains_key(&key) && session.context.len() >= config_max {
-            return Err(SessionError::TooManyContextEntries);
-        }
-
-        session.context.insert(key, value);
-        Ok(())
-    }
-
-    /// Marks sessions that have been idle longer than [`SessionConfig::idle_timeout_ms`]
-    /// as [`SessionState::Expired`] and returns their ids.
-    pub fn expire_idle(&mut self, now_ms: u64) -> Vec<String> {
-        let idle_timeout = self.config.idle_timeout_ms;
-        let max_lifetime = self.config.max_lifetime_ms;
-        let mut expired_ids = Vec::new();
-
-        for (id, session) in self.sessions.iter_mut() {
-            if matches!(
-                session.metadata.state,
-                SessionState::Expired | SessionState::Terminated
-            ) {
-                continue;
-            }
-
-            let age = now_ms.saturating_sub(session.metadata.created_at_ms);
-            let idle = now_ms.saturating_sub(session.metadata.last_active_ms);
-
-            if idle > idle_timeout || age > max_lifetime {
-                session.metadata.state = SessionState::Expired;
-                expired_ids.push(id.clone());
-            } else if idle > idle_timeout / 2 {
-                // Transition to Idle so callers can detect near-expiry
-                session.metadata.state = SessionState::Idle;
-            }
-        }
-        expired_ids
-    }
-
-    /// Explicitly terminates a session.  Returns `true` if the session existed.
-    pub fn terminate(&mut self, id: &str) -> bool {
-        if let Some(session) = self.sessions.get_mut(id) {
-            session.metadata.state = SessionState::Terminated;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Returns metadata for all non-expired, non-terminated sessions.
-    pub fn active_sessions(&self) -> Vec<&SessionMetadata> {
+    /// Return a snapshot of the messages currently held in the session, or
+    /// `None` if the session does not exist.
+    pub fn get_context(&self, session_id: &str) -> Option<Vec<Message>> {
         self.sessions
-            .values()
-            .filter(|s| {
-                matches!(
-                    s.metadata.state,
-                    SessionState::Active | SessionState::Idle
-                )
-            })
-            .map(|s| &s.metadata)
-            .collect()
+            .read()
+            .unwrap()
+            .get(session_id)
+            .map(|s| s.messages.iter().cloned().collect())
     }
 
-    /// Computes aggregate counts across all tracked sessions.
-    pub fn session_stats(&self) -> SessionStats {
-        let mut stats = SessionStats::default();
-        stats.total = self.sessions.len();
-        for s in self.sessions.values() {
-            match s.metadata.state {
-                SessionState::Active => stats.active += 1,
-                SessionState::Idle => stats.idle += 1,
-                SessionState::Expired => stats.expired += 1,
-                SessionState::Terminated => stats.terminated += 1,
-            }
+    /// Append a user turn and an assistant turn to the session.
+    ///
+    /// `user_msg_tokens` and `assistant_msg_tokens` carry placeholder content
+    /// strings; callers that need real content should use
+    /// [`Session::add_message`] directly after obtaining a write lock.
+    pub fn add_turn(
+        &self,
+        session_id: &str,
+        user_msg_tokens: usize,
+        assistant_msg_tokens: usize,
+    ) {
+        let mut guard = self.sessions.write().unwrap();
+        if let Some(session) = guard.get_mut(session_id) {
+            session.add_message("user".to_owned(), String::new(), user_msg_tokens);
+            session.add_message(
+                "assistant".to_owned(),
+                String::new(),
+                assistant_msg_tokens,
+            );
         }
-        stats
+    }
+
+    /// Remove sessions that have been inactive for longer than `timeout_secs`.
+    ///
+    /// Returns the number of sessions removed.
+    pub fn expire_sessions(&self, timeout_secs: u64) -> usize {
+        let mut guard = self.sessions.write().unwrap();
+        let before = guard.len();
+        guard.retain(|_, s| !s.is_expired(timeout_secs));
+        before - guard.len()
+    }
+
+    /// Return the number of active sessions.
+    pub fn active_count(&self) -> usize {
+        self.sessions.read().unwrap().len()
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn default_manager() -> SessionManager {
-        SessionManager::new(SessionConfig {
-            idle_timeout_ms: 1_000,
-            max_lifetime_ms: 10_000,
-            max_messages: 3,
-            max_context_entries: 2,
-        })
+    #[test]
+    fn create_and_retrieve_session() {
+        let mgr = SessionManager::new();
+        let id = mgr.create_session("gpt-4o", 4096);
+        assert_eq!(mgr.active_count(), 1);
+        let ctx = mgr.get_context(&id);
+        assert!(ctx.is_some());
+        assert!(ctx.unwrap().is_empty());
     }
 
     #[test]
-    fn test_create_and_get() {
-        let mut mgr = default_manager();
-        let id = mgr.create_session(Some("alice".to_string()), "gpt-4".to_string());
-        let session = mgr.get_session(&id).unwrap();
-        assert_eq!(session.metadata.user_id.as_deref(), Some("alice"));
-        assert_eq!(session.metadata.model, "gpt-4");
-        assert_eq!(session.metadata.state, SessionState::Active);
+    fn add_turn_populates_context() {
+        let mgr = SessionManager::new();
+        let id = mgr.create_session("claude-3", 1000);
+        mgr.add_turn(&id, 50, 80);
+        let ctx = mgr.get_context(&id).unwrap();
+        assert_eq!(ctx.len(), 2);
+        assert_eq!(ctx[0].role, "user");
+        assert_eq!(ctx[1].role, "assistant");
     }
 
     #[test]
-    fn test_idle_expiry() {
-        let mut mgr = default_manager();
-        let id = mgr.create_session(None, "claude".to_string());
-        // Simulate 2000 ms elapsed (> idle_timeout_ms of 1000)
-        let expired = mgr.expire_idle(2_000);
-        assert!(expired.contains(&id));
-        assert_eq!(
-            mgr.get_session(&id).unwrap().metadata.state,
-            SessionState::Expired
-        );
+    fn session_trim_to_fit() {
+        let mut session = Session::new("s1".into(), "m".into(), 100);
+        session.add_message("user".into(), "hello".into(), 60);
+        session.add_message("assistant".into(), "hi".into(), 60);
+        // Second add should have evicted the first message to stay within 100
+        assert!(session.total_tokens <= 100);
     }
 
     #[test]
-    fn test_message_limit() {
-        let mut mgr = default_manager();
-        let id = mgr.create_session(None, "model".to_string());
-        mgr.add_message(&id, "m1".to_string()).unwrap();
-        mgr.add_message(&id, "m2".to_string()).unwrap();
-        mgr.add_message(&id, "m3".to_string()).unwrap();
-        let err = mgr.add_message(&id, "m4".to_string()).unwrap_err();
-        assert_eq!(err, SessionError::TooManyMessages);
-    }
-
-    #[test]
-    fn test_context_overflow() {
-        let mut mgr = default_manager();
-        let id = mgr.create_session(None, "model".to_string());
-        mgr.set_context(&id, "k1".to_string(), "v1".to_string()).unwrap();
-        mgr.set_context(&id, "k2".to_string(), "v2".to_string()).unwrap();
-        let err = mgr
-            .set_context(&id, "k3".to_string(), "v3".to_string())
-            .unwrap_err();
-        assert_eq!(err, SessionError::TooManyContextEntries);
-    }
-
-    #[test]
-    fn test_terminate() {
-        let mut mgr = default_manager();
-        let id = mgr.create_session(None, "model".to_string());
-        assert!(mgr.terminate(&id));
-        assert_eq!(
-            mgr.get_session(&id).unwrap().metadata.state,
-            SessionState::Terminated
-        );
-        assert!(!mgr.terminate("nonexistent"));
-    }
-
-    #[test]
-    fn test_stats_counts() {
-        let mut mgr = default_manager();
-        let a = mgr.create_session(None, "m".to_string());
-        let b = mgr.create_session(None, "m".to_string());
-        let _c = mgr.create_session(None, "m".to_string());
-
-        mgr.terminate(&a);
-        mgr.expire_idle(2_000); // expires b and _c (both idle > 1000ms from t=0)
-
-        let stats = mgr.session_stats();
-        assert_eq!(stats.total, 3);
-        assert_eq!(stats.terminated, 1);
-        // b and _c should be expired
-        assert_eq!(stats.expired, 2);
-        let _ = b; // suppress unused warning
+    fn expire_sessions() {
+        let mgr = SessionManager::new();
+        let _id = mgr.create_session("gpt-4o", 1000);
+        // A timeout of 0 seconds means every session is expired immediately.
+        let removed = mgr.expire_sessions(0);
+        assert_eq!(removed, 1);
+        assert_eq!(mgr.active_count(), 0);
     }
 }

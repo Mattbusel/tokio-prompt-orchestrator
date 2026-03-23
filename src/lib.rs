@@ -201,7 +201,7 @@ pub mod token_counter;
 
 // Re-exports
 pub use cache::{CacheConfig, CacheEntry, CacheStats, PromptCache};
-pub use rate_limiter::{BucketConfig, ModelRateLimiterStats, RateLimitError, RateLimiter, RateLimiterStats};
+pub use rate_limiter::{RateLimitError, RateLimiterConfig, RateLimiterRegistry, ModelRateLimiter};
 pub use ab_test::{AbTestConfig, AbTestResult, AbTestRunner, SuccessMetric, Variant};
 pub use conversation::{
     ConversationConfig, ConversationManager, PromptFormat, Role, Turn,
