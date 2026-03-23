@@ -481,6 +481,285 @@ pub fn cascade_registry() -> &'static Registry {
 }
 
 // ---------------------------------------------------------------------------
+// CascadeFailover — named-tier priority failover
+// ---------------------------------------------------------------------------
+
+/// A named tier in a [`CascadeFailover`] configuration.
+///
+/// Each tier wraps a [`WorkerKind`] and adds a per-tier timeout and retry count,
+/// so that more expensive tiers can be given shorter timeouts than cheap local
+/// fallbacks.
+#[derive(Debug, Clone)]
+pub struct FailoverTier {
+    /// Human-readable name for this tier (e.g. `"premium"`, `"standard"`, `"local"`).
+    pub name: String,
+    /// The provider/worker kind for this tier.
+    pub kind: WorkerKind,
+    /// Maximum time to wait for a single attempt on this tier.
+    pub timeout: std::time::Duration,
+    /// Number of times to retry *within* this tier before moving to the next.
+    ///
+    /// `0` means try once (no retries); `1` means up to two attempts, etc.
+    pub retries: usize,
+}
+
+impl FailoverTier {
+    /// Create a tier with a given name, provider, timeout, and retry count.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
+    pub fn new(
+        name: impl Into<String>,
+        kind: WorkerKind,
+        timeout: std::time::Duration,
+        retries: usize,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            kind,
+            timeout,
+            retries,
+        }
+    }
+}
+
+/// Result produced by a successful [`CascadeFailover::call`].
+#[derive(Debug, Clone)]
+pub struct FailoverResult<T> {
+    /// The name of the tier that ultimately succeeded.
+    pub tier_name: String,
+    /// The provider/worker kind that produced the successful result.
+    pub provider_used: WorkerKind,
+    /// Total number of attempts across all tiers (including retries).
+    pub total_attempts: usize,
+    /// The successful return value.
+    pub value: T,
+    /// Total wall-clock time from first attempt to success (ms).
+    pub total_latency_ms: u64,
+}
+
+/// Error returned by [`CascadeFailover::call`] when all tiers are exhausted.
+#[derive(Debug)]
+pub struct FailoverExhausted {
+    /// Errors collected per tier, in order of attempt.
+    pub tier_errors: Vec<(String, String)>,
+    /// Total attempts made.
+    pub total_attempts: usize,
+}
+
+impl fmt::Display for FailoverExhausted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "all {} failover tiers exhausted after {} attempts",
+            self.tier_errors.len(),
+            self.total_attempts
+        )
+    }
+}
+
+impl std::error::Error for FailoverExhausted {}
+
+/// Priority-ordered cascade failover across named worker tiers.
+///
+/// Tries tiers from highest priority (index 0) to lowest.  Within each tier
+/// the configured number of retries is attempted before advancing to the next.
+/// Each attempt is individually time-bounded by the tier's `timeout`.
+///
+/// ## Typical tier ordering
+///
+/// ```text
+/// 1. Premium (e.g. Anthropic)  — lowest latency, highest cost, short timeout
+/// 2. Standard (e.g. OpenAI)    — medium cost, medium timeout
+/// 3. Local fallback (LlamaCpp) — zero cost, longer timeout
+/// ```
+///
+/// ## Example
+///
+/// ```rust,no_run
+/// use std::time::Duration;
+/// use tokio_prompt_orchestrator::config::WorkerKind;
+/// use tokio_prompt_orchestrator::routing::cascade::{CascadeFailover, FailoverTier};
+///
+/// # async fn example() {
+/// let failover = CascadeFailover::new(vec![
+///     FailoverTier::new("premium",  WorkerKind::Anthropic, Duration::from_secs(10), 0),
+///     FailoverTier::new("standard", WorkerKind::OpenAi,    Duration::from_secs(20), 1),
+///     FailoverTier::new("local",    WorkerKind::LlamaCpp,  Duration::from_secs(60), 2),
+/// ]);
+///
+/// let result = failover.call(|kind| async move {
+///     // Your inference call here
+///     Ok::<String, String>(format!("response from {:?}", kind))
+/// }).await;
+///
+/// match result {
+///     Ok(r) => println!("Succeeded on tier '{}': {}", r.tier_name, r.value),
+///     Err(e) => eprintln!("All tiers failed: {e}"),
+/// }
+/// # }
+/// ```
+pub struct CascadeFailover {
+    tiers: Vec<FailoverTier>,
+}
+
+impl CascadeFailover {
+    /// Create a new failover chain.  Tiers are tried in slice order.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
+    #[must_use]
+    pub fn new(tiers: Vec<FailoverTier>) -> Self {
+        Self { tiers }
+    }
+
+    /// Builder pattern: append a tier.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
+    #[must_use]
+    pub fn with_tier(mut self, tier: FailoverTier) -> Self {
+        self.tiers.push(tier);
+        self
+    }
+
+    /// Return the number of configured tiers.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
+    pub fn tier_count(&self) -> usize {
+        self.tiers.len()
+    }
+
+    /// Return `true` if no tiers are configured.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
+    pub fn is_empty(&self) -> bool {
+        self.tiers.is_empty()
+    }
+
+    /// Execute `f` against tiers in priority order, respecting per-tier
+    /// timeouts and retries.
+    ///
+    /// `f` receives the [`WorkerKind`] of the current tier and must return a
+    /// future that resolves to `Ok(T)` on success or `Err(String)` on failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FailoverExhausted`] if every attempt on every tier fails.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
+    pub async fn call<F, Fut, T>(&self, f: F) -> Result<FailoverResult<T>, FailoverExhausted>
+    where
+        F: Fn(WorkerKind) -> Fut,
+        Fut: std::future::Future<Output = Result<T, String>>,
+    {
+        if self.tiers.is_empty() {
+            return Err(FailoverExhausted {
+                tier_errors: vec![],
+                total_attempts: 0,
+            });
+        }
+
+        let start = Instant::now();
+        let mut tier_errors: Vec<(String, String)> = Vec::new();
+        let mut total_attempts = 0usize;
+
+        for tier in &self.tiers {
+            let max_attempts = tier.retries.saturating_add(1);
+
+            for attempt in 0..max_attempts {
+                total_attempts += 1;
+
+                let fut = f(tier.kind.clone());
+                let timed = tokio::time::timeout(tier.timeout, fut).await;
+
+                match timed {
+                    Ok(Ok(value)) => {
+                        let total_latency_ms = start.elapsed().as_millis() as u64;
+                        info!(
+                            tier = %tier.name,
+                            provider = ?tier.kind,
+                            attempt = attempt + 1,
+                            total_attempts,
+                            total_latency_ms,
+                            "cascade failover: tier succeeded"
+                        );
+                        return Ok(FailoverResult {
+                            tier_name: tier.name.clone(),
+                            provider_used: tier.kind.clone(),
+                            total_attempts,
+                            value,
+                            total_latency_ms,
+                        });
+                    }
+                    Ok(Err(e)) => {
+                        warn!(
+                            tier = %tier.name,
+                            provider = ?tier.kind,
+                            attempt = attempt + 1,
+                            error = %e,
+                            "cascade failover: tier attempt failed"
+                        );
+                        if attempt == max_attempts.saturating_sub(1) {
+                            // Last retry on this tier — record and move on
+                            tier_errors.push((tier.name.clone(), e));
+                        }
+                    }
+                    Err(_elapsed) => {
+                        let msg = format!(
+                            "tier '{}' attempt {} timed out after {:?}",
+                            tier.name,
+                            attempt + 1,
+                            tier.timeout,
+                        );
+                        warn!(
+                            tier = %tier.name,
+                            provider = ?tier.kind,
+                            attempt = attempt + 1,
+                            "cascade failover: tier attempt timed out"
+                        );
+                        if attempt == max_attempts.saturating_sub(1) {
+                            tier_errors.push((tier.name.clone(), msg));
+                        }
+                    }
+                }
+            }
+
+            debug!(
+                tier = %tier.name,
+                "cascade failover: advancing to next tier"
+            );
+        }
+
+        Err(FailoverExhausted {
+            tier_errors,
+            total_attempts,
+        })
+    }
+}
+
+impl fmt::Debug for CascadeFailover {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CascadeFailover")
+            .field("tier_count", &self.tiers.len())
+            .field(
+                "tiers",
+                &self.tiers.iter().map(|t| &t.name).collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

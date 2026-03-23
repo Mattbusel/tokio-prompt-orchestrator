@@ -33,7 +33,10 @@ pub mod semantic;
 
 // Re-exports for convenience
 pub use arbitrage::{ArbitrageEngine, ProviderProfile, ProviderSnapshot};
-pub use cascade::{CascadeEntry, CascadeError, CascadeResult, CircuitBreakerConfig, ProviderCascade};
+pub use cascade::{
+    CascadeEntry, CascadeError, CascadeResult, CircuitBreakerConfig, ProviderCascade,
+    CascadeFailover, FailoverExhausted, FailoverResult, FailoverTier,
+};
 pub use config::RoutingConfig;
 pub use cost_tracker::{CostSnapshot, CostTracker, SessionBudgetTracker};
 pub use health::{ProviderHealthBuilder, ProviderHealthSnapshot, ProviderMetrics};
