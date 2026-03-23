@@ -437,7 +437,7 @@ impl MultiPipelineRouterBuilder {
             let stats = Arc::new(PipelineStats::default());
             stats_map.insert(desc.name.clone(), Arc::clone(&stats));
 
-            let handles = if let Some(config) = desc.config {
+            let handles = if let Some(ref config) = desc.config {
                 spawn_pipeline_with_config(desc.worker, config)
             } else {
                 crate::stages::spawn_pipeline(desc.worker)

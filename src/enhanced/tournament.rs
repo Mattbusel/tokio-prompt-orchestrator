@@ -266,7 +266,7 @@ impl TournamentRunner {
             let timeout = self.config.per_worker_timeout;
             handles.push(tokio::spawn(async move {
                 let call_start = Instant::now();
-                let result = tokio::time::timeout(timeout, worker.infer(req)).await;
+                let result = tokio::time::timeout(timeout, worker.infer(&req.input)).await;
                 let elapsed = call_start.elapsed();
                 (idx, result, elapsed)
             }));
@@ -280,8 +280,8 @@ impl TournamentRunner {
             // Wait for every worker.
             for handle in handles {
                 match handle.await {
-                    Ok((idx, Ok(Ok(resp)), elapsed)) => {
-                        candidates.push((idx, resp.text, elapsed));
+                    Ok((idx, Ok(Ok(tokens)), elapsed)) => {
+                        candidates.push((idx, tokens.join(""), elapsed));
                     }
                     Ok((idx, Ok(Err(e)), _)) => {
                         warn!(worker = idx, error = %e, "worker inference error");
@@ -305,8 +305,8 @@ impl TournamentRunner {
                 let (result, _idx, rest) = select_all(remaining).await;
                 remaining = rest;
                 match result {
-                    Ok((idx, Ok(Ok(resp)), elapsed)) => {
-                        candidates.push((idx, resp.text, elapsed));
+                    Ok((idx, Ok(Ok(tokens)), elapsed)) => {
+                        candidates.push((idx, tokens.join(""), elapsed));
                         // Cancel remaining.
                         for h in remaining {
                             h.abort();
