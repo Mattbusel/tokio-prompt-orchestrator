@@ -16,6 +16,41 @@ Five-stage bounded-backpressure DAG with deduplication, circuit breakers, rate l
 
 ## What's New
 
+### v1.8.0 — Session Manager and Streaming Aggregator
+
+#### Session Manager
+
+The new `session_mgr` module provides a concurrent, production-ready conversation session store.
+
+**Key types:** `SessionManager`, `Session`, `Message`, `Role`, `SessionStats`, `SessionError`
+
+**Features:**
+- Lock-free `Arc<DashMap<u64, Session>>` storage — safe to share across Tokio tasks
+- `SessionManager::create(system_prompt)` — opens a session, optionally pre-loading a system message
+- `SessionManager::append(session_id, role, content)` — appends `User`, `Assistant`, or `System` messages
+- `SessionManager::get_context(session_id, max_tokens)` — trims oldest messages to fit the token budget while always preserving the system message
+- `SessionManager::summarize_if_needed(session_id, threshold, summarizer)` — collapses old messages through a caller-supplied closure when the token count exceeds the threshold
+- `SessionManager::stats()` — returns `SessionStats` (total sessions, active sessions, average messages, total messages)
+
+**REST endpoints** (requires `web-api` feature):
+- `POST /api/v1/sessions` — create session; returns `{ "session_id": <u64> }`
+- `GET  /api/v1/sessions/:id` — fetch session metadata
+- `DELETE /api/v1/sessions/:id` — delete session
+- `POST /api/v1/sessions/:id/messages` — append message `{ "role": "user"|"assistant"|"system", "content": "..." }`
+
+#### Streaming Aggregator
+
+The new `stream_agg` module collects streaming token chunks into complete responses with real-time broadcast.
+
+**Key types:** `StreamAggregator`, `StreamChunk`, `AggStats`
+
+**Features:**
+- `StreamAggregator::feed(chunk)` — buffers a `StreamChunk`; broadcasts to subscribers
+- `StreamAggregator::complete(session_id)` — flushes and returns the full assembled text
+- `StreamAggregator::subscribe(session_id)` — returns a `Stream<Item = StreamChunk>` for real-time token delivery via `tokio::sync::broadcast`
+- `StreamAggregator::stats()` — returns `AggStats` (active streams, completed streams, total tokens)
+- Multiple sessions are fully isolated; clones share state via `Arc`
+
 ### v1.7.0 — Prompt Pipeline and Audit Log
 
 #### Prompt Pipeline

@@ -111,6 +111,8 @@ pub mod routing;
 pub mod scheduler;
 pub mod security;
 pub mod session;
+pub mod session_mgr;
+pub mod stream_agg;
 pub mod stages;
 pub mod token_budget;
 pub mod worker;

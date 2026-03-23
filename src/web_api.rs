@@ -562,6 +562,8 @@ struct AppState {
     session_budget: Arc<crate::session::SessionBudget>,
     /// A/B test runner — backs the `/api/v1/ab-tests` endpoints.
     ab_runner: Arc<crate::ab_test::AbTestRunner>,
+    /// Conversation session manager — backs the `/api/v1/sessions` endpoints.
+    session_manager: Arc<crate::session_mgr::SessionManager>,
 }
 
 // ============================================================================
@@ -690,6 +692,7 @@ pub async fn start_server(
         load_balancer: Arc::new(crate::load_balancer::LoadBalancer::new(
             crate::load_balancer::BalancerConfig::default(),
         )),
+        session_manager: Arc::new(crate::session_mgr::SessionManager::new()),
     });
 
     // Collector task: receives pipeline output and writes results into the tracker.
@@ -729,6 +732,10 @@ pub async fn start_server(
         .route("/api/v1/templates", get(template_list_handler))
         .route("/api/v1/templates/:name/render", post(template_render_handler))
         .route("/api/v1/load-balancer/stats", get(load_balancer_stats_handler))
+        .route("/api/v1/sessions", post(session_create_handler))
+        .route("/api/v1/sessions/:id", get(session_get_handler))
+        .route("/api/v1/sessions/:id", axum::routing::delete(session_delete_handler))
+        .route("/api/v1/sessions/:id/messages", post(session_append_handler))
         .route("/v1/sessions/:session_id/budget", get(session_budget_handler))
         .route("/v1/sessions/:session_id/budget/reset", post(session_budget_reset_handler))
         .route("/health", get(health_handler))
@@ -3416,4 +3423,111 @@ async fn load_balancer_stats_handler(State(state): State<Arc<AppState>>) -> impl
         "by_endpoint": by_endpoint,
     }))
     .into_response()
+}
+
+// ============================================================================
+// Session CRUD endpoints
+// ============================================================================
+
+/// Request body for `POST /api/v1/sessions`.
+#[cfg(feature = "web-api")]
+#[derive(Debug, serde::Deserialize)]
+struct CreateSessionRequest {
+    system_prompt: Option<String>,
+}
+
+/// Request body for `POST /api/v1/sessions/:id/messages`.
+#[cfg(feature = "web-api")]
+#[derive(Debug, serde::Deserialize)]
+struct AppendMessageRequest {
+    role: String,
+    content: String,
+}
+
+/// `POST /api/v1/sessions` — Create a new conversation session.
+///
+/// Body (JSON): `{ "system_prompt": "..." }` (optional field).
+/// Returns: `{ "session_id": <u64> }`.
+#[cfg(feature = "web-api")]
+async fn session_create_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CreateSessionRequest>,
+) -> impl IntoResponse {
+    let id = state.session_manager.create(body.system_prompt);
+    (StatusCode::CREATED, Json(serde_json::json!({ "session_id": id }))).into_response()
+}
+
+/// `GET /api/v1/sessions/:id` — Retrieve a session by ID.
+///
+/// Returns 404 if the session does not exist.
+#[cfg(feature = "web-api")]
+async fn session_get_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<u64>,
+) -> impl IntoResponse {
+    match state.session_manager.get(id) {
+        Ok(session) => Json(serde_json::json!({
+            "id": session.id,
+            "created_at": session.created_at,
+            "message_count": session.messages.len(),
+            "metadata": session.metadata,
+        }))
+        .into_response(),
+        Err(_) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("session {id} not found") })),
+        )
+            .into_response(),
+    }
+}
+
+/// `DELETE /api/v1/sessions/:id` — Delete a session.
+///
+/// Returns 204 on success, 404 if not found.
+#[cfg(feature = "web-api")]
+async fn session_delete_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<u64>,
+) -> impl IntoResponse {
+    if state.session_manager.delete(id) {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("session {id} not found") })),
+        )
+            .into_response()
+    }
+}
+
+/// `POST /api/v1/sessions/:id/messages` — Append a message to a session.
+///
+/// Body (JSON): `{ "role": "user"|"assistant"|"system", "content": "..." }`.
+/// Returns 204 on success, 400 on invalid role, 404 if session not found.
+#[cfg(feature = "web-api")]
+async fn session_append_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<u64>,
+    Json(body): Json<AppendMessageRequest>,
+) -> impl IntoResponse {
+    let role = match body.role.to_lowercase().as_str() {
+        "system" => crate::session_mgr::Role::System,
+        "user" => crate::session_mgr::Role::User,
+        "assistant" => crate::session_mgr::Role::Assistant,
+        other => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": format!("unknown role: {other}") })),
+            )
+                .into_response()
+        }
+    };
+    match state.session_manager.append(id, role, body.content) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(_) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("session {id} not found") })),
+        )
+            .into_response(),
+    }
 }
