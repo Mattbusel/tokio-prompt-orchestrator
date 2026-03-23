@@ -1404,6 +1404,142 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full guide.
 
 ---
 
+## Prompt A/B Testing
+
+The `ab_test` module provides a complete framework for comparing prompt templates in production traffic — without any external service.
+
+### How It Works
+
+1. **Register** an experiment with two prompt variants and a traffic split.
+2. **Assign** each incoming request to a variant using consistent FNV-1a hashing — the same `(experiment_name, user_id)` pair always maps to the same variant, so users see a coherent experience.
+3. **Record** metric observations (output length, latency, user rating, or a custom scorer).
+4. **Analyse** — once `min_samples` observations accumulate per variant, Welch's t-test determines the winner at α = 0.05.  Effect size is reported as Cohen's d (Hedges-corrected).
+
+### Code Example
+
+```rust,no_run
+use tokio_prompt_orchestrator::ab_test::{AbTestConfig, AbTestRunner, SuccessMetric, Variant};
+use tokio_prompt_orchestrator::templates::PromptTemplate;
+
+let runner = AbTestRunner::new();
+
+runner.register(AbTestConfig {
+    name: "greeting-style".into(),
+    variant_a: PromptTemplate::builder("greeting-a")
+        .body("Hello! How can I help you today?")
+        .build(),
+    variant_b: PromptTemplate::builder("greeting-b")
+        .body("Hi! What do you need?")
+        .build(),
+    traffic_split: 0.5,                      // 50% each
+    success_metric: SuccessMetric::OutputLength,
+    min_samples: 100,
+});
+
+// Assign a user deterministically.
+let variant = runner.assign("greeting-style", "user-42").unwrap();
+
+// After the model responds, record the output length.
+let output_len = 256.0_f64;
+runner.record_observation("greeting-style", variant, output_len);
+
+// When enough samples accumulate, check results.
+if let Some(result) = runner.analyse("greeting-style") {
+    match result.winner {
+        Some(Variant::A) => println!("Variant A wins (p={:.3}, d={:.2})", result.p_value, result.effect_size),
+        Some(Variant::B) => println!("Variant B wins (p={:.3}, d={:.2})", result.p_value, result.effect_size),
+        None => println!("No significant difference yet"),
+    }
+}
+```
+
+### REST API
+
+```bash
+# Create an experiment
+curl -X POST http://localhost:8080/api/v1/ab-tests \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "greeting-style",
+    "variant_a_body": "Hello! How can I help you today?",
+    "variant_b_body": "Hi! What do you need?",
+    "traffic_split": 0.5,
+    "success_metric": "output_length",
+    "min_samples": 100
+  }'
+
+# Check results (202 = still collecting samples, 200 = significant)
+curl http://localhost:8080/api/v1/ab-tests/greeting-style/results
+
+# Remove experiment
+curl -X DELETE http://localhost:8080/api/v1/ab-tests/greeting-style
+```
+
+### TUI Dashboard
+
+When using `cargo run --features tui --bin tui`, the dashboard includes an A/B Test panel showing all active experiments with live sample counts, current means, and winner status.
+
+---
+
+## Semantic Deduplication
+
+The `enhanced::SemanticDeduplicator` extends the exact-match deduplicator to catch near-duplicate prompts that differ only in punctuation, whitespace, or minor synonym substitution.
+
+### How SimHash Works
+
+1. The prompt is tokenised on whitespace.
+2. A sliding window produces 1-gram and 2-gram shingles.
+3. Each shingle is hashed with FNV-1a into a 64-bit value.
+4. For each of the 64 bit positions, an accumulator votes `+weight` or `−weight`.
+5. The final fingerprint is the sign vector of the accumulators.
+6. Two fingerprints whose **Hamming distance** is ≤ `similarity_threshold` are considered duplicates.
+
+A threshold of 3 bits catches punctuation changes and common paraphrases while keeping distinct questions separate.
+
+### Configuration
+
+```toml
+# pipeline.toml
+[semantic_dedup]
+similarity_threshold = 3    # bits (0 = exact only, 3 = paraphrases, 6 = loose)
+window_secs = 300           # TTL for cached fingerprints
+```
+
+### Code Example
+
+```rust,no_run
+use tokio_prompt_orchestrator::enhanced::SemanticDeduplicator;
+use std::time::Duration;
+
+let dedup = SemanticDeduplicator::new(
+    3,                          // Hamming distance threshold
+    Duration::from_secs(300),   // Fingerprint TTL
+);
+
+// First request is novel — send to model.
+if dedup.check_and_register("What is the capital of France?") {
+    // call model...
+}
+
+// Near-duplicate (punctuation drop) — caught and suppressed.
+// check_and_register returns false; return cached result instead.
+let is_novel = dedup.check_and_register("What is the capital of France");
+assert!(!is_novel);
+
+// Different question — passes through.
+assert!(dedup.check_and_register("What is the capital of Germany?"));
+```
+
+### Metrics
+
+| Metric | Label | Description |
+|--------|-------|-------------|
+| `dedup_semantic_hits_total` | — | Near-duplicates suppressed |
+| `dedup_semantic_miss_total` | — | Novel prompts passed through |
+| `avg_similarity_score` | — | Rolling average Hamming distance of matched pairs |
+
+---
+
 ## Known Issues / Roadmap
 
 - **prometheus 0.13**: Has RUSTSEC-2024-0437 (protobuf DoS). Mitigated by API key auth on `/metrics`. Migration to 0.14 blocked by `prometheus::proto` API removal — tracked internally for Q3 2026.

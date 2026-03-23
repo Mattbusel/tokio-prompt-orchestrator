@@ -173,6 +173,14 @@ schema = ["schemars"]
 # core-pinning: Pin pipeline stage tasks to specific CPU cores.
 core-pinning = ["core_affinity"]
 
+# zipkin: Export request traces to a Zipkin v2 HTTP endpoint.
+# Set ZIPKIN_ENDPOINT=http://localhost:9411 at runtime.
+zipkin = []
+
+# datadog: Export request traces to a DataDog Agent (v0.4 trace API).
+# Set DD_AGENT_HOST and optionally DD_AGENT_PORT at runtime.
+datadog = []
+
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3"

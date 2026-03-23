@@ -142,6 +142,12 @@ pub mod self_improve_loop;
 #[cfg(feature = "tui")]
 pub mod tui;
 
+pub mod cost_optimizer;
+pub mod prompt_optimizer;
+pub mod trace_export;
+pub mod trace_ui;
+pub mod webhooks;
+
 // Re-exports
 pub use ab_test::{AbTestConfig, AbTestResult, AbTestRunner, SuccessMetric, Variant};
 pub use conversation::{
