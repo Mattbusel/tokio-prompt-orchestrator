@@ -180,6 +180,7 @@ pub mod multi_modal;
 pub mod persona_manager;
 pub mod chain_of_thought;
 pub mod streaming_processor;
+pub mod model_fallback;
 pub mod provider_manager;
 pub mod context_compression;
 pub mod prompt_router;

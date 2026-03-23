@@ -1,467 +1,402 @@
-//! Streaming LLM response processor — token-by-token accumulation, transforms, filters, stats.
+//! Streaming token processor for SSE/streaming LLM responses.
 
-/// Reason the stream finished.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FinishReason {
-    /// Normal end-of-response.
-    Stop,
-    /// Model hit its maximum token limit.
-    Length,
-    /// Response was blocked by a content policy.
-    ContentFilter,
-    /// Model requested a function / tool call.
-    FunctionCall,
-    /// An error occurred during generation.
-    Error,
-}
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
-/// A single token emitted by the LLM streaming endpoint.
+/// Events emitted by the streaming processor.
 #[derive(Debug, Clone)]
-pub struct StreamToken {
-    /// Text content of this token.
-    pub content: String,
-    /// Reason the stream finished, if this is the final token.
-    pub finish_reason: Option<FinishReason>,
-    /// Zero-based sequential index of this token in the stream.
-    pub index: u64,
-    /// Wall-clock timestamp at which this token was received (ms since epoch).
-    pub timestamp_ms: u64,
-}
-
-/// Current state of a stream.
-#[derive(Debug, Clone, PartialEq)]
-pub enum StreamState {
-    /// Stream is still producing tokens.
-    Active,
-    /// Stream ended cleanly.
-    Completed(FinishReason),
-    /// Stream ended with an error.
+pub enum StreamEvent {
+    /// A text token fragment.
+    Token(String),
+    /// A tool/function call request.
+    ToolCall { name: String, arguments: String },
+    /// Stream completed successfully.
+    Done { total_tokens: usize },
+    /// An error occurred during streaming.
     Error(String),
+    /// Keepalive heartbeat (empty SSE comment).
+    Heartbeat,
 }
 
-/// Accumulates tokens and emits complete sentences / paragraphs.
-#[derive(Debug)]
+/// Bounded queue of [`StreamEvent`]s with backpressure support.
 pub struct StreamBuffer {
-    buffer: String,
-    total: u64,
-    state: StreamState,
+    inner: VecDeque<StreamEvent>,
+    max_size: usize,
+    total_received: usize,
 }
 
 impl StreamBuffer {
-    /// Create a new, empty buffer.
-    pub fn new() -> Self {
+    /// Create a new buffer with the given capacity.
+    pub fn new(max_size: usize) -> Self {
         Self {
-            buffer: String::new(),
-            total: 0,
-            state: StreamState::Active,
+            inner: VecDeque::with_capacity(max_size),
+            max_size,
+            total_received: 0,
         }
     }
 
-    /// Push a token into the buffer.
+    /// Push an event into the buffer.
     ///
-    /// Returns any complete sentences (ending with `.`, `!`, or `?`) that were
-    /// flushed as a result of this push.  Updates the internal state when
-    /// `finish_reason` is set.
-    pub fn push(&mut self, token: StreamToken) -> Vec<String> {
-        self.total += 1;
-
-        // Update state from finish reason before processing content.
-        if let Some(ref reason) = token.finish_reason {
-            self.state = StreamState::Completed(reason.clone());
+    /// Returns `false` (backpressure) if the buffer is already full.
+    pub fn push(&mut self, event: StreamEvent) -> bool {
+        if self.inner.len() >= self.max_size {
+            return false;
         }
-
-        self.buffer.push_str(&token.content);
-
-        let mut completed: Vec<String> = Vec::new();
-        loop {
-            // Find the earliest sentence terminator.
-            let maybe_pos = self.buffer.char_indices().find_map(|(i, c)| {
-                if c == '.' || c == '!' || c == '?' {
-                    Some(i + c.len_utf8())
-                } else {
-                    None
-                }
-            });
-            match maybe_pos {
-                Some(end) => {
-                    let sentence = self.buffer[..end].trim().to_string();
-                    self.buffer = self.buffer[end..].trim_start().to_string();
-                    if !sentence.is_empty() {
-                        completed.push(sentence);
-                    }
-                }
-                None => break,
-            }
-        }
-        completed
-    }
-
-    /// Flush any remaining buffered content (may not end with a terminator).
-    pub fn flush(&mut self) -> String {
-        let remaining = self.buffer.trim().to_string();
-        self.buffer.clear();
-        remaining
-    }
-
-    /// Total number of tokens pushed so far.
-    pub fn total_tokens(&self) -> u64 {
-        self.total
-    }
-
-    /// Current stream state.
-    pub fn state(&self) -> &StreamState {
-        &self.state
-    }
-}
-
-/// Transformations that can be applied to a token's content.
-#[derive(Debug, Clone)]
-pub enum StreamTransform {
-    /// Convert content to UPPERCASE.
-    Uppercase,
-    /// Convert content to lowercase.
-    Lowercase,
-    /// Replace occurrences of a regex-like literal pattern with `[REDACTED]`.
-    RedactPattern(String),
-    /// Truncate content to at most `n` bytes.
-    Truncate(usize),
-    /// Prepend a fixed prefix to the content.
-    PrependPrefix(String),
-}
-
-/// Filters that determine whether a token should pass downstream.
-#[derive(Debug, Clone)]
-pub enum StreamFilter {
-    /// Drop tokens whose `index` is >= the given limit.
-    MaxTokens(u64),
-    /// Drop tokens whose content contains the given keyword (case-insensitive).
-    BlockKeyword(String),
-    /// Drop tokens whose content length (in bytes) is < the given minimum.
-    MinLength(usize),
-}
-
-/// Aggregate statistics computed over a slice of tokens.
-#[derive(Debug, Clone, PartialEq)]
-pub struct StreamStats {
-    /// Total number of tokens.
-    pub total_tokens: u64,
-    /// Total character count across all tokens.
-    pub total_chars: u64,
-    /// Average characters per token.
-    pub avg_chars_per_token: f64,
-    /// Duration from first to last token in milliseconds.
-    pub duration_ms: u64,
-    /// Tokens per second (0 if duration is 0).
-    pub tokens_per_second: f64,
-}
-
-/// Stateless processor for applying transforms, filters, and computing stats.
-pub struct StreamingProcessor;
-
-impl StreamingProcessor {
-    /// Apply `transforms` in order to produce a new [`StreamToken`].
-    pub fn transform(token: &StreamToken, transforms: &[StreamTransform]) -> StreamToken {
-        let mut content = token.content.clone();
-        for t in transforms {
-            content = match t {
-                StreamTransform::Uppercase => content.to_uppercase(),
-                StreamTransform::Lowercase => content.to_lowercase(),
-                StreamTransform::RedactPattern(pat) => content.replace(pat.as_str(), "[REDACTED]"),
-                StreamTransform::Truncate(n) => {
-                    if content.len() > *n {
-                        content[..*n].to_string()
-                    } else {
-                        content
-                    }
-                }
-                StreamTransform::PrependPrefix(prefix) => format!("{}{}", prefix, content),
-            };
-        }
-        StreamToken {
-            content,
-            finish_reason: token.finish_reason.clone(),
-            index: token.index,
-            timestamp_ms: token.timestamp_ms,
-        }
-    }
-
-    /// Return `true` if the token passes **all** filters.
-    pub fn filter(token: &StreamToken, filters: &[StreamFilter]) -> bool {
-        for f in filters {
-            let pass = match f {
-                StreamFilter::MaxTokens(limit) => token.index < *limit,
-                StreamFilter::BlockKeyword(kw) => {
-                    !token.content.to_lowercase().contains(&kw.to_lowercase())
-                }
-                StreamFilter::MinLength(min) => token.content.len() >= *min,
-            };
-            if !pass {
-                return false;
-            }
-        }
+        self.total_received += 1;
+        self.inner.push_back(event);
         true
     }
 
-    /// Compute aggregate statistics over a slice of tokens.
-    pub fn aggregate_stats(tokens: &[StreamToken]) -> StreamStats {
-        if tokens.is_empty() {
-            return StreamStats {
-                total_tokens: 0,
-                total_chars: 0,
-                avg_chars_per_token: 0.0,
-                duration_ms: 0,
-                tokens_per_second: 0.0,
-            };
-        }
+    /// Pop the oldest event from the buffer.
+    pub fn pop(&mut self) -> Option<StreamEvent> {
+        self.inner.pop_front()
+    }
 
-        let total_tokens = tokens.len() as u64;
-        let total_chars: u64 = tokens.iter().map(|t| t.content.len() as u64).sum();
-        let avg_chars_per_token = total_chars as f64 / total_tokens as f64;
+    /// Concatenate and remove all [`StreamEvent::Token`] events, returning the result.
+    pub fn drain_tokens(&mut self) -> String {
+        let mut out = String::new();
+        self.inner.retain(|e| {
+            if let StreamEvent::Token(t) = e {
+                out.push_str(t);
+                false
+            } else {
+                true
+            }
+        });
+        out
+    }
 
-        let min_ts = tokens.iter().map(|t| t.timestamp_ms).min().unwrap_or(0);
-        let max_ts = tokens.iter().map(|t| t.timestamp_ms).max().unwrap_or(0);
-        let duration_ms = max_ts.saturating_sub(min_ts);
+    /// Returns `true` if the buffer has reached its maximum size.
+    pub fn is_full(&self) -> bool {
+        self.inner.len() >= self.max_size
+    }
 
-        let tokens_per_second = if duration_ms > 0 {
-            total_tokens as f64 / (duration_ms as f64 / 1000.0)
-        } else {
-            0.0
-        };
+    /// Number of events currently in the buffer.
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
 
-        StreamStats {
-            total_tokens,
-            total_chars,
-            avg_chars_per_token,
-            duration_ms,
-            tokens_per_second,
-        }
+    /// Returns `true` if the buffer contains no events.
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Total number of events ever pushed (including dropped ones).
+    pub fn total_received(&self) -> usize {
+        self.total_received
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Result produced by [`TokenAccumulator::finish`].
+#[derive(Debug, Clone)]
+pub struct AccumulatorResult {
+    /// Full accumulated text.
+    pub text: String,
+    /// Number of tokens accumulated.
+    pub token_count: usize,
+    /// Wall-clock duration from first to last token, in milliseconds.
+    pub duration_ms: u64,
+    /// Tokens per second (0 if no duration elapsed).
+    pub tokens_per_second: f64,
+}
 
-    fn tok(content: &str, index: u64, ts: u64) -> StreamToken {
-        StreamToken {
-            content: content.to_string(),
-            finish_reason: None,
-            index,
-            timestamp_ms: ts,
+/// Accumulates token fragments and tracks timing statistics.
+pub struct TokenAccumulator {
+    accumulated: String,
+    token_count: usize,
+    char_count: usize,
+    first_token_at: Option<Instant>,
+    last_token_at: Option<Instant>,
+}
+
+impl TokenAccumulator {
+    /// Create a new, empty accumulator.
+    pub fn new() -> Self {
+        Self {
+            accumulated: String::new(),
+            token_count: 0,
+            char_count: 0,
+            first_token_at: None,
+            last_token_at: None,
         }
     }
 
-    fn tok_final(content: &str, index: u64, ts: u64, reason: FinishReason) -> StreamToken {
-        StreamToken {
-            content: content.to_string(),
-            finish_reason: Some(reason),
-            index,
-            timestamp_ms: ts,
+    /// Append a token fragment.
+    pub fn push_token(&mut self, token: &str) {
+        let now = Instant::now();
+        if self.first_token_at.is_none() {
+            self.first_token_at = Some(now);
+        }
+        self.last_token_at = Some(now);
+        self.accumulated.push_str(token);
+        self.token_count += 1;
+        self.char_count += token.len();
+    }
+
+    /// Duration from the very first token to the very first token (i.e. always `Some(0)` after
+    /// the first push, but semantically "time to first token" measured at call site).
+    ///
+    /// Returns `None` if no tokens have been pushed yet.
+    pub fn time_to_first_token(&self) -> Option<Duration> {
+        self.first_token_at.map(|t| t.elapsed())
+    }
+
+    /// Tokens per second calculated over the full accumulation window.
+    ///
+    /// Returns `0.0` if fewer than two tokens were pushed or no time has elapsed.
+    pub fn tokens_per_second(&self) -> f64 {
+        match (self.first_token_at, self.last_token_at) {
+            (Some(first), Some(last)) => {
+                let secs = last.duration_since(first).as_secs_f64();
+                if secs > 0.0 {
+                    self.token_count as f64 / secs
+                } else {
+                    0.0
+                }
+            }
+            _ => 0.0,
         }
     }
 
-    // --- StreamBuffer ---
-
-    #[test]
-    fn buffer_emits_sentence_on_period() {
-        let mut buf = StreamBuffer::new();
-        let out = buf.push(tok("Hello world.", 0, 0));
-        assert_eq!(out, vec!["Hello world."]);
-        assert_eq!(buf.total_tokens(), 1);
+    /// Snapshot the current accumulation state as an [`AccumulatorResult`].
+    pub fn finish(&self) -> AccumulatorResult {
+        let duration_ms = match (self.first_token_at, self.last_token_at) {
+            (Some(first), Some(last)) => last.duration_since(first).as_millis() as u64,
+            _ => 0,
+        };
+        AccumulatorResult {
+            text: self.accumulated.clone(),
+            token_count: self.token_count,
+            duration_ms,
+            tokens_per_second: self.tokens_per_second(),
+        }
     }
 
-    #[test]
-    fn buffer_emits_multiple_sentences() {
-        let mut buf = StreamBuffer::new();
-        let out = buf.push(tok("Hi. Bye!", 0, 0));
-        assert_eq!(out.len(), 2);
-        assert_eq!(out[0], "Hi.");
-        assert_eq!(out[1], "Bye!");
+    /// Reference to the accumulated text so far.
+    pub fn text(&self) -> &str {
+        &self.accumulated
     }
 
-    #[test]
-    fn buffer_accumulates_partial() {
-        let mut buf = StreamBuffer::new();
-        let out1 = buf.push(tok("Hello", 0, 0));
-        assert!(out1.is_empty());
-        let out2 = buf.push(tok(" world.", 1, 1));
-        assert_eq!(out2, vec!["Hello world."]);
+    /// Number of tokens pushed so far.
+    pub fn token_count(&self) -> usize {
+        self.token_count
     }
 
-    #[test]
-    fn buffer_flush_returns_remainder() {
-        let mut buf = StreamBuffer::new();
-        buf.push(tok("Incomplete sentence", 0, 0));
-        let rem = buf.flush();
-        assert_eq!(rem, "Incomplete sentence");
-        assert_eq!(buf.flush(), "");
+    /// Total characters accumulated.
+    pub fn char_count(&self) -> usize {
+        self.char_count
+    }
+}
+
+impl Default for TokenAccumulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Running statistics for a [`StreamingProcessor`].
+#[derive(Debug, Clone, Default)]
+pub struct StreamStats {
+    /// Total SSE events processed.
+    pub events_processed: usize,
+    /// Total token fragments received.
+    pub tokens_received: usize,
+    /// Total tool-call events seen.
+    pub tool_calls_seen: usize,
+    /// Total error events seen.
+    pub errors_seen: usize,
+    /// Number of times the buffer was full (backpressure activations).
+    pub buffer_full_count: usize,
+}
+
+/// Parses SSE chunks from LLM streaming endpoints, accumulates tokens, and
+/// maintains a bounded [`StreamBuffer`] with backpressure.
+pub struct StreamingProcessor {
+    buffer: StreamBuffer,
+    accumulator: TokenAccumulator,
+    stats: StreamStats,
+}
+
+impl StreamingProcessor {
+    /// Create a new processor with the given buffer capacity.
+    pub fn new(buffer_size: usize) -> Self {
+        Self {
+            buffer: StreamBuffer::new(buffer_size),
+            accumulator: TokenAccumulator::new(),
+            stats: StreamStats::default(),
+        }
     }
 
-    #[test]
-    fn buffer_tracks_state_on_finish() {
-        let mut buf = StreamBuffer::new();
-        buf.push(tok_final("Done.", 0, 0, FinishReason::Stop));
-        assert_eq!(buf.state(), &StreamState::Completed(FinishReason::Stop));
+    /// Parse a raw SSE chunk and return the extracted events.
+    ///
+    /// Handles:
+    /// - Lines prefixed with `"data: "`
+    /// - The `"[DONE]"` sentinel
+    /// - JSON payloads with `choices[0].delta.content` (OpenAI-style)
+    pub fn process_chunk(&mut self, raw: &str) -> Vec<StreamEvent> {
+        let mut events = Vec::new();
+
+        for line in raw.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            // SSE comment → heartbeat
+            if line.starts_with(':') {
+                events.push(StreamEvent::Heartbeat);
+                continue;
+            }
+            // Strip "data: " prefix
+            let data = if let Some(rest) = line.strip_prefix("data: ") {
+                rest.trim()
+            } else {
+                continue;
+            };
+
+            // [DONE] sentinel
+            if data == "[DONE]" {
+                let total = self.accumulator.token_count();
+                events.push(StreamEvent::Done { total_tokens: total });
+                continue;
+            }
+
+            // Try to parse as JSON
+            match serde_json::from_str::<serde_json::Value>(data) {
+                Ok(json) => {
+                    // Extract delta content (OpenAI-style)
+                    if let Some(content) = json
+                        .pointer("/choices/0/delta/content")
+                        .and_then(|v| v.as_str())
+                    {
+                        if !content.is_empty() {
+                            events.push(StreamEvent::Token(content.to_string()));
+                        }
+                    }
+
+                    // Tool calls embedded in delta
+                    let tool_events = Self::extract_tool_calls(data);
+                    for (name, arguments) in tool_events {
+                        events.push(StreamEvent::ToolCall { name, arguments });
+                    }
+
+                    // finish_reason → Done
+                    if let Some(reason) = Self::detect_finish_reason(data) {
+                        if reason == "stop" || reason == "length" {
+                            let total = self.accumulator.token_count();
+                            events.push(StreamEvent::Done { total_tokens: total });
+                        }
+                    }
+                }
+                Err(e) => {
+                    events.push(StreamEvent::Error(format!("JSON parse error: {}", e)));
+                }
+            }
+        }
+
+        // Feed events into buffer and accumulator
+        for event in &events {
+            self.stats.events_processed += 1;
+            match event {
+                StreamEvent::Token(t) => {
+                    self.accumulator.push_token(t);
+                    self.stats.tokens_received += 1;
+                }
+                StreamEvent::ToolCall { .. } => self.stats.tool_calls_seen += 1,
+                StreamEvent::Error(_) => self.stats.errors_seen += 1,
+                _ => {}
+            }
+            if !self.buffer.push(event.clone()) {
+                self.stats.buffer_full_count += 1;
+            }
+        }
+
+        events
     }
 
-    #[test]
-    fn buffer_question_mark_terminates() {
-        let mut buf = StreamBuffer::new();
-        let out = buf.push(tok("Really?", 0, 0));
-        assert_eq!(out, vec!["Really?"]);
+    /// Extract tool/function call blocks from a raw JSON string.
+    ///
+    /// Returns a list of `(name, arguments)` pairs.
+    pub fn extract_tool_calls(raw: &str) -> Vec<(String, String)> {
+        let mut results = Vec::new();
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(raw) else {
+            return results;
+        };
+
+        // OpenAI style: choices[0].delta.tool_calls[]
+        if let Some(tool_calls) = json.pointer("/choices/0/delta/tool_calls").and_then(|v| v.as_array()) {
+            for tc in tool_calls {
+                let name = tc
+                    .pointer("/function/name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let arguments = tc
+                    .pointer("/function/arguments")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("{}")
+                    .to_string();
+                if !name.is_empty() {
+                    results.push((name, arguments));
+                }
+            }
+        }
+
+        // Anthropic style: type == "tool_use"
+        if json.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
+            let name = json.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let arguments = json
+                .get("input")
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "{}".to_string());
+            if !name.is_empty() {
+                results.push((name, arguments));
+            }
+        }
+
+        results
     }
 
-    // --- StreamingProcessor::transform ---
-
-    #[test]
-    fn transform_uppercase() {
-        let t = tok("hello", 0, 0);
-        let out = StreamingProcessor::transform(&t, &[StreamTransform::Uppercase]);
-        assert_eq!(out.content, "HELLO");
+    /// Detect the finish reason from a raw JSON SSE payload.
+    ///
+    /// Recognises `"stop"`, `"length"`, and `"tool_calls"`.
+    pub fn detect_finish_reason(raw: &str) -> Option<String> {
+        let json = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+        let reason = json
+            .pointer("/choices/0/finish_reason")
+            .and_then(|v| v.as_str())?;
+        match reason {
+            "stop" | "length" | "tool_calls" => Some(reason.to_string()),
+            _ => None,
+        }
     }
 
-    #[test]
-    fn transform_lowercase() {
-        let t = tok("WORLD", 0, 0);
-        let out = StreamingProcessor::transform(&t, &[StreamTransform::Lowercase]);
-        assert_eq!(out.content, "world");
+    /// Feed a batch of pre-parsed events into the accumulator and return a reference to it.
+    pub fn accumulate(&mut self, events: &[StreamEvent]) -> &TokenAccumulator {
+        for event in events {
+            if let StreamEvent::Token(t) = event {
+                self.accumulator.push_token(t);
+            }
+        }
+        &self.accumulator
     }
 
-    #[test]
-    fn transform_redact() {
-        let t = tok("my secret password123", 0, 0);
-        let out = StreamingProcessor::transform(
-            &t,
-            &[StreamTransform::RedactPattern("password123".to_string())],
-        );
-        assert_eq!(out.content, "my secret [REDACTED]");
+    /// Current processor statistics.
+    pub fn stats(&self) -> StreamStats {
+        self.stats.clone()
     }
 
-    #[test]
-    fn transform_truncate() {
-        let t = tok("abcdef", 0, 0);
-        let out = StreamingProcessor::transform(&t, &[StreamTransform::Truncate(3)]);
-        assert_eq!(out.content, "abc");
+    /// Reference to the internal buffer.
+    pub fn buffer(&self) -> &StreamBuffer {
+        &self.buffer
     }
 
-    #[test]
-    fn transform_prepend_prefix() {
-        let t = tok("world", 0, 0);
-        let out =
-            StreamingProcessor::transform(&t, &[StreamTransform::PrependPrefix("hello ".to_string())]);
-        assert_eq!(out.content, "hello world");
+    /// Mutable reference to the internal buffer.
+    pub fn buffer_mut(&mut self) -> &mut StreamBuffer {
+        &mut self.buffer
     }
 
-    #[test]
-    fn transform_chained() {
-        let t = tok("hello", 0, 0);
-        let out = StreamingProcessor::transform(
-            &t,
-            &[
-                StreamTransform::Uppercase,
-                StreamTransform::PrependPrefix("[A] ".to_string()),
-            ],
-        );
-        assert_eq!(out.content, "[A] HELLO");
-    }
-
-    #[test]
-    fn transform_preserves_metadata() {
-        let t = tok_final("hi", 5, 999, FinishReason::Length);
-        let out = StreamingProcessor::transform(&t, &[StreamTransform::Uppercase]);
-        assert_eq!(out.index, 5);
-        assert_eq!(out.timestamp_ms, 999);
-        assert_eq!(out.finish_reason, Some(FinishReason::Length));
-    }
-
-    // --- StreamingProcessor::filter ---
-
-    #[test]
-    fn filter_max_tokens_passes() {
-        let t = tok("hi", 4, 0);
-        assert!(StreamingProcessor::filter(&t, &[StreamFilter::MaxTokens(5)]));
-    }
-
-    #[test]
-    fn filter_max_tokens_blocks() {
-        let t = tok("hi", 5, 0);
-        assert!(!StreamingProcessor::filter(&t, &[StreamFilter::MaxTokens(5)]));
-    }
-
-    #[test]
-    fn filter_block_keyword() {
-        let t = tok("buy cheap drugs now", 0, 0);
-        assert!(!StreamingProcessor::filter(
-            &t,
-            &[StreamFilter::BlockKeyword("drugs".to_string())]
-        ));
-    }
-
-    #[test]
-    fn filter_block_keyword_case_insensitive() {
-        let t = tok("DRUGS are bad", 0, 0);
-        assert!(!StreamingProcessor::filter(
-            &t,
-            &[StreamFilter::BlockKeyword("drugs".to_string())]
-        ));
-    }
-
-    #[test]
-    fn filter_min_length_passes() {
-        let t = tok("hello", 0, 0);
-        assert!(StreamingProcessor::filter(&t, &[StreamFilter::MinLength(3)]));
-    }
-
-    #[test]
-    fn filter_min_length_blocks() {
-        let t = tok("hi", 0, 0);
-        assert!(!StreamingProcessor::filter(&t, &[StreamFilter::MinLength(3)]));
-    }
-
-    #[test]
-    fn filter_all_must_pass() {
-        let t = tok("hello world", 2, 0);
-        // passes MaxTokens(10) and MinLength(5), but blocked by keyword
-        let filters = vec![
-            StreamFilter::MaxTokens(10),
-            StreamFilter::BlockKeyword("world".to_string()),
-            StreamFilter::MinLength(5),
-        ];
-        assert!(!StreamingProcessor::filter(&t, &filters));
-    }
-
-    // --- StreamingProcessor::aggregate_stats ---
-
-    #[test]
-    fn stats_empty() {
-        let stats = StreamingProcessor::aggregate_stats(&[]);
-        assert_eq!(stats.total_tokens, 0);
-        assert_eq!(stats.total_chars, 0);
-        assert_eq!(stats.duration_ms, 0);
-        assert_eq!(stats.tokens_per_second, 0.0);
-    }
-
-    #[test]
-    fn stats_single_token() {
-        let stats = StreamingProcessor::aggregate_stats(&[tok("hello", 0, 1000)]);
-        assert_eq!(stats.total_tokens, 1);
-        assert_eq!(stats.total_chars, 5);
-        assert_eq!(stats.avg_chars_per_token, 5.0);
-        assert_eq!(stats.duration_ms, 0);
-    }
-
-    #[test]
-    fn stats_multiple() {
-        let tokens = vec![
-            tok("hi", 0, 0),
-            tok("bye", 1, 1000),
-            tok("ok", 2, 2000),
-        ];
-        let stats = StreamingProcessor::aggregate_stats(&tokens);
-        assert_eq!(stats.total_tokens, 3);
-        assert_eq!(stats.total_chars, 7);
-        assert!((stats.avg_chars_per_token - 7.0 / 3.0).abs() < 1e-9);
-        assert_eq!(stats.duration_ms, 2000);
-        assert!((stats.tokens_per_second - 1.5).abs() < 1e-9);
+    /// Reference to the token accumulator.
+    pub fn accumulator(&self) -> &TokenAccumulator {
+        &self.accumulator
     }
 }
