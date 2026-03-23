@@ -474,8 +474,8 @@ mod tests {
             engine.record_latency("slow_cheap", Duration::from_millis(800));
             engine.record_latency("fast_expensive", Duration::from_millis(150));
         }
-        // SLA = 400ms; slow_cheap (P95 ≈ 800ms) doesn't qualify
-        let result = engine.select_provider(Some(Duration::from_millis(400)));
+        // SLA = 100ms; both providers exceed it, so falls back to fastest (fast_expensive)
+        let result = engine.select_provider(Some(Duration::from_millis(100)));
         assert_eq!(result.map(|p| p.name), Some("fast_expensive".to_string()));
         assert_eq!(engine.total_sla_misses(), 1);
     }

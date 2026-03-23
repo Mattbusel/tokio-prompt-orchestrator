@@ -56,7 +56,13 @@ impl SimHashFingerprint {
     /// applied over the tokens so that small edits produce similar fingerprints
     /// rather than random ones.
     pub fn compute(text: &str) -> Self {
-        let tokens: Vec<&str> = text.split_whitespace().collect();
+        // Collect tokens, stripping leading/trailing punctuation so that
+        // "France?" and "France" produce the same token hash.
+        let tokens: Vec<String> = text
+            .split_whitespace()
+            .map(|t| t.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+            .filter(|t| !t.is_empty())
+            .collect();
 
         // Accumulator: one i32 per bit position.
         let mut acc = [0i32; 64];
@@ -74,10 +80,9 @@ impl SimHashFingerprint {
             }
         };
 
-        for (i, &token) in tokens.iter().enumerate() {
+        for (i, token) in tokens.iter().enumerate() {
             process(token, 1, &mut acc);
             if i + 1 < tokens.len() {
-                // Build the 2-gram in place without allocating.
                 let bigram = format!("{} {}", token, tokens[i + 1]);
                 process(&bigram, 2, &mut acc);
             }
@@ -316,8 +321,10 @@ mod tests {
     fn threshold_zero_is_exact_match_only() {
         let dedup = SemanticDeduplicator::new(0, Duration::from_secs(300));
         assert!(dedup.check_and_register("Hello world"));
-        // Even a minor change passes with threshold=0.
-        assert!(dedup.check_and_register("Hello world!"));
+        // Exact duplicate is blocked.
+        assert!(!dedup.check_and_register("Hello world"));
+        // Different content passes at threshold=0.
+        assert!(dedup.check_and_register("Hello universe"));
     }
 
     #[test]

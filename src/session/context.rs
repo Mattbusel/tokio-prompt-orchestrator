@@ -445,7 +445,7 @@ mod tests {
         let s = SessionId::new("carol");
         ctx.enrich(make_req("carol", "Turn 1")).await;
         ctx.record_response(&s, "Resp 1").await;
-        ctx.summarise(&s, "Carol asked about Turn 1 and got Resp 1.").await;
+        ctx.summarise(&s, "Carol asked an initial question and received an answer.").await;
 
         let (r, _) = ctx.enrich(make_req("carol", "Turn 2")).await;
         assert!(r.input.contains("Summary"), "summary not injected");

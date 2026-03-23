@@ -536,7 +536,7 @@ mod tests {
     fn throughput_drop_event_threshold() {
         assert!(throughput_drop_event(100.0, 100.0, 50.0).is_none());
         assert!(throughput_drop_event(40.0, 100.0, 50.0).is_some());
-        assert!(throughput_drop_event(49.0, 100.0, 50.0).is_none());
+        assert!(throughput_drop_event(51.0, 100.0, 50.0).is_none());
         let evt = throughput_drop_event(20.0, 100.0, 50.0).unwrap();
         if let WebhookEvent::ThroughputDrop { drop_percent, .. } = evt {
             assert!((drop_percent - 80.0).abs() < 0.01);

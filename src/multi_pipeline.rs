@@ -562,8 +562,8 @@ mod tests {
         assert_eq!(faq_stats.routed, 1);
     }
 
-    #[test]
-    fn test_meta_override() {
+    #[tokio::test]
+    async fn test_meta_override() {
         use crate::EchoWorker;
         use std::collections::HashMap;
 
