@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.2] - 2026-09-25
+
+### Added
+
+- One-line installs: `install.sh` (Linux, macOS) and `install.ps1` (Windows)
+  download the release archive, verify it against `SHA256SUMS.txt` and put
+  `orchestrator` on your PATH. Also Homebrew (`mattbusel/tap`), Scoop
+  (`mattbusel` bucket) and `cargo binstall` metadata.
+- Releases now ship `SHA256SUMS.txt` and include the `replay`, `coordinator`
+  and `validate` binaries next to `orchestrator`.
+- `orchestrator --help` has an EXAMPLES section (echo mode, curl, a real model).
+
+### Changed
+
+- `--provider` with an unknown name now stops with the list of valid providers
+  instead of silently falling back to echo.
+- A missing API key error lists every way to fix it, including the
+  `--provider echo` mode that needs no key.
+- README opens with what it does, a recorded demo GIF, an install table and
+  three steps; the docs.rs front page opens with a runnable example and links
+  to the main types instead of repeating the whole README.
+
 ## [1.4.1] - 2026-09-25
 
 ### Fixed

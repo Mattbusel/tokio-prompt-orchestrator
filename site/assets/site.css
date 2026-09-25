@@ -89,6 +89,7 @@ p { margin: 0 0 14px; }
 
 .qs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-top: 8px; }
 .step p { font-size: 15px; color: var(--muted); min-height: 3.2em; }
+.step p code { overflow-wrap: anywhere; }
 .n { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: var(--ink); color: var(--bg); font: 700 13px var(--mono); margin-right: 10px; }
 .code { position: relative; background: var(--panel); border: 1px solid var(--faint); border-radius: 12px; }
 .code pre { margin: 0; padding: 16px 18px; font-size: 13px; line-height: 1.6; overflow-x: auto; }

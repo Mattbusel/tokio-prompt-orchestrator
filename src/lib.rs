@@ -1,87 +1,111 @@
-//! # tokio-prompt-orchestrator
+//! Put a queue, deduplication and a circuit breaker between your app and an LLM
+//! provider, so repeated prompts cost one call and an outage fails fast instead
+//! of piling up.
 //!
-//! A production-grade orchestrator for multi-stage LLM inference pipelines over Tokio.
+//! ![demo](https://raw.githubusercontent.com/Mattbusel/tokio-prompt-orchestrator/main/assets/demo.gif)
 //!
-//! Provides a five-stage directed pipeline with bounded MPSC channels, backpressure,
-//! request deduplication, circuit breakers, retry logic, rate limiting, Prometheus
-//! metrics, OpenTelemetry tracing, and an optional autonomous self-improving control
-//! loop.
+//! ## Quick start
 //!
-//! ## Architecture
-//!
-//! Five-stage pipeline with bounded channels and backpressure:
-//!
-//! ```text
-//! PromptRequest -> RAG(512) -> Assemble(512) -> Inference(1024) -> Post(512) -> Stream(256)
+//! ```toml
+//! [dependencies]
+//! tokio-prompt-orchestrator = "1.4"
+//! tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 //! ```
 //!
-//! Each stage runs as an independent [`tokio::task`]. When a downstream channel
-//! fills, [`send_with_shed`] drops the incoming item and records it in the
-//! [`DeadLetterQueue`] rather than blocking the upstream stage.
+//! Send one prompt through the pipeline with the offline [`EchoWorker`] (no API
+//! key), read the answer, and check the dead-letter queue for anything dropped:
 //!
-//! ## Quick Start
-//!
-//! ```no_run
-//! use std::collections::HashMap;
-//! use std::sync::Arc;
-//! use tokio_prompt_orchestrator::{spawn_pipeline, EchoWorker, PromptRequest, SessionId, ModelWorker};
+//! ```
+//! use std::{collections::HashMap, sync::Arc};
+//! use tokio_prompt_orchestrator::{spawn_pipeline, EchoWorker, ModelWorker, PromptRequest, SessionId};
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     // Swap EchoWorker for AnthropicWorker, OpenAiWorker, LlamaCppWorker or VllmWorker.
 //!     let worker: Arc<dyn ModelWorker> = Arc::new(EchoWorker::new());
 //!     let handles = spawn_pipeline(worker);
+//!     let mut output = handles.take_output_rx().await.ok_or("output already taken")?;
 //!
 //!     handles.input_tx.send(PromptRequest {
 //!         session: SessionId::new("demo"),
-//!         request_id: "req-1".to_string(),
-//!         input: "Hello, pipeline!".to_string(),
+//!         request_id: "req-1".into(),
+//!         input: "Hello, pipeline!".into(),
 //!         meta: HashMap::new(),
 //!         deadline: None,
 //!     }).await?;
 //!
-//!     let mut guard = handles.output_rx.lock().await;
-//!     if let Some(rx) = guard.as_mut() {
-//!         if let Some(output) = rx.recv().await {
-//!             println!("{}", output.text);
-//!         }
+//!     let answer = output.recv().await.ok_or("pipeline closed")?;
+//!     assert!(answer.text.contains("Hello, pipeline!"));
+//!     println!("{}", answer.text);
+//!
+//!     for dropped in handles.dlq.drain() {
+//!         println!("dropped {}: {}", dropped.request_id, dropped.reason);
 //!     }
 //!     Ok(())
 //! }
 //! ```
 //!
-//! ## Module Organisation
+//! For a fuller example with deduplication and a simulated provider outage, run
+//! `cargo run --example llm_pipeline` in the repository.
+//!
+//! ## Main types
+//!
+//! - [`spawn_pipeline`] and [`spawn_pipeline_with_config`] start the five stages and return [`PipelineHandles`].
+//! - [`PromptRequest`] goes in through [`PipelineHandles::input_tx`]; [`PostOutput`] comes out of [`PipelineHandles::take_output_rx`].
+//! - [`ModelWorker`] is the trait for a backend: [`AnthropicWorker`], [`OpenAiWorker`], [`LlamaCppWorker`], [`VllmWorker`], [`EchoWorker`].
+//! - [`enhanced::Deduplicator`] and [`enhanced::CircuitBreaker`] are the resilience building blocks to wrap around a worker.
+//! - [`DeadLetterQueue`] holds every request that was dropped, with the reason.
+//! - [`PipelineConfig`] loads the same pipeline from TOML.
+//!
+//! ## How it works
+//!
+//! ```text
+//! PromptRequest -> RAG(512) -> Assemble(512) -> Inference(1024) -> Post(512) -> Stream(256)
+//! ```
+//!
+//! Each stage runs as its own Tokio task, joined by bounded channels. When a
+//! downstream channel is full, [`send_with_shed`] drops the item into the
+//! [`DeadLetterQueue`] instead of blocking the stage above it. Stage 3 checks the
+//! request deadline, calls the worker through a shared circuit breaker and
+//! enforces a timeout.
+//!
+//! ## Binaries and features
+//!
+//! The `orchestrator` binary (prebuilt on the
+//! [releases page](https://github.com/Mattbusel/tokio-prompt-orchestrator/releases/latest),
+//! or `cargo binstall tokio-prompt-orchestrator`) serves the pipeline over a
+//! terminal prompt and an HTTP API: `orchestrator --provider echo` runs with no key.
+//! No features are on by default. `web-api` adds the REST, SSE and WebSocket
+//! server, `full` adds metrics, Redis caching and rate limiting, `tui` a terminal
+//! dashboard, `mcp` an MCP server, and `self-improving` a self-tuning control loop.
+//!
+//! ## Modules
 //!
 //! | Module | Description |
 //! |--------|-------------|
-//! | [`ab_test`] | Prompt A/B testing — consistent hashing assignment, Welch's t-test winner determination, Cohen's d effect size |
 //! | [`stages`] | Five pipeline stage implementations and channel wiring |
-//! | [`worker`] | [`ModelWorker`] trait and five production implementations |
-//! | [`enhanced`] | Resilience primitives: circuit breaker, dedup, semantic dedup (SimHash), retry, cache, rate limiter, smart batching, tournament mode |
-//! | [`metrics`] | Prometheus metrics initialisation and helper functions |
+//! | [`worker`] | [`ModelWorker`] trait and the provider implementations |
+//! | [`enhanced`] | Resilience primitives: circuit breaker, dedup, semantic dedup (SimHash), retry, cache, rate limiter, smart batching |
 //! | [`config`] | TOML-deserialisable [`PipelineConfig`] with hot-reload support |
-//! | [`routing`] | [`ModelRouter`] for complexity-scored routing; [`ArbitrageEngine`] for SLA-aware cheapest-provider selection; [`PoolSizer`] for adaptive worker scaling |
-//! | [`security`] | [`PromptGuard`] — prompt injection and jailbreak detection middleware (zero external I/O) |
+//! | [`metrics`] | Prometheus metrics initialisation and helper functions |
+//! | [`routing`] | [`ModelRouter`] for complexity-scored routing; [`ArbitrageEngine`] for SLA-aware provider selection; [`PoolSizer`] for worker scaling |
+//! | [`security`] | [`PromptGuard`]: prompt injection and jailbreak detection (no external I/O) |
+//! | [`session`] | Multi-turn conversation context: injects history per session |
+//! | [`cascade`] | Multi-turn cascading inference: tool call loops with pluggable executors |
+//! | [`multi_pipeline`] | Named pipeline fleet with prompt classification and per-class routing |
+//! | [`ab_test`] | Prompt A/B testing: consistent hashing assignment, Welch's t-test, Cohen's d |
 //! | [`coordination`] | Agent fleet management and task claiming |
-//! | [`session`] | Multi-turn conversation context manager — auto-injects history per session |
-//! | [`cascade`] | Multi-turn cascading inference engine — tool call loops with pluggable executors |
-//! | [`multi_pipeline`] | Named pipeline fleet with heuristic prompt classification and per-class routing |
-//! | [`adaptive_pool`] | Kalman-filter adaptive worker pool controller — predicts queue depth and recommends scale events |
-//! | `self_tune` | PID controllers and telemetry bus (feature: `self-tune`) |
-//! | `self_modify` | Task generation and validation gate (feature: `self-modify`) |
-//! | `intelligence` | Learned router and autoscaler (feature: `intelligence`) |
-//! | `evolution` | A/B experiments and snapshot rollback (feature: `evolution`) |
-//! | `self_improve` | Wired self-improving loop (features: `self-tune`+`self-modify`+`intelligence`) |
+//! | [`adaptive_pool`] | Kalman-filter worker pool controller: predicts queue depth and recommends scale events |
 //! | `web_api` | REST/SSE/WebSocket server (feature: `web-api`) |
 //! | `distributed` | Redis dedup and NATS coordination (feature: `distributed`) |
 //! | `tui` | Ratatui terminal dashboard (feature: `tui`) |
+//! | `self_tune`, `self_modify`, `intelligence`, `evolution`, `self_improve` | Self-improving control loop (features of the same names) |
 //!
 //! [`PipelineConfig`]: config::PipelineConfig
 //! [`ModelRouter`]: routing::router::ModelRouter
 //! [`ArbitrageEngine`]: routing::ArbitrageEngine
 //! [`PoolSizer`]: routing::PoolSizer
 //! [`PromptGuard`]: security::PromptGuard
-
-#![doc = include_str!("../README.md")]
 
 use std::collections::HashMap;
 use thiserror::Error;

@@ -178,6 +178,18 @@ CONNECTING AGENTS / IDEs:
       cargo build --release --features mcp --bin mcp
       see examples/mcp_claude_desktop.md
 
+EXAMPLES:
+    # Try it offline: no key, no internet
+    orchestrator --provider echo
+
+    # While it runs, from a second terminal
+    curl -s -X POST http://127.0.0.1:8080/api/v1/infer \
+         -H "Content-Type: application/json" -d '{{"prompt": "hello"}}'
+    curl -s http://127.0.0.1:8080/api/v1/result/<request_id>
+
+    # A real model on another port
+    orchestrator --provider anthropic --model claude-sonnet-4-6 --port 9000
+
 SETTINGS FILE:
     orchestrator.env  (same folder as the binary)
     Edit this file directly to change provider, key, or port."#,
@@ -217,7 +229,16 @@ fn parse_args() -> Result<CliArgs, String> {
                 }
                 let val = args[i].clone();
                 match flag {
-                    "--provider" => provider = Some(val),
+                    "--provider" => {
+                        let p = val.to_ascii_lowercase();
+                        if !matches!(p.as_str(), "anthropic" | "openai" | "llama" | "echo") {
+                            return Err(format!(
+                                "Unknown provider '{val}'. Use one of: anthropic, openai, llama, echo\n\
+                                 (echo needs no key and no internet: orchestrator --provider echo)"
+                            ));
+                        }
+                        provider = Some(p);
+                    }
                     "--model" => model = Some(val),
                     "--port" => {
                         port = val
@@ -617,6 +638,24 @@ fn print_banner(cfg: &ResolvedConfig) {
 // Worker construction — friendly errors with actionable guidance
 // ---------------------------------------------------------------------------
 
+/// The error shown when a provider needs a key and none is set: every way to
+/// fix it, plus the no-key way to try the tool.
+fn missing_key_help(provider: &str, var: &str, example: &str, url: &str) -> String {
+    let set_cmd = if cfg!(windows) {
+        format!("$env:{var}=\"{example}\"   (PowerShell), then run again")
+    } else {
+        format!("export {var}={example}, then run again")
+    };
+    format!(
+        "No {provider} API key found.\n\n\
+         Fix it one of these ways:\n\
+         \x20   orchestrator --reset                 paste the key once; it is saved\n\
+         \x20   {set_cmd}\n\
+         \x20   orchestrator --provider echo         try everything offline, no key\n\n\
+         Get a key at: {url}"
+    )
+}
+
 fn build_worker(cfg: &ResolvedConfig) -> Result<Arc<dyn ModelWorker>, String> {
     match cfg.provider.as_str() {
         "anthropic" => {
@@ -624,10 +663,12 @@ fn build_worker(cfg: &ResolvedConfig) -> Result<Arc<dyn ModelWorker>, String> {
                 .map(|v| v.is_empty())
                 .unwrap_or(true)
             {
-                return Err("No Anthropic API key found.\n\n\
-                     Run orchestrator.exe --reset to enter your key.\n\
-                     Get a key at: https://console.anthropic.com/settings/keys"
-                    .to_string());
+                return Err(missing_key_help(
+                    "Anthropic",
+                    "ANTHROPIC_API_KEY",
+                    "sk-ant-...",
+                    "https://console.anthropic.com/settings/keys",
+                ));
             }
             AnthropicWorker::new(cfg.model.clone())
                 .map(|w| Arc::new(w) as Arc<dyn ModelWorker>)
@@ -635,7 +676,7 @@ fn build_worker(cfg: &ResolvedConfig) -> Result<Arc<dyn ModelWorker>, String> {
                     format!(
                         "Could not connect to Anthropic: {e}\n\n\
                          Check that your API key is correct and your account has credit.\n\
-                         Run orchestrator.exe --reset to re-enter your key."
+                         Run orchestrator --reset to re-enter your key."
                     )
                 })
         }
@@ -644,10 +685,12 @@ fn build_worker(cfg: &ResolvedConfig) -> Result<Arc<dyn ModelWorker>, String> {
                 .map(|v| v.is_empty())
                 .unwrap_or(true)
             {
-                return Err("No OpenAI API key found.\n\n\
-                     Run orchestrator.exe --reset to enter your key.\n\
-                     Get a key at: https://platform.openai.com/api-keys"
-                    .to_string());
+                return Err(missing_key_help(
+                    "OpenAI",
+                    "OPENAI_API_KEY",
+                    "sk-...",
+                    "https://platform.openai.com/api-keys",
+                ));
             }
             OpenAiWorker::new(cfg.model.clone())
                 .map(|w| Arc::new(w) as Arc<dyn ModelWorker>)
@@ -655,7 +698,7 @@ fn build_worker(cfg: &ResolvedConfig) -> Result<Arc<dyn ModelWorker>, String> {
                     format!(
                         "Could not connect to OpenAI: {e}\n\n\
                          Check that your API key is correct and your account has credit.\n\
-                         Run orchestrator.exe --reset to re-enter your key."
+                         Run orchestrator --reset to re-enter your key."
                     )
                 })
         }

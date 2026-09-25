@@ -1,22 +1,33 @@
 [package]
 name = "tokio-prompt-orchestrator"
-version = "1.4.1"
+version = "1.4.2"
 edition = "2021"
 rust-version = "1.85"
 default-run = "orchestrator"
-description = "Multi-core Tokio-native orchestration for LLM inference pipelines: dedup, circuit breakers, backpressure, MCP, and autonomous self-improvement"
+description = "Put a queue, deduplication and a circuit breaker in front of any LLM API, so repeated prompts cost one call and outages fail fast. Rust library, HTTP server and CLI."
 documentation = "https://docs.rs/tokio-prompt-orchestrator"
-homepage = "https://github.com/Mattbusel/tokio-prompt-orchestrator"
+homepage = "https://mattbusel.github.io/tokio-prompt-orchestrator/"
 repository = "https://github.com/Mattbusel/tokio-prompt-orchestrator"
 license = "MIT"
 readme = "README.md"
-keywords = ["tokio", "llm", "orchestration", "circuit-breaker", "async"]
-categories = ["asynchronous", "network-programming", "web-programming"]
+keywords = ["llm", "openai", "anthropic", "circuit-breaker", "tokio"]
+categories = ["asynchronous", "network-programming", "web-programming::http-server", "command-line-utilities"]
 exclude = [".github", "scripts", "assets", "site", "docs", "benches", "releases", ".idea", ".githooks", ".cargo", ".bench_baseline.txt", "claude_desktop_config.json"]
 
 [lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"
+
+# `cargo binstall tokio-prompt-orchestrator` downloads the release archive
+# instead of compiling. Asset names come from .github/workflows/release.yml.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/orchestrator-v{ version }-{ target }{ archive-suffix }"
+bin-dir = "orchestrator-v{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+disabled-strategies = ["quick-install"]
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
 
 [package.metadata.docs.rs]
 features = ["full", "tui", "mcp", "self-improving", "distributed"]
