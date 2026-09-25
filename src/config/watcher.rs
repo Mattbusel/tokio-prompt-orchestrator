@@ -118,19 +118,22 @@ impl ConfigWatcher {
         // exits when the watcher is dropped and the notify channel closes.
         let config_path = watch_path.clone();
         std::thread::spawn(move || {
+            // Trailing-edge debounce: reload once the file has been quiet for
+            // `debounce`. A burst of writes (or an editor's write + rename)
+            // then yields one reload of the final content, and the last write
+            // is never dropped.
             let debounce = Duration::from_millis(200);
-            let mut last_reload = std::time::Instant::now()
-                .checked_sub(debounce)
-                .unwrap_or_else(std::time::Instant::now);
+            let mut pending_since: Option<std::time::Instant> = None;
 
             loop {
-                // Block on the notify channel with a timeout instead of
-                // busy-polling with try_recv + sleep.  500 ms gives a good
-                // balance: fast reaction to file changes while keeping CPU use
-                // near zero when the file is idle.
-                let mut should_reload = false;
-                // Collect any events that arrived within the timeout window.
-                match notify_rx.recv_timeout(Duration::from_millis(500)) {
+                // Wait briefly while a reload is pending, otherwise idle at
+                // 500 ms so CPU use stays near zero when the file is unchanged.
+                let wait = if pending_since.is_some() {
+                    Duration::from_millis(50)
+                } else {
+                    Duration::from_millis(500)
+                };
+                match notify_rx.recv_timeout(wait) {
                     Ok(first_event) => {
                         // Process the first event, then drain any extras that
                         // arrived concurrently.
@@ -145,24 +148,23 @@ impl ConfigWatcher {
                                         .iter()
                                         .any(|p| p.file_name() == config_path.file_name());
                                     if is_our_file {
-                                        should_reload = true;
+                                        pending_since = Some(std::time::Instant::now());
                                     }
                                 }
                                 _ => {}
                             }
                         }
                     }
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                        // Nothing arrived — loop back and wait again.
-                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                         tracing::warn!("config watcher: notify channel disconnected, stopping");
                         break;
                     }
                 }
 
-                if should_reload && last_reload.elapsed() >= debounce {
-                    last_reload = std::time::Instant::now();
+                let should_reload = pending_since.is_some_and(|t| t.elapsed() >= debounce);
+                if should_reload {
+                    pending_since = None;
                     let reload_start = std::time::Instant::now();
                     match load_from_file(&config_path) {
                         Ok(new_config) => {
