@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- `orchestrator` built with `web-api` (the release binaries) exited right after
+  printing its banner: the terminal prompt found the output channel already
+  taken, returned, and ended the program. The pipeline output is now split by
+  request id so the terminal prompt and the HTTP API both work; if stdin
+  closes, the server keeps running.
+- The startup banner and `--help` advertised `POST /v1/prompt`, which does not
+  exist, and an HTTP URL for Claude Desktop. They now list the real routes
+  (`/api/v1/infer`, `/api/v1/result/<id>`, `/v1/stream`, `/health`) and point
+  Claude Desktop at the stdio `mcp` binary.
+- The banner box is padded by character count, so its right border lines up,
+  and it says when the web API is off because the `web-api` feature is missing.
+- A port already in use now prints a clear message instead of exiting silently.
+
+### Changed
+
+- README and project site rebuilt around real output of `llm_pipeline`;
+  the Pages workflow publishes the site with the API docs under `/api/` and
+  keeps the benchmark history.
+
 ## [1.4.0] - 2026-09-25
 
 Version 1.3.0 was never published to crates.io, so this release also carries

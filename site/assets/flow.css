@@ -1,0 +1,90 @@
+/* Colours for the request-flow drawing. Light is the default; dark comes
+   from prefers-color-scheme or an explicit data-theme on <html>. */
+:root {
+  --bg: #f5f3ee;
+  --panel: #fffdf8;
+  --ink: #17191c;
+  --muted: #676b72;
+  --faint: #d9d5cb;
+  --band: #ebe7de;
+  --q0: #c28a06;
+  --q1: #0d8f78;
+  --q2: #2f6fd6;
+  --bad: #d8452f;
+  --shed: #9a5b4f;
+  --mono: ui-monospace, "Cascadia Mono", "SF Mono", "JetBrains Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1113;
+    --panel: #15181b;
+    --ink: #ebe8e1;
+    --muted: #8d9199;
+    --faint: #2b3036;
+    --band: #1b1f23;
+    --q0: #f0b429;
+    --q1: #2cc7a6;
+    --q2: #6aa1ff;
+    --bad: #ff6a4d;
+    --shed: #c98a7c;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1113;
+  --panel: #15181b;
+  --ink: #ebe8e1;
+  --muted: #8d9199;
+  --faint: #2b3036;
+  --band: #1b1f23;
+  --q0: #f0b429;
+  --q1: #2cc7a6;
+  --q2: #6aa1ff;
+  --bad: #ff6a4d;
+  --shed: #c98a7c;
+}
+
+svg.flow { display: block; width: 100%; height: auto; font-family: var(--mono); }
+svg.flow .h { font-size: 13px; font-weight: 600; fill: var(--ink); letter-spacing: .02em; }
+svg.flow .hs { font-size: 11px; fill: var(--muted); }
+svg.flow .lbl { font-size: 12px; fill: var(--ink); }
+svg.flow .note { font-size: 11px; fill: var(--muted); }
+svg.flow .bad { font-size: 12px; fill: var(--bad); font-weight: 600; }
+svg.flow .hs.bad { font-size: 11px; }
+svg.flow .band { fill: var(--band); }
+svg.flow .gate { stroke: var(--ink); stroke-width: 3; stroke-linecap: round; }
+svg.flow .gate-open { fill: var(--bad); }
+svg.flow .node { fill: var(--ink); }
+svg.flow .model { fill: var(--panel); stroke: var(--ink); stroke-width: 1.5; }
+svg.flow .model-down { fill: none; stroke: var(--bad); stroke-width: 1.5; stroke-dasharray: 4 3; }
+svg.flow .rq { fill: none; stroke-width: 1.6; stroke-linecap: round; }
+svg.flow .rq.main { stroke-width: 2.6; }
+svg.flow .rq.cached { stroke-dasharray: 1 4; stroke-width: 2; }
+svg.flow .rq.failed { stroke: var(--bad); }
+svg.flow .rq.shed { stroke: var(--shed); stroke-dasharray: 5 4; }
+svg.flow .q0 { stroke: var(--q0); fill: var(--q0); }
+svg.flow .rq.q0 { fill: none; }
+svg.flow .q1 { stroke: var(--q1); fill: var(--q1); }
+svg.flow .rq.q1 { fill: none; }
+svg.flow .q2 { stroke: var(--q2); fill: var(--q2); }
+svg.flow .rq.q2 { fill: none; }
+svg.flow .dot { stroke: none; }
+svg.flow .unode { fill: var(--ink); }
+svg.flow .unode.bad-node { fill: var(--bad); }
+svg.flow .dlq { fill: none; stroke: var(--ink); stroke-width: 1.5; }
+svg.flow .slot-fail { fill: var(--bad); }
+svg.flow .slot-shed { fill: none; stroke: var(--bad); stroke-width: 1.5; }
+svg.flow .axis { stroke: var(--faint); stroke-width: 1.5; }
+svg.flow .tick { font-size: 10px; fill: var(--muted); }
+svg.flow .bar { stroke: none; opacity: .9; }
+svg.flow .barl { font-size: 10.5px; fill: var(--bg); font-weight: 600; }
+svg.flow .tk { stroke-width: 2; }
+svg.flow .tk.fail { stroke: var(--bad); }
+svg.flow .tk.shed { stroke: var(--shed); }
+svg.flow .pkt { stroke: none; }
+svg.flow .pkt.bad { fill: var(--bad); }
+svg.flow .pkt { filter: drop-shadow(0 0 3px var(--bg)); }
+svg.flow #gate-open, svg.flow #model-down, svg.flow .slot, svg.flow [id^="ans-"] { transition: opacity .25s ease; }
+svg.flow [id^="model-q"] { transition: r .2s ease; }
+svg.flow .playhead { stroke: var(--ink); stroke-width: 1.5; }
+svg.flow #open-label, svg.flow #down-label { transition: opacity .25s ease; }

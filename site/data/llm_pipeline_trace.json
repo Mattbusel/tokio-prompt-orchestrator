@@ -1,0 +1,375 @@
+{
+ "source": "cargo run --example llm_pipeline with the built-in mock model (300 ms per call), timestamps added by an instrumented copy; debug build on Windows x86_64, 2026-09-25",
+ "questions": [
+  "What is the capital of France? Answer in one sentence.",
+  "Explain backpressure in one sentence.",
+  "Write a haiku about bounded channels."
+ ],
+ "answers": [
+  "The capital of France is Paris.",
+  "Backpressure means a slow consumer makes fast producers wait instead of letting queues grow without bound.",
+  "Bounded channels fill / the sender waits its turn now / memory stays calm"
+ ],
+ "events": [
+  {
+   "t": 0.51,
+   "kind": "send",
+   "req": "req-01",
+   "user": "alice",
+   "q": 0
+  },
+  {
+   "t": 0.68,
+   "kind": "send",
+   "req": "req-02",
+   "user": "alice",
+   "q": 1
+  },
+  {
+   "t": 0.72,
+   "kind": "send",
+   "req": "req-03",
+   "user": "alice",
+   "q": 2
+  },
+  {
+   "t": 0.77,
+   "kind": "send",
+   "req": "req-04",
+   "user": "bob",
+   "q": 0
+  },
+  {
+   "t": 0.81,
+   "kind": "send",
+   "req": "req-05",
+   "user": "bob",
+   "q": 1
+  },
+  {
+   "t": 0.86,
+   "kind": "send",
+   "req": "req-06",
+   "user": "bob",
+   "q": 2
+  },
+  {
+   "t": 0.9,
+   "kind": "send",
+   "req": "req-07",
+   "user": "carol",
+   "q": 0
+  },
+  {
+   "t": 0.94,
+   "kind": "send",
+   "req": "req-08",
+   "user": "carol",
+   "q": 1
+  },
+  {
+   "t": 0.98,
+   "kind": "send",
+   "req": "req-09",
+   "user": "carol",
+   "q": 2
+  },
+  {
+   "t": 1.02,
+   "kind": "send",
+   "req": "req-10",
+   "user": "dave",
+   "q": 0
+  },
+  {
+   "t": 1.07,
+   "kind": "send",
+   "req": "req-11",
+   "user": "dave",
+   "q": 1
+  },
+  {
+   "t": 1.12,
+   "kind": "send",
+   "req": "req-12",
+   "user": "dave",
+   "q": 2
+  },
+  {
+   "t": 17.67,
+   "kind": "model_start",
+   "q": 0
+  },
+  {
+   "t": 327.94,
+   "kind": "model_done",
+   "q": 0
+  },
+  {
+   "t": 328.5,
+   "kind": "model_start",
+   "q": 1
+  },
+  {
+   "t": 328.81,
+   "kind": "output",
+   "req": "req-01",
+   "q": 0
+  },
+  {
+   "t": 640.68,
+   "kind": "model_done",
+   "q": 1
+  },
+  {
+   "t": 640.83,
+   "kind": "model_start",
+   "q": 2
+  },
+  {
+   "t": 640.9,
+   "kind": "output",
+   "req": "req-02",
+   "q": 1
+  },
+  {
+   "t": 948.61,
+   "kind": "model_done",
+   "q": 2
+  },
+  {
+   "t": 948.74,
+   "kind": "dedup_cached",
+   "q": 0
+  },
+  {
+   "t": 948.84,
+   "kind": "dedup_cached",
+   "q": 1
+  },
+  {
+   "t": 948.87,
+   "kind": "dedup_cached",
+   "q": 2
+  },
+  {
+   "t": 948.91,
+   "kind": "dedup_cached",
+   "q": 0
+  },
+  {
+   "t": 948.94,
+   "kind": "dedup_cached",
+   "q": 1
+  },
+  {
+   "t": 948.97,
+   "kind": "dedup_cached",
+   "q": 2
+  },
+  {
+   "t": 949.01,
+   "kind": "dedup_cached",
+   "q": 0
+  },
+  {
+   "t": 949.04,
+   "kind": "dedup_cached",
+   "q": 1
+  },
+  {
+   "t": 949.07,
+   "kind": "dedup_cached",
+   "q": 2
+  },
+  {
+   "t": 949.17,
+   "kind": "output",
+   "req": "req-03",
+   "q": 2
+  },
+  {
+   "t": 949.21,
+   "kind": "output",
+   "req": "req-04",
+   "q": 0
+  },
+  {
+   "t": 949.24,
+   "kind": "output",
+   "req": "req-05",
+   "q": 1
+  },
+  {
+   "t": 949.26,
+   "kind": "output",
+   "req": "req-06",
+   "q": 2
+  },
+  {
+   "t": 949.28,
+   "kind": "output",
+   "req": "req-07",
+   "q": 0
+  },
+  {
+   "t": 949.31,
+   "kind": "output",
+   "req": "req-08",
+   "q": 1
+  },
+  {
+   "t": 949.33,
+   "kind": "output",
+   "req": "req-09",
+   "q": 2
+  },
+  {
+   "t": 949.35,
+   "kind": "output",
+   "req": "req-10",
+   "q": 0
+  },
+  {
+   "t": 949.37,
+   "kind": "output",
+   "req": "req-11",
+   "q": 1
+  },
+  {
+   "t": 949.4,
+   "kind": "output",
+   "req": "req-12",
+   "q": 2
+  },
+  {
+   "t": 949.45,
+   "kind": "send",
+   "req": "req-13",
+   "user": "erin",
+   "q": null
+  },
+  {
+   "t": 949.49,
+   "kind": "send",
+   "req": "req-14",
+   "user": "erin",
+   "q": null
+  },
+  {
+   "t": 949.51,
+   "kind": "send",
+   "req": "req-15",
+   "user": "erin",
+   "q": null
+  },
+  {
+   "t": 949.53,
+   "kind": "send",
+   "req": "req-16",
+   "user": "erin",
+   "q": null
+  },
+  {
+   "t": 949.56,
+   "kind": "send",
+   "req": "req-17",
+   "user": "erin",
+   "q": null
+  },
+  {
+   "t": 949.58,
+   "kind": "send",
+   "req": "req-18",
+   "user": "erin",
+   "q": null
+  },
+  {
+   "t": 949.6,
+   "kind": "send",
+   "req": "req-19",
+   "user": "erin",
+   "q": null
+  },
+  {
+   "t": 949.67,
+   "kind": "send",
+   "req": "req-20",
+   "user": "erin",
+   "q": null
+  },
+  {
+   "t": 964.28,
+   "kind": "provider_503",
+   "req": "req-13"
+  },
+  {
+   "t": 964.38,
+   "kind": "dlq",
+   "req": "req-13",
+   "reason": "inference_failure:inference failed: 503 Service Unavailable (simulated outage)"
+  },
+  {
+   "t": 980.22,
+   "kind": "provider_503",
+   "req": "req-14"
+  },
+  {
+   "t": 980.29,
+   "kind": "dlq",
+   "req": "req-14",
+   "reason": "inference_failure:inference failed: 503 Service Unavailable (simulated outage)"
+  },
+  {
+   "t": 996.02,
+   "kind": "provider_503",
+   "req": "req-15"
+  },
+  {
+   "t": 996.14,
+   "kind": "dlq",
+   "req": "req-15",
+   "reason": "inference_failure:inference failed: 503 Service Unavailable (simulated outage)"
+  },
+  {
+   "t": 1011.14,
+   "kind": "provider_503",
+   "req": "req-16"
+  },
+  {
+   "t": 1011.22,
+   "kind": "dlq",
+   "req": "req-16",
+   "reason": "inference_failure:inference failed: 503 Service Unavailable (simulated outage)"
+  },
+  {
+   "t": 1027.05,
+   "kind": "provider_503",
+   "req": "req-17"
+  },
+  {
+   "t": 1027.15,
+   "kind": "dlq",
+   "req": "req-17",
+   "reason": "inference_failure:inference failed: 503 Service Unavailable (simulated outage)"
+  },
+  {
+   "t": 1042.5,
+   "kind": "dlq",
+   "req": "req-18",
+   "reason": "circuit_breaker_open"
+  },
+  {
+   "t": 1058.35,
+   "kind": "dlq",
+   "req": "req-19",
+   "reason": "circuit_breaker_open"
+  },
+  {
+   "t": 1073.16,
+   "kind": "dlq",
+   "req": "req-20",
+   "reason": "circuit_breaker_open"
+  }
+ ]
+}

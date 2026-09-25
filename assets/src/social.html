@@ -1,0 +1,31 @@
+<!doctype html>
+<!-- Source of .github/social-preview.png: render the viewport at 1280x640, dark scheme. -->
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<title>social</title>
+<link rel="stylesheet" href="../../site/assets/flow.css">
+<style>
+  html, body { margin: 0; background: var(--bg); color: var(--ink); }
+  body { width: 1280px; height: 640px; overflow: hidden; font-family: var(--sans); display: grid; grid-template-columns: 380px 1fr; align-items: center; }
+  .l { padding: 0 0 0 56px; }
+  h1 { font-family: var(--mono); font-size: 34px; line-height: 1.08; margin: 0 0 22px; letter-spacing: -.02em; }
+  h1 .dim { color: var(--muted); font-weight: 400; }
+  p { font-size: 19px; line-height: 1.45; margin: 0 0 26px; }
+  .k { font-family: var(--mono); font-size: 14px; color: var(--muted); line-height: 1.8; }
+  .k b { color: var(--ink); } .k .g { color: var(--q0); } .k .r { color: var(--bad); }
+  .r-col { padding-right: 28px; }
+</style>
+</head>
+<body>
+  <div class="l">
+    <h1>tokio-prompt-<br><span class="dim">orchestrator</span></h1>
+    <p>A bounded Tokio pipeline in front of your LLM: dedup, circuit breaker, dead-letter queue.</p>
+    <div class="k"><b>12</b> requests &rarr; <span class="g">3</span> model calls<br><span class="r">5</span> failures &rarr; breaker open<br><span class="r">8</span> dropped &rarr; <span class="r">8</span> in the DLQ</div>
+  </div>
+  <div class="r-col" id="flow"></div>
+<script src="../../site/assets/flow.js"></script>
+<script src="trace_data.js"></script>
+<script>document.getElementById("flow").innerHTML = PipelineFlow.svg(window.TRACE, { noTimeline: true });</script>
+</body>
+</html>

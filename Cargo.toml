@@ -12,7 +12,7 @@ license = "MIT"
 readme = "README.md"
 keywords = ["tokio", "llm", "orchestration", "circuit-breaker", "async"]
 categories = ["asynchronous", "network-programming", "web-programming"]
-exclude = [".github", "scripts", "assets", "docs", "benches", "releases", ".idea", ".githooks", ".cargo", ".bench_baseline.txt", "claude_desktop_config.json"]
+exclude = [".github", "scripts", "assets", "site", "docs", "benches", "releases", ".idea", ".githooks", ".cargo", ".bench_baseline.txt", "claude_desktop_config.json"]
 
 [lints.clippy]
 unwrap_used = "deny"

@@ -1,0 +1,59 @@
+<!doctype html>
+<!--
+  Source of assets/banner-light.png and assets/banner-dark.png.
+  Render at 1280px wide, deviceScaleFactor 2, once with colorScheme "light"
+  and once with "dark" (Playwright), after writing trace_data.js with:
+    printf 'window.TRACE=' > trace_data.js
+    cat ../../site/data/llm_pipeline_trace.json >> trace_data.js
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>banner</title>
+<link rel="stylesheet" href="../../site/assets/flow.css">
+<style>
+  html, body { margin: 0; background: var(--bg); color: var(--ink); }
+  body { width: 1280px; font-family: var(--sans); }
+  .wrap { padding: 44px 48px 28px; }
+  .top { display: flex; justify-content: space-between; align-items: flex-end; gap: 32px; }
+  h1 { font-family: var(--mono); font-size: 40px; line-height: 1; margin: 0 0 14px; letter-spacing: -.02em; font-weight: 700; }
+  h1 .dim { color: var(--muted); font-weight: 400; }
+  p.pitch { font-size: 19px; line-height: 1.45; margin: 0; max-width: 700px; color: var(--ink); }
+  .stats { display: grid; grid-template-columns: auto auto; gap: 6px 14px; font-family: var(--mono); font-size: 13.5px; white-space: nowrap; }
+  .stats b { font-weight: 700; text-align: right; }
+  .stats .k { color: var(--muted); }
+  .stats .q0 { color: var(--q0); } .stats .bad { color: var(--bad); }
+  .flow-wrap { margin-top: 18px; }
+  .cap { font-family: var(--mono); font-size: 12px; color: var(--muted); margin-top: 2px; display: flex; justify-content: space-between; }
+  .cap code { color: var(--ink); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div>
+      <h1>tokio-prompt-<span class="dim">orchestrator</span></h1>
+      <p class="pitch">A bounded Tokio pipeline in front of your LLM. Duplicate prompts share one model call, a failing provider trips a circuit breaker, and every dropped request lands in a dead-letter queue.</p>
+    </div>
+    <div class="stats" id="stats"></div>
+  </div>
+  <div class="flow-wrap" id="flow"></div>
+  <div class="cap"><span>One real run of <code>cargo run --example llm_pipeline</code> with the built-in mock model. No API key.</span><span>Rust · Tokio · crates.io 1.4</span></div>
+</div>
+<script src="../../site/assets/flow.js"></script>
+<script src="trace_data.js"></script>
+<script>
+  var d = window.TRACE, ev = d.events;
+  var calls = ev.filter(function (e) { return e.kind === "model_start"; }).length;
+  var fails = ev.filter(function (e) { return e.kind === "provider_503"; }).length;
+  var dlq = ev.filter(function (e) { return e.kind === "dlq"; }).length;
+  var sends = ev.filter(function (e) { return e.kind === "send"; }).length;
+  document.getElementById("stats").innerHTML =
+    '<b>12</b><span class="k">requests from 4 users</span>' +
+    '<b class="q0">' + calls + '</b><span class="k">model calls, 9 served by dedup</span>' +
+    '<b class="bad">' + fails + '</b><span class="k">503s, then the breaker opens</span>' +
+    '<b class="bad">' + dlq + '/' + (sends - 12) + '</b><span class="k">outage requests in the DLQ</span>';
+  document.getElementById("flow").innerHTML = PipelineFlow.svg(d);
+</script>
+</body>
+</html>

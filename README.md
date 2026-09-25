@@ -1,30 +1,19 @@
-# tokio-prompt-orchestrator
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Mattbusel/tokio-prompt-orchestrator/main/assets/banner-dark.png">
+  <img alt="tokio-prompt-orchestrator: 12 requests from 4 users become 3 model calls through dedup; during a simulated outage 5 calls fail, the circuit breaker opens and refuses 3 more, and all 8 land in the dead-letter queue. Drawn from one real run of the llm_pipeline example." src="https://raw.githubusercontent.com/Mattbusel/tokio-prompt-orchestrator/main/assets/banner-light.png" width="100%">
+</picture>
 
-[![Crates.io](https://img.shields.io/crates/v/tokio-prompt-orchestrator.svg)](https://crates.io/crates/tokio-prompt-orchestrator)
-[![docs.rs](https://docs.rs/tokio-prompt-orchestrator/badge.svg)](https://docs.rs/tokio-prompt-orchestrator)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/Mattbusel/tokio-prompt-orchestrator/blob/main/LICENSE)
+<p align="center">
+  <a href="https://mattbusel.github.io/tokio-prompt-orchestrator/"><b>Site with a live replay</b></a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="https://docs.rs/tokio-prompt-orchestrator">docs.rs</a> ·
+  <a href="https://crates.io/crates/tokio-prompt-orchestrator">crates.io</a> ·
+  <a href="https://github.com/Mattbusel/tokio-prompt-orchestrator/actions/workflows/ci.yml">CI</a>
+</p>
 
-A Tokio pipeline for serving LLM requests: prompts flow through five bounded stages (retrieve, assemble, infer, post-process, stream) with request deduplication, circuit breakers, retries, rate limiting and a dead-letter queue, in front of Anthropic, OpenAI, llama.cpp, vLLM or your own backend.
+A Tokio pipeline for serving LLM requests: prompts flow through five bounded stages (retrieve, assemble, infer, post-process, stream) with a circuit breaker and a dead-letter queue built in, plus building blocks for request deduplication, retries, caching and rate limiting, in front of Anthropic, OpenAI, llama.cpp, vLLM or your own backend.
 
 It runs as a library, as a binary with a REST, WebSocket and SSE API, as an MCP server for Claude Desktop, and with a terminal dashboard. Optional feature flags add Prometheus metrics, OpenTelemetry tracing, Redis-backed distributed mode and a self-tuning control loop.
-
-![TUI dashboard](assets/tui-dashboard.png)
-
-## Why This Exists
-
-Running LLM inference in production at scale exposes a class of problems that a single `reqwest` call cannot solve:
-
-- **Thundering herd**: 10,000 concurrent sessions all calling the same model. Without deduplication, identical prompts hit the API 10,000 times.
-- **Provider instability**: Cloud APIs drop packets, timeout, rate-limit, and return 5xx errors. Without a circuit breaker, one bad minute cascades into minutes of queued failures.
-- **Latency tail management**: A slow model response blocks an unbounded goroutine/thread pool. Bounded async channels propagate backpressure instead.
-- **Cost opacity**: Nobody knows which prompt pattern is eating the budget until the invoice arrives.
-- **Manual tuning**: Worker counts, buffer sizes, retry delays, these need continuous adjustment as traffic patterns shift.
-- **Prompt injection**: Adversarial users can override system instructions or extract secrets, without a guard the model becomes a liability.
-- **Provider lock-in**: All requests go to one provider even when another is cheaper and equally fast for your SLA.
-
-This crate addresses each of these, with a compile-time feature flag for each optional subsystem.
-
----
 
 ## Quick start
 
@@ -36,27 +25,9 @@ cd tokio-prompt-orchestrator
 cargo run --example llm_pipeline
 ```
 
-It pushes 12 requests from 4 users through the pipeline, then simulates a provider outage:
+It pushes 12 requests from 4 users through the pipeline, then simulates a provider outage. This is the real output (the banner above is drawn from the same run):
 
-```text
-Backend: mock model (no network)
-
-1) 12 requests: 4 users x 3 questions
-   req-01 alice  The capital of France is Paris.
-   req-02 alice  Backpressure means a slow consumer makes fast producers wait instead of letting queues grow without bound.
-   ...
-   req-12 dave   Bounded channels fill / the sender waits its turn now / memory stays calm
-   -> 12 answers in 0.9s, 3 model calls (9 saved by dedup)
-
-2) Provider outage: 8 new requests while every call fails
-   DLQ req-13  inference_failure:inference failed: 503 Service Unavailable (simulated outage)
-   ...
-   DLQ req-17  inference_failure:inference failed: 503 Service Unavailable (simulated outage)
-   DLQ req-18  circuit open, failed fast (provider not called)
-   DLQ req-19  circuit open, failed fast (provider not called)
-   DLQ req-20  circuit open, failed fast (provider not called)
-   -> breaker is Open; it lets one probe through after 60s to test recovery
-```
+<img alt="Output of cargo run --example llm_pipeline: 12 answers in 1.0s from 3 model calls, then 5 requests fail with 503, the breaker opens, 3 more fail fast, and all 8 are listed from the dead-letter queue" src="https://raw.githubusercontent.com/Mattbusel/tokio-prompt-orchestrator/main/assets/terminal-llm-pipeline.png" width="100%">
 
 Same example against a real model (3 short API calls; the outage is simulated in front of the provider, so it costs nothing):
 
@@ -67,41 +38,26 @@ PROVIDER=openai    OPENAI_API_KEY=sk-...        cargo run --example llm_pipeline
 
 The source is [`examples/llm_pipeline.rs`](examples/llm_pipeline.rs): about 200 lines, and a good template for wiring your own backend.
 
-### Option A: Prebuilt Binary (no Rust required)
-
-1. Download the archive for your platform (Linux x86_64, macOS Apple Silicon or Intel, Windows x86_64) from the [latest release](https://github.com/Mattbusel/tokio-prompt-orchestrator/releases/latest), unpack it, and run `orchestrator` (`orchestrator.exe` on Windows). These builds include the REST/WebSocket API.
-
-2. The first launch runs an interactive setup wizard:
-
-```text
-Which AI provider do you want to use?
-
-1) Anthropic  (Claude)
-2) OpenAI     (GPT-4o)
-3) llama.cpp  (local, no key)
-4) echo       (offline test mode, no key needed)
-
-Enter 1, 2, 3, or 4 [4]:
-```
-
-3. The orchestrator starts a terminal REPL and a web API on `http://127.0.0.1:8080` simultaneously. Type prompts directly, or connect from any HTTP client.
-
-### Option B: From Source (Rust developers)
+### Run the server
 
 ```bash
-# Clone and run the interactive orchestrator in offline echo mode, no API key needed
-git clone https://github.com/Mattbusel/tokio-prompt-orchestrator
-cd tokio-prompt-orchestrator
-cargo run -- --provider echo
+# Terminal prompt plus the REST/WebSocket API on http://127.0.0.1:8080, offline echo mode
+cargo run --features web-api -- --provider echo
 
-# Switch to a real provider, with the REST/WebSocket API on http://127.0.0.1:8080
-ANTHROPIC_API_KEY=sk-ant-... cargo run --features full -- --provider anthropic --model claude-sonnet-4-6
+# A real provider
+ANTHROPIC_API_KEY=sk-ant-... cargo run --features web-api -- --provider anthropic --model claude-sonnet-4-6
 
-# Start with the full feature set + TUI dashboard
+# Full feature set + TUI dashboard
 cargo run --features full,tui --bin tui
 ```
 
-### Option C: Library (embed in your application)
+<img alt="The orchestrator binary in echo mode answering a prompt typed in the terminal, while a second terminal posts a prompt to /api/v1/infer and fetches the result" src="https://raw.githubusercontent.com/Mattbusel/tokio-prompt-orchestrator/main/assets/terminal-server.png" width="100%">
+
+Without `--provider` the first launch runs a setup wizard (Anthropic, OpenAI, llama.cpp, or offline echo) and saves the choice to `orchestrator.env`.
+
+**Prebuilt binaries.** The [releases](https://github.com/Mattbusel/tokio-prompt-orchestrator/releases/latest) page has archives for Linux x86_64, macOS (Apple Silicon and Intel) and Windows x86_64, built with the web API. The 1.4.0 binaries exit right after printing the banner; that is fixed on `main` and ships in the next release, so build from source until then.
+
+### Use the library
 
 ```toml
 [dependencies]
@@ -111,99 +67,53 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 For the code on `main`: `tokio-prompt-orchestrator = { git = "https://github.com/Mattbusel/tokio-prompt-orchestrator" }`.
 
-**New capabilities at a glance:**
-
-| What | Module | No extra deps |
-|------|--------|:---:|
-| Block prompt injection / jailbreaks | `security::PromptGuard` | Yes |
-| Route to cheapest provider within latency SLA | `routing::ArbitrageEngine` | Yes |
-| Auto-scale worker pool from queue depth | `routing::PoolSizer` | Yes |
-| Multi-turn conversation memory | `session::SessionContext` | Yes |
-| Smart micro-batching for GPU servers | `enhanced::SmartBatcher` | Yes |
-| Fan-out tournament for quality ranking | `enhanced::TournamentRunner` | Yes |
-| **Multi-turn cascading inference (tool calls)** | **`cascade::CascadeEngine`** | **Yes** |
-| **Named pipeline fleet with prompt routing** | **`multi_pipeline::MultiPipelineRouter`** | **Yes** |
-| **Kalman-filter adaptive worker pool** | **`adaptive_pool::AdaptivePool`** | **Yes** |
-| **Prompt A/B testing with Welch's t-test** | **`ab_test::AbTestRunner`** | **Yes** |
-| **Semantic near-duplicate detection (SimHash)** | **`enhanced::SemanticDeduplicator`** | **Yes** |
-
 ```rust,no_run
-use std::collections::HashMap;
-use tokio_prompt_orchestrator::{spawn_pipeline, EchoWorker, PromptRequest, SessionId};
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
+use tokio_prompt_orchestrator::{spawn_pipeline, EchoWorker, ModelWorker, PromptRequest, SessionId};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Swap EchoWorker for OpenAiWorker, AnthropicWorker, LlamaCppWorker, or VllmWorker
-    let worker: Arc<dyn tokio_prompt_orchestrator::ModelWorker> = Arc::new(EchoWorker::new());
+    let worker: Arc<dyn ModelWorker> = Arc::new(EchoWorker::new());
     let handles = spawn_pipeline(worker);
+    let mut output = handles.take_output_rx().await.ok_or("output taken")?;
 
     handles.input_tx.send(PromptRequest {
         session: SessionId::new("demo"),
-        request_id: "req-1".to_string(),
-        input: "Hello, pipeline!".to_string(),
+        request_id: "req-1".into(),
+        input: "Hello, pipeline!".into(),
         meta: HashMap::new(),
         deadline: None,
     }).await?;
 
-    let mut guard = handles.output_rx.lock().await;
-    if let Some(rx) = guard.as_mut() {
-        if let Some(output) = rx.recv().await {
-            println!("Response: {}", output.text);
-        }
-    }
+    if let Some(out) = output.recv().await { println!("{}", out.text); }
+    for dropped in handles.dlq.drain() { println!("dropped {}: {}", dropped.request_id, dropped.reason); }
     Ok(())
 }
 ```
 
----
+## What you get
+
+| | What happened in the run above | Where |
+|---|---|---|
+| **Deduplication** | 12 requests, **3 model calls**; the 9 repeats were answered from the dedup cache in 0.3 ms total | `enhanced::Deduplicator`, wrapped around the worker |
+| **Circuit breaker** | After **5 failures** it opened; the next 3 requests were refused without calling the provider. It probes again after 60 s | `enhanced::CircuitBreaker`, built into stage 3 |
+| **Dead-letter queue** | All **8** outage requests were recorded with a reason; nothing was dropped silently | `handles.dlq`, a 1000-entry ring buffer |
+| **Backpressure** | Every stage hands off through a bounded channel, so a slow model makes producers wait or shed instead of growing memory | `spawn_pipeline(worker)` |
 
 ## Architecture
 
-### Pipeline Overview
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Mattbusel/tokio-prompt-orchestrator/main/assets/architecture-dark.svg">
+  <img alt="Five stages joined by bounded channels with capacities 512, 512, 512, 1024, 512 and 256: retrieve, assemble, inference, post-process, stream. Stage 3 runs a deadline check, the circuit breaker and a timeout around the model worker. Requests dropped for backpressure, failure, timeout, deadline or an open breaker go to the dead-letter queue." src="https://raw.githubusercontent.com/Mattbusel/tokio-prompt-orchestrator/main/assets/architecture-light.svg" width="100%">
+</picture>
 
-The pipeline is a five-stage directed acyclic graph of bounded async channels. Each stage runs as an independent Tokio task. Backpressure propagates upstream when a downstream channel fills; excess requests are shed gracefully to a dead-letter queue rather than blocking.
+Each stage is its own Tokio task. When a downstream channel is full the stage sheds the request to the dead-letter queue with a `backpressure:<stage>` reason instead of blocking. Stage 3 checks the request deadline, runs the worker call through the shared circuit breaker, and enforces a timeout; failures, timeouts and breaker refusals are recorded in the DLQ too.
 
-```text
-                 +--------------------------+
-  PromptRequest  |  Stage 1: RAG            |  cap: 512
-  ─────────────> |  (context retrieval)     |
-                 +------------+-------------+
-                              |
-                 +------------v-------------+
-                 |  Stage 2: Assemble       |  cap: 512
-                 |  (prompt construction)   |
-                 +------------+-------------+
-                              |
-                 +------------v-------------+
-                 |  Stage 3: Inference      |  cap: 1024
-                 |  (model worker pool)     |
-                 |                          |
-                 |  Exact-match Dedup       |
-                 |  Semantic Dedup (LSH)    |  <-- NEW: SimHash near-duplicate detection
-                 |  A/B Test Assignment     |  <-- NEW: consistent hashing variant split
-                 |  Circuit Breaker         |
-                 |  Retry + Backoff         |
-                 |  Rate Limiter            |
-                 +------------+-------------+
-                              |
-                 +------------v-------------+
-                 |  Stage 4: Post-Process   |  cap: 512
-                 |  (filter / format)       |
-                 +------------+-------------+
-                              |
-                 +------------v-------------+
-                 |  Stage 5: Stream         |  cap: 256
-                 |  (output sink)           |
-                 +--------------------------+
-                              |
-          +-------------------+--------------------+
-          |                   |                    |
-   REST/WS/SSE         Prometheus /metrics    OpenTelemetry
-   http://:8080         http://:9090          (Jaeger/OTLP)
-```
+Deduplication, retries, caching, rate limiting and load balancing are building blocks you compose around your `ModelWorker`, the way [`examples/llm_pipeline.rs`](examples/llm_pipeline.rs) wraps its backend in a `Deduplicator`. `spawn_pipeline_with_config` builds the same pipeline from a `PipelineConfig` (TOML), including channel capacities, breaker settings and the number of inference workers.
 
-### Resilience Layers (applied at Stage 3)
+<details>
+<summary><b>Resilience building blocks</b></summary>
 
 | Layer | What it does |
 |-------|-------------|
@@ -211,67 +121,131 @@ The pipeline is a five-stage directed acyclic graph of bounded async channels. E
 | **Semantic Deduplication** | `SemanticDeduplicator` uses 64-bit SimHash fingerprints over token-level shingles to catch near-duplicate prompts (paraphrases, punctuation variants) before they reach the model |
 | **A/B Test Assignment** | `AbTestRunner` uses consistent FNV-1a hashing to map `(experiment, user_id)` pairs to variants deterministically; same user always sees same variant |
 | **Circuit Breaker** | Opens on consecutive failures, enters half-open probe mode after configurable timeout |
-| **Multi-provider Cascade Fallback** | `ProviderCascade` chains an ordered list of providers (primary → secondary → tertiary); open breakers are skipped automatically; per-provider latency and success-rate metrics tracked |
+| **Multi-provider Cascade Fallback** | `ProviderCascade` chains an ordered list of providers (primary, secondary, tertiary); open breakers are skipped automatically; per-provider latency and success-rate metrics tracked |
 | **Retry + Jitter** | Exponential backoff with full jitter, prevents synchronized retry storms |
-| **Rate Limiter** | Token-bucket guard at the pipeline entry point |
+| **Rate Limiter** | Per-model sliding window plus token bucket (`rate_limiter::RateLimiterRegistry`) |
 | **Dead-letter Queue** | Shed requests land in a ring buffer for inspection and replay |
 | **DLQ Replay Scheduler** | `DlqReplayScheduler` re-injects DLQ entries with exponential backoff; supports per-session replay and age-based eviction |
 | **Priority Queue** | Four-level priority scheduler (Critical / High / Normal / Low) with deadline-aware pop that skips expired requests |
 | **Cache Layer** | TTL LRU cache for inference results (requires `caching` feature + Redis) |
 | **Provider Health Dashboard** | `ProviderHealthBuilder` aggregates per-provider p50/p95 latency, 1-hour success rate, and consecutive-failure count; serialises to JSON for REST health endpoints |
 
-### Self-Improving Control Loop (optional)
+</details>
+
+<details>
+<summary><b>Self-improving control loop (optional)</b></summary>
 
 When the `self-improving` feature is enabled, a background control loop continuously measures pipeline health and adjusts parameters:
 
 ```text
-  [TelemetryBus] ─> [AnomalyDetector] ─> [PID Controllers] ─> [Config Updates]
+  [TelemetryBus] -> [AnomalyDetector] -> [PID Controllers] -> [Config Updates]
        |                    |                     |
   queue depths         Z-score +            worker count
   error rates          CUSUM              buffer sizes
   latency p99          alerts             retry delays
 
-  [LearnedRouter] ─> [Autoscaler] ─> [PromptOptimizer] ─> [A/B Experiments]
+  [LearnedRouter] -> [Autoscaler] -> [PromptOptimizer] -> [A/B Experiments]
   epsilon-greedy       OLS trend        semantic dedup       snapshot rollback
   bandit               prediction       quality estimation   transfer learning
 ```
 
----
+```bash
+cargo run --bin self-improve --features self-improving
+```
 
-## Quick API Reference
+What it does:
+1. **Monitors** queue depths, error rates, latency percentiles via TelemetryBus
+2. **Detects** anomalies using Z-score and CUSUM change-point detection
+3. **Tunes** worker count, buffer sizes, retry delays using PID controllers
+4. **Learns** optimal routing via epsilon-greedy multi-armed bandit
+5. **Optimizes** prompts by testing semantic variations and tracking quality scores
+6. **Experiments** with A/B config snapshots, auto-rolls back if metrics regress
 
-| Type | Module | Description |
-|------|--------|-------------|
-| `PromptRequest` | `lib` | Input message sent into the pipeline |
-| `SessionId` | `lib` | Session identifier for affinity sharding |
-| `OrchestratorError` | `lib` | Crate-level error enum |
-| `ModelWorker` | `worker` | Async trait implemented by all inference backends |
-| `EchoWorker` | `worker` | Returns prompt words as tokens, for testing, no API key |
-| `OpenAiWorker` | `worker` | OpenAI chat completions API |
-| `AnthropicWorker` | `worker` | Anthropic Messages API |
-| `LlamaCppWorker` | `worker` | Local llama.cpp HTTP server |
-| `VllmWorker` | `worker` | vLLM inference server |
-| `LoadBalancedWorker` | `worker` | Round-robin or least-loaded pool of workers |
-| `spawn_pipeline` | `stages` | Launch the five-stage pipeline, return channel handles |
-| `spawn_pipeline_with_config` | `stages` | Same, with a full `PipelineConfig` |
-| `PipelineConfig` | `config` | TOML-deserialisable root configuration type |
-| `CircuitBreaker` | `enhanced` | Failure-rate circuit breaker |
-| `Deduplicator` | `enhanced` | In-flight request coalescer |
-| `RetryPolicy` | `enhanced` | Exponential backoff with jitter |
-| `CacheLayer` | `enhanced` | TTL LRU cache for inference results |
-| `PriorityQueue` | `enhanced` | Four-level priority scheduler |
-| `SmartBatcher` | `enhanced::smart_batch` | Adaptive micro-batching with prefix grouping |
-| `TournamentRunner` | `enhanced::tournament` | Multi-provider quality tournament |
-| `SessionContext` | `session` | Multi-turn conversation history manager |
-| `DeadLetterQueue` | `lib` | Ring buffer of shed requests |
-| `send_with_shed` | `lib` | Non-blocking channel send with graceful shedding |
-| `shard_session` | `lib` | FNV-1a session affinity shard helper |
+</details>
 
----
+## Web API
 
-## Configuration Reference
+Build with `--features web-api` (the release binaries include it). Full documentation in [`WEB_API.md`](WEB_API.md).
 
-Pass with `--config pipeline.toml`. All fields have documented defaults.
+```bash
+# Submit a prompt; returns {"request_id": "...", "status": "processing"}
+curl -s -X POST http://127.0.0.1:8080/api/v1/infer \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt": "What is backpressure?"}'
+
+# Wait for and fetch the result
+curl -s http://127.0.0.1:8080/api/v1/result/<request_id>
+
+# Server-sent events streaming
+curl -N -X POST http://127.0.0.1:8080/api/v1/stream \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt": "What is backpressure?"}'
+
+# WebSocket token streaming: send {"prompt": "..."}
+wscat -c ws://127.0.0.1:8080/v1/stream
+
+# Health: breaker state, queue depth, DLQ depth
+curl -s http://127.0.0.1:8080/health | jq .
+
+# Dead-letter queue inspection
+curl -s http://127.0.0.1:8080/api/v1/debug/dlq | jq .
+```
+
+## Terminal dashboard
+
+```bash
+cargo run --bin tui --features tui               # mock data, for a look without a pipeline
+cargo run --bin tui --features tui -- --live     # reads a running orchestrator's metrics
+```
+
+<img alt="TUI dashboard in mock-data mode: pipeline stages, channel fill bars, circuit breakers, dedup savings, throughput sparkline and a log panel" src="https://raw.githubusercontent.com/Mattbusel/tokio-prompt-orchestrator/main/assets/tui-dashboard.png" width="100%">
+
+The screenshot is the default mock-data mode. The dashboard shows per-stage queue depths, circuit breaker state, dedup hit rate, a throughput sparkline and a scrolling log.
+
+## MCP integration
+
+The `mcp` binary exposes the pipeline to Claude Desktop and Claude Code over stdio:
+
+```bash
+cargo build --release --features mcp --bin mcp
+```
+
+```json
+{
+  "mcpServers": {
+    "tokio-prompt-orchestrator": {
+      "command": "/absolute/path/to/target/release/mcp",
+      "args": []
+    }
+  }
+}
+```
+
+Setup details for both clients are in [`examples/mcp_claude_desktop.md`](examples/mcp_claude_desktop.md).
+
+## Benchmarks
+
+From the last recorded run in [BENCHMARKS.md](BENCHMARKS.md) (Windows, x86_64, `EchoWorker`, so no network or model time):
+
+| Measurement | Result |
+|---|---|
+| `send_with_shed` (non-blocking send with shedding) | 204 ns p50 |
+| Circuit breaker check (closed) | about 0.4 µs p50 |
+| Dedup check (cached) | about 1.5 µs p50 |
+| Rate limiter check | 110 ns p50 |
+| 1000 concurrent `EchoWorker` calls | 7.1 ms total, about 140,800 req/s |
+| 100 identical concurrent prompts with dedup | 52.6 µs total, one inference |
+
+In other words the orchestration overhead is small next to any real model call. CI records the pipeline benchmarks on every push to `main`: [benchmark history](https://mattbusel.github.io/tokio-prompt-orchestrator/dev/bench/). Run them yourself:
+
+```bash
+cargo bench --features full
+```
+
+<details>
+<summary><b>Configuration reference</b></summary>
+
+Load a `pipeline.toml` with `config::loader::load_from_file` and pass it to `spawn_pipeline_with_config`. Check a file with `cargo run --bin validate -- --config pipeline.toml`. All fields have documented defaults; [`pipeline.example.toml`](pipeline.example.toml) is a complete example.
 
 ```toml
 [pipeline]
@@ -330,12 +304,12 @@ nats_url  = "nats://nats:4222"
 node_id   = "node-1"
 ```
 
-### Environment Variables
+#### Environment variables
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `ANTHROPIC_API_KEY` | Required for `AnthropicWorker` |, |
-| `OPENAI_API_KEY` | Required for `OpenAiWorker` |, |
+| `ANTHROPIC_API_KEY` | Required for `AnthropicWorker` | none |
+| `OPENAI_API_KEY` | Required for `OpenAiWorker` | none |
 | `LLAMA_CPP_URL` | llama.cpp server URL | `http://localhost:8080` |
 | `VLLM_URL` | vLLM server URL | `http://localhost:8000` |
 | `RUST_LOG` | Log level filter | `info` |
@@ -344,9 +318,10 @@ node_id   = "node-1"
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Alternative OTLP endpoint | disabled |
 | `METRICS_API_KEY` | Bearer token to guard `/metrics` | disabled |
 
----
+</details>
 
-## Feature Flags
+<details>
+<summary><b>Feature flags</b></summary>
 
 All features are opt-in. The default build has no optional dependencies.
 
@@ -369,103 +344,57 @@ All features are opt-in. The default build has no optional dependencies.
 | `dashboard` | Web dashboard UI | Browser monitoring |
 | `core-pinning` | CPU core affinity for pipeline tasks | Latency-sensitive deployments |
 
----
+</details>
 
-## Web API
+<details>
+<summary><b>Quick API reference</b></summary>
 
-Enable with `--features web-api`. Full documentation in [`WEB_API.md`](WEB_API.md).
+| Type | Module | Description |
+|------|--------|-------------|
+| `PromptRequest` | `lib` | Input message sent into the pipeline |
+| `SessionId` | `lib` | Session identifier for affinity sharding |
+| `OrchestratorError` | `lib` | Crate-level error enum |
+| `ModelWorker` | `worker` | Async trait implemented by all inference backends |
+| `EchoWorker` | `worker` | Returns prompt words as tokens, for testing, no API key |
+| `OpenAiWorker` | `worker` | OpenAI chat completions API |
+| `AnthropicWorker` | `worker` | Anthropic Messages API |
+| `LlamaCppWorker` | `worker` | Local llama.cpp HTTP server |
+| `VllmWorker` | `worker` | vLLM inference server |
+| `LoadBalancedWorker` | `worker` | Round-robin or least-loaded pool of workers |
+| `spawn_pipeline` | `stages` | Launch the five-stage pipeline, return channel handles |
+| `spawn_pipeline_with_config` | `stages` | Same, with a full `PipelineConfig` |
+| `PipelineConfig` | `config` | TOML-deserialisable root configuration type |
+| `CircuitBreaker` | `enhanced` | Failure-rate circuit breaker |
+| `Deduplicator` | `enhanced` | In-flight request coalescer |
+| `RetryPolicy` | `enhanced` | Exponential backoff with jitter |
+| `CacheLayer` | `enhanced` | TTL LRU cache for inference results |
+| `PriorityQueue` | `enhanced` | Four-level priority scheduler |
+| `SmartBatcher` | `enhanced::smart_batch` | Adaptive micro-batching with prefix grouping |
+| `TournamentRunner` | `enhanced::tournament` | Multi-provider quality tournament |
+| `SessionContext` | `session` | Multi-turn conversation history manager |
+| `DeadLetterQueue` | `lib` | Ring buffer of shed requests |
+| `send_with_shed` | `lib` | Non-blocking channel send with graceful shedding |
+| `shard_session` | `lib` | FNV-1a session affinity shard helper |
 
-```bash
-# Single prompt over REST
-curl -X POST http://localhost:8080/v1/prompt \
-  -H "Content-Type: application/json" \
-  -d '{"input": "What is backpressure?"}'
+</details>
 
-# Server-sent events streaming
-curl -N http://localhost:8080/v1/stream/sse \
-  -H "X-Session-Id: my-session"
+<details>
+<summary><b>Deployment</b></summary>
 
-# WebSocket streaming
-wscat -c ws://localhost:8080/v1/stream
-
-# Pipeline health
-curl http://localhost:8080/v1/health | jq .
-
-# Dead-letter queue inspection
-curl http://localhost:8080/v1/dlq | jq .
-
-# Replay a shed request
-curl -X POST http://localhost:8080/v1/dlq/replay/req-42
-```
-
----
-
-## Live Dashboard (TUI)
-
-```bash
-cargo run --bin tui --features tui
-```
-
-The dashboard shows:
-- Per-stage queue depths with fill-level bars
-- Circuit breaker state (CLOSED / OPEN / HALF-OPEN) and failure count
-- Deduplication hit rate and in-flight count
-- Latency sparklines (p50/p95/p99) per stage
-- Autoscaler decisions (if `self-improving` enabled)
-- Scrolling structured log panel
-
----
-
-## MCP Integration
-
-Connect Claude Desktop or Claude Code directly to the orchestrator:
-
-```bash
-cargo run --bin mcp --features mcp
-```
-
-Add to your Claude Desktop `config.json`:
-
-```json
-{
-  "mcpServers": {
-    "orchestrator": {
-      "url": "http://127.0.0.1:8080"
-    }
-  }
-}
-```
-
-Available MCP tools: `infer`, `batch_infer`, `pipeline_status`, `configure_pipeline`, `replay_dlq`.
-
----
-
-## Deployment Guide
-
-### Standalone Binary
+### Standalone binary
 
 ```bash
 cargo build --release --features full
-./target/release/orchestrator --config pipeline.toml
+./target/release/orchestrator --provider anthropic --model claude-sonnet-4-6
 ```
 
-Exposes:
-- Web API: `http://0.0.0.0:8080`
-- Prometheus: `http://0.0.0.0:9090/metrics`
-- OpenTelemetry traces via OTLP to configured endpoint
+Flags: `--port` (default 8080), `--host` (default 127.0.0.1), `--no-web`, `--max-spend <dollars>`, `--log-level`. Settings persist in `orchestrator.env` next to the binary. Prometheus metrics are served at `/metrics` on the web API port when built with `metrics-server`.
 
 ### Docker
 
-```bash
-docker build -t tokio-prompt-orchestrator .
-docker run -p 8080:8080 -p 9090:9090 \
-  -e ANTHROPIC_API_KEY=sk-ant-... \
-  tokio-prompt-orchestrator
-```
+A `Dockerfile` and a `docker-compose.yml` (orchestrator, Redis, NATS, Prometheus, Grafana) are in the repo, but the Dockerfile does not build a working image yet: see [#5](https://github.com/Mattbusel/tokio-prompt-orchestrator/issues/5). A pre-built Grafana dashboard is in `grafana-dashboard.json`.
 
-The bundled `docker-compose.yml` starts the orchestrator alongside Redis, NATS, Prometheus, and Grafana. A pre-built Grafana dashboard is in `grafana-dashboard.json`.
-
-### Multi-Node Distributed Mode
+### Multi-node distributed mode
 
 Enable the `distributed` feature and configure Redis + NATS:
 
@@ -476,35 +405,16 @@ nats_url  = "nats://nats:4222"
 node_id   = "node-1"
 ```
 
-All nodes share Redis for cross-node deduplication and leader election. Work distributes via NATS subjects. Session affinity routes same-session requests to the same node when possible. Coordinator binary manages cluster membership:
+All nodes share Redis for cross-node deduplication and leader election. Work distributes via NATS subjects. The coordinator binary manages cluster membership:
 
 ```bash
 cargo run --bin coordinator
 ```
 
----
+</details>
 
-## Self-Improving Mode
-
-When `--features self-improving` is enabled, the orchestrator autonomously optimizes itself:
-
-```bash
-cargo run --bin self-improve --features self-improving -- --config pipeline.toml
-```
-
-What it does:
-1. **Monitors** queue depths, error rates, latency percentiles via TelemetryBus
-2. **Detects** anomalies using Z-score and CUSUM change-point detection
-3. **Tunes** worker count, buffer sizes, retry delays using PID controllers
-4. **Learns** optimal routing via epsilon-greedy multi-armed bandit
-5. **Optimizes** prompts by testing semantic variations and tracking quality scores
-6. **Experiments** with A/B config snapshots, auto-rolls back if metrics regress
-
-All parameter changes are logged with before/after values and the reason for the change.
-
----
-
-## Performance Tuning Guide
+<details>
+<summary><b>Performance tuning</b></summary>
 
 ### Worker Count
 
@@ -541,105 +451,65 @@ max_entries = 10000  # max cached entries
 Increase `window_s` for FAQ/chatbot workloads with repeated prompts.
 Decrease for real-time queries where freshness matters.
 
-### Channel Buffer Sizes
+### Channel buffer sizes
 
-Optimized for cloud LLM with 1–10s inference latency. Adjust for your model:
+The defaults suit a cloud LLM with 1 to 10 s latency. Each stage's input channel is set in the config:
 
-```rust,ignore
-spawn_pipeline_with_config(worker, PipelineConfig {
-    rag_channel_capacity: 512,
-    assemble_channel_capacity: 512,
-    inference_channel_capacity: 2048,  // double for slow models (> 30s)
-    post_channel_capacity: 512,
-    stream_channel_capacity: 256,
-    ..Default::default()
-})
+```toml
+[stages.rag]
+channel_capacity = 512
+
+[stages.assemble]
+channel_capacity = 512
+
+[stages.post_process]
+channel_capacity = 512
+
+[stages.stream]
+channel_capacity = 256
 ```
 
-For local models (< 100ms inference): halve all buffer sizes to save memory.
+For local models (under 100 ms per call) halve them to save memory; for very slow models raise them.
 
----
-
-## Benchmarks
-
-From the last recorded run in [BENCHMARKS.md](BENCHMARKS.md) (Windows, x86_64, `EchoWorker`, so no network or model time):
-
-| Measurement | Result |
-|---|---|
-| `send_with_shed` (non-blocking send with shedding) | 204 ns p50 |
-| Circuit breaker check (closed) | about 0.4 µs p50 |
-| Dedup check (cached) | about 1.5 µs p50 |
-| Rate limiter check | 110 ns p50 |
-| 1000 concurrent `EchoWorker` calls | 7.1 ms total, about 140,800 req/s |
-| 100 identical concurrent prompts with dedup | 52.6 µs total, one inference |
-
-In other words the orchestration overhead is small next to any real model call. Run them yourself:
-
-```bash
-cargo bench --features full
-```
-
----
+</details>
 
 ## Troubleshooting
 
-### "Circuit breaker is OPEN"
+**"Circuit breaker is open."** The pipeline is protecting itself from a failing provider. `curl -s http://127.0.0.1:8080/health | jq .pipeline.circuit_breaker` shows the state; after the timeout (60 s by default) one probe goes through, and enough successes close it again.
 
-The pipeline is protecting itself from a failing provider. Check:
+**The dead-letter queue is growing.** Look at the reasons (`handles.dlq.drain()` or `GET /api/v1/debug/dlq`). `backpressure:<stage>` means a channel was full: raise that stage's `channel_capacity`, add inference workers, or smooth inbound traffic with the rate limiter. `inference_failure` and `inference_timeout` point at the provider.
 
-```bash
-curl http://localhost:8080/v1/health | jq .circuit_breaker
-# {"state":"Open","failure_count":7,"next_probe_in_secs":43}
-```
+**Dedup is not saving calls.** Dedup is keyed on the prompt text, so requests must be identical after assembly. `SemanticDeduplicator` catches near-duplicates.
 
-Wait for the probe timeout, or force a reset:
+**High memory usage.** Each buffered request holds its prompt. Lower the channel capacities or rate-limit inbound traffic to bound in-flight work.
 
-```bash
-curl -X POST http://localhost:8080/v1/circuit-breaker/reset
-```
+**Prometheus metrics are missing.** Build with `--features metrics-server`. If `METRICS_API_KEY` is set, scrape with `Authorization: Bearer <key>`.
 
-### "Dead-letter queue growing"
-
-Requests are being shed due to backpressure. Options:
-1. Increase `inference_channel_capacity` in config
-2. Add more workers
-3. Enable rate limiting to smooth inbound traffic
-4. Check if the provider is slow (latency spike)
-
-### "Dedup not working"
-
-Ensure `deduplication.enabled = true` in your config and that requests have identical `input` fields. Dedup is keyed on the normalized prompt text.
-
-### High memory usage
-
-Each buffered request occupies memory proportional to prompt length. Reduce channel capacities or enable rate limiting to bound total in-flight work.
-
-### Prometheus metrics not appearing
-
-Ensure `--features metrics-server` and check `metrics_port` in config. If `METRICS_API_KEY` is set, include `Authorization: Bearer <key>` in the scrape config.
-
----
+**The web API could not start.** Another program is using the port: pass `--port <N>`, or `--no-web` for the terminal only.
 
 ## Examples
 
-See the [`examples/`](examples/) directory for:
+Every file in [`examples/`](examples/) builds in CI; the ones that call a provider need its key.
 
 | Example | What it shows |
 |---------|--------------|
-| `rest_api` | Full HTTP REST integration |
-| `sse_stream` | Server-sent events token streaming |
-| `websocket_api` | WebSocket bidirectional streaming |
-| `web_api_demo` | Combined REST + SSE + WebSocket demo |
+| `llm_pipeline` | Dedup, circuit breaker and DLQ end to end, no key needed |
+| `dedup_demo`, `circuit_breaker_demo`, `dlq_inspection` | One resilience layer at a time |
+| `custom_worker`, `multi_worker` | Your own `ModelWorker`, and a pool of them |
+| `anthropic_example`, `openai_example`, `llama_cpp_example`, `vllm_example` | Real providers |
+| `priority_requests`, `config_hot_reload`, `metrics_demo` | Priority queue, config reload, metrics |
+| `rest_api`, `sse_stream`, `websocket_api`, `web_api_demo` | The HTTP, SSE and WebSocket API (`web-api` feature) |
 
----
+## Module guide
 
-## Recent additions
+The crate has many more modules than the pipeline itself. Each section below is collapsed; the API docs on [docs.rs](https://docs.rs/tokio-prompt-orchestrator) are the reference.
 
-### Plugin System and Request Deduplication
+<details>
+<summary><b>Plugin System and Request Deduplication</b></summary>
 
 #### Plugin System
 
-The new Round-7 plugin API in `src/plugin.rs` adds a full `Plugin` trait–based extension system that runs before and after inference.
+The plugin API in `src/plugin.rs` adds a full `Plugin` trait–based extension system that runs before and after inference.
 
 **Key types:** `Plugin` (trait), `PluginV2Chain`, `PluginV2Registry`, `PluginError`, `PluginInfo`
 
@@ -658,7 +528,7 @@ The new Round-7 plugin API in `src/plugin.rs` adds a full `Plugin` trait–based
 
 #### Request Deduplication
 
-The new `request_dedup` module coalesces identical in-flight requests to the same backend call.
+The `request_dedup` module coalesces identical in-flight requests to the same backend call.
 
 **Key types:** `RequestDeduplicator`, `DedupDecision`, `RequestId`, `DedupStats`
 
@@ -670,11 +540,14 @@ The new `request_dedup` module coalesces identical in-flight requests to the sam
 - 30-second TTL: stale entries are pruned on every `submit()` call to prevent memory leaks
 - `DedupStats { total_submitted, deduplicated, active_requests, dedup_rate }`
 
-### Session Manager and Streaming Aggregator
+</details>
+
+<details>
+<summary><b>Session Manager and Streaming Aggregator</b></summary>
 
 #### Session Manager
 
-The new `session_mgr` module provides a concurrent, production-ready conversation session store.
+The `session_mgr` module provides a concurrent, production-ready conversation session store.
 
 **Key types:** `SessionManager`, `Session`, `Message`, `Role`, `SessionStats`, `SessionError`
 
@@ -694,7 +567,7 @@ The new `session_mgr` module provides a concurrent, production-ready conversatio
 
 #### Streaming Aggregator
 
-The new `stream_agg` module collects streaming token chunks into complete responses with real-time broadcast.
+The `stream_agg` module collects streaming token chunks into complete responses with real-time broadcast.
 
 **Key types:** `StreamAggregator`, `StreamChunk`, `AggStats`
 
@@ -705,11 +578,14 @@ The new `stream_agg` module collects streaming token chunks into complete respon
 - `StreamAggregator::stats()`, returns `AggStats` (active streams, completed streams, total tokens)
 - Multiple sessions are fully isolated; clones share state via `Arc`
 
-### Prompt Pipeline and Audit Log
+</details>
+
+<details>
+<summary><b>Prompt Pipeline and Audit Log</b></summary>
 
 #### Prompt Pipeline
 
-The new `pipeline` module provides a composable, ordered sequence of text-transformation stages.  Each stage is async and receives the previous stage's output as its input.
+The `pipeline` module provides a composable, ordered sequence of text-transformation stages.  Each stage is async and receives the previous stage's output as its input.
 
 **Key types:** `Pipeline`, `PipelineBuilder`, `PromptPipelineStage` (trait), `PipelineStats`, `PipelineResult`, `PipelineError`
 
@@ -737,7 +613,7 @@ println!("{} chars in {}ms", result.stats.output_len, result.stats.elapsed_ms);
 
 #### Audit Log
 
-The new `audit` module provides an append-only, capacity-bounded audit log for LLM inference requests and responses.  Entries can be filtered, queried, and bulk-exported as JSONL.
+The `audit` module provides an append-only, capacity-bounded audit log for LLM inference requests and responses.  Entries can be filtered, queried, and bulk-exported as JSONL.
 
 **Key types:** `AuditLog`, `AuditEntry`, `AuditFilter`, `AuditStats`, `AuditQueryResponse`, `AuditStatsResponse`
 
@@ -753,13 +629,14 @@ The new `audit` module provides an append-only, capacity-bounded audit log for L
 | GET | `/api/v1/audit/stats` | Aggregate statistics JSON |
 | GET | `/api/v1/audit/export` | Download all entries as JSONL |
 
----
+</details>
 
-### Load Balancer and Template Engine
+<details>
+<summary><b>Load Balancer and Template Engine</b></summary>
 
 #### Load Balancer
 
-The new `load_balancer` module provides a thread-safe, weighted round-robin load balancer for multi-model deployments.
+The `load_balancer` module provides a thread-safe, weighted round-robin load balancer for multi-model deployments.
 
 **Key types:** `LoadBalancer`, `ModelEndpoint`, `BalancerConfig`, `LoadBalancerStats`, `EndpointStats`
 
@@ -788,7 +665,7 @@ lb.mark_success(&ep.id, 42.0);
 
 #### Template Engine
 
-The new `template` module provides a `{{variable}}` prompt template engine with filter support.
+The `template` module provides a `{{variable}}` prompt template engine with filter support.
 
 **Key types:** `PromptTemplate`, `TemplateContext`, `TemplateValue`, `TemplateLibrary`, `TemplateError`
 
@@ -817,9 +694,10 @@ ctx.set("text", TemplateValue::Text("The quick brown fox...".into()));
 let rendered = lib.render("summarise", &ctx).unwrap();
 ```
 
----
+</details>
 
-### Circuit Breaker Adaptive Backoff, Token Budget Middleware, SimHash Dedup
+<details>
+<summary><b>Circuit Breaker Adaptive Backoff, Token Budget Middleware, SimHash Dedup</b></summary>
 
 | Feature | Module | What it does |
 |---------|--------|--------------|
@@ -863,7 +741,10 @@ match guard.check(&prompt) {
 guard.release(estimated, actual_tokens_from_provider);
 ```
 
-### Prompt A/B Testing Framework and Semantic Deduplication
+</details>
+
+<details>
+<summary><b>Prompt A/B Testing Framework and Semantic Deduplication</b></summary>
 
 This release adds two major data-science primitives for production LLM deployments:
 
@@ -874,7 +755,10 @@ This release adds two major data-science primitives for production LLM deploymen
 
 Both features are available without any optional feature flags.
 
-### REST API, A/B Tests
+</details>
+
+<details>
+<summary><b>REST API, A/B Tests</b></summary>
 
 ```text
 POST   /api/v1/ab-tests                   Create or replace an experiment
@@ -882,7 +766,10 @@ GET    /api/v1/ab-tests/:name/results     Get current statistical result
 DELETE /api/v1/ab-tests/:name             Remove experiment and discard samples
 ```
 
-### Plugin Stage System, DLQ Replay Binary, and Cron Scheduler
+</details>
+
+<details>
+<summary><b>Plugin Stage System, DLQ Replay Binary, and Cron Scheduler</b></summary>
 
 These additions break the rigidity of the five-stage DAG by adding three major extensibility layers:
 
@@ -894,11 +781,10 @@ These additions break the rigidity of the five-stage DAG by adding three major e
 
 All three features are available without any optional feature flags and are wired into the web API when `--features web-api` is enabled.
 
----
+</details>
 
-## Advanced Features
-
-### Conversational Session Context
+<details>
+<summary><b>Conversational Session Context</b></summary>
 
 The `session` module provides automatic multi-turn conversation memory per `SessionId`.  Without it, every request arrives context-free and the user must repeat themselves.  With it, the last N turns are automatically prepended to each new prompt before it enters the pipeline.
 
@@ -924,9 +810,10 @@ let (req2, _action) = ctx.enrich(request2).await;
 
 Sessions expire after a configurable TTL (default 30 min).  When history grows beyond `summarise_after_turns` the manager returns `SessionAction::RequestSummary`, send a summarisation request through the pipeline and call `ctx.summarise(...)` to replace the history with a condensed version.
 
----
+</details>
 
-### Conversation History Manager
+<details>
+<summary><b>Conversation History Manager</b></summary>
 
 The `conversation` module provides a standalone multi-turn conversation manager with automatic token-budget enforcement and history compression. Unlike `SessionContext`, it gives you full control over prompt formatting and works independently of the pipeline.
 
@@ -977,9 +864,10 @@ async fn main() {
 | Export / import | JSON | No |
 | Best for | Libraries, chatbots, custom apps | Drop-in pipeline enrichment |
 
----
+</details>
 
-### Versioned Prompt Templates with A/B Testing
+<details>
+<summary><b>Versioned Prompt Templates with A/B Testing</b></summary>
 
 The `templates` module provides a hot-reloadable registry of named, versioned prompt templates with `{{variable}}` substitution and built-in traffic-splitting A/B experiments.
 
@@ -1069,9 +957,10 @@ let n = registry.load_toml(&toml)?;
 println!("Loaded {n} templates");
 ```
 
----
+</details>
 
-### Smart Adaptive Batching
+<details>
+<summary><b>Smart Adaptive Batching</b></summary>
 
 The `enhanced::smart_batch` module collects requests into micro-batches and dispatches them together, maximising GPU utilisation on batch-capable inference servers (vLLM, SGLang, llama.cpp with `--cont-batching`).
 
@@ -1097,11 +986,12 @@ loop {
 }
 ```
 
-Prefix grouping (`group_by_prefix_len > 0`) places requests with a shared prompt prefix (e.g. the same system prompt) into the same batch, improving KV-cache hit rate by up to 40% on supporting servers.
+Prefix grouping (`group_by_prefix_len > 0`) places requests with a shared prompt prefix (e.g. the same system prompt) into the same batch, which helps prefix (KV) caching on servers that support it.
 
----
+</details>
 
-### Prompt Injection and Jailbreak Detection
+<details>
+<summary><b>Prompt Injection and Jailbreak Detection</b></summary>
 
 The `security::PromptGuard` sits in front of the pipeline and classifies every
 prompt before it touches the inference backend.  Detection is entirely local -
@@ -1152,9 +1042,10 @@ println!("Block rate: {:.1}%", metrics.block_rate * 100.0);
 Guard metrics are exposed on the Prometheus `/metrics` endpoint when
 `--features metrics-server` is active.
 
----
+</details>
 
-### Provider Arbitrage, Cheapest Provider Meeting Your Latency SLA
+<details>
+<summary><b>Provider Arbitrage, Cheapest Provider Meeting Your Latency SLA</b></summary>
 
 The `routing::ArbitrageEngine` tracks per-provider P95 latency in a rolling
 128-sample window and, given a latency budget, picks the cheapest provider
@@ -1205,9 +1096,10 @@ println!("SLA misses: {}", engine.total_sla_misses());
 Pair this with the circuit breaker to automatically exclude unhealthy
 providers from the latency window.
 
----
+</details>
 
-### Adaptive Worker Pool Sizing
+<details>
+<summary><b>Adaptive Worker Pool Sizing</b></summary>
 
 The `routing::PoolSizer` watches queue fill rates and recommends when to
 add or remove workers.  It uses an EWMA to smooth noisy queue samples and
@@ -1243,9 +1135,10 @@ loop {
 }
 ```
 
----
+</details>
 
-### Provider Tournament Mode
+<details>
+<summary><b>Provider Tournament Mode</b></summary>
 
 Tournament mode fans the same request out to multiple workers in parallel and returns the highest-quality response according to a pluggable scoring function.  Use it for high-value requests where quality matters more than cost, or to A/B test providers automatically.
 
@@ -1284,9 +1177,10 @@ println!("Response: {}", result.response);
 
 Implement `ResponseScorer` to define your own quality function.
 
----
+</details>
 
-## Cascading Inference, Multi-Turn Tool Call Loops
+<details>
+<summary><b>Cascading Inference, Multi-Turn Tool Call Loops</b></summary>
 
 The `cascade` module lets a model drive its own multi-turn reasoning loop: it emits tool calls, the engine executes them, injects results back into context, and re-infers until the model is satisfied or a safety limit is reached.
 
@@ -1331,9 +1225,10 @@ Register a custom parser via `CascadeEngine::with_tool_parser` or a custom execu
 
 **Termination conditions:** no tool calls in response, explicit `[DONE]` sentinel, `max_turns` reached, or pipeline error.
 
----
+</details>
 
-## Multi-Pipeline Routing
+<details>
+<summary><b>Multi-Pipeline Routing</b></summary>
 
 Deploy multiple named pipeline instances simultaneously and route each prompt to the best-fit pipeline based on detected intent.
 
@@ -1382,9 +1277,10 @@ for stats in router.stats() {
 
 **Routing priority:** exact class match → `also_serves` list → first pipeline (default).
 
----
+</details>
 
-## Adaptive Worker Pool (Kalman Filter)
+<details>
+<summary><b>Adaptive Worker Pool (Kalman Filter)</b></summary>
 
 The `adaptive_pool` module implements a closed-loop controller that smooths noisy queue depth observations with a Kalman filter and recommends scale-up/scale-down events with configurable cooldowns.
 
@@ -1430,9 +1326,10 @@ println!("Workers: {}, estimated depth: {:.1}, latency EMA: {:.0}ms",
 
 The Kalman filter converges to the true queue depth in ~5–10 observations, ignoring single-sample spikes that would cause naive reactive controllers to thrash.
 
----
+</details>
 
-## Custom Plugin Stage System
+<details>
+<summary><b>Custom Plugin Stage System</b></summary>
 
 The plugin system lets you inject custom async logic at any of the **10 hook points** (before/after each of the 5 pipeline stages) without forking the codebase.
 
@@ -1491,9 +1388,10 @@ println!("{:#?}", registry.summary());
 
 Return `PluginOutput::abort(input)` to stop the remaining plugins at that position. The pipeline stage itself still runs; only the pre/post hook chain is interrupted. Use `PluginOutput::error(input, "reason")` to signal a hard failure the caller can route to the DLQ.
 
----
+</details>
 
-## Dead-Letter Queue Replay Binary
+<details>
+<summary><b>Dead-Letter Queue Replay Binary</b></summary>
 
 The `replay` binary reads failed request records from a dead-letter queue dump (NDJSON format) and resubmits them through the running orchestrator's HTTP API.
 
@@ -1558,9 +1456,10 @@ Replay complete: 100 submitted, 97 succeeded, 2 failed, 1 skipped.
 
 The binary exits with code `1` when any requests fail after all retries.
 
----
+</details>
 
-## Cron Scheduler
+<details>
+<summary><b>Cron Scheduler</b></summary>
 
 The `scheduler` module lets you register named prompt templates with a cron-like schedule. A background Tokio task wakes at the right wall-clock minute and injects each matching prompt directly into the pipeline.
 
@@ -1658,20 +1557,10 @@ curl -X PATCH http://localhost:8080/api/v1/schedule/550e8400-e29b-41d4-a716-4466
 curl -X DELETE http://localhost:8080/api/v1/schedule/550e8400-e29b-41d4-a716-446655440000
 ```
 
----
+</details>
 
-## Contributing
-
-1. Fork the repository and create a feature branch off `main`.
-2. Run `cargo fmt --all` and `cargo clippy -- -D warnings` before pushing.
-3. Add tests for any new public API surface. Panic-free code is required (`unwrap`/`expect` denied by Clippy lint).
-4. Open a pull request against `main`. CI must pass before merge.
-
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full guide.
-
----
-
-## Prompt A/B Testing
+<details>
+<summary><b>Prompt A/B Testing</b></summary>
 
 The `ab_test` module provides a complete framework for comparing prompt templates in production traffic, without any external service.
 
@@ -1746,9 +1635,10 @@ curl -X DELETE http://localhost:8080/api/v1/ab-tests/greeting-style
 
 When using `cargo run --features tui --bin tui`, the dashboard includes an A/B Test panel showing all active experiments with live sample counts, current means, and winner status.
 
----
+</details>
 
-## Semantic Deduplication
+<details>
+<summary><b>Semantic Deduplication</b></summary>
 
 The `enhanced::SemanticDeduplicator` extends the exact-match deduplicator to catch near-duplicate prompts that differ only in punctuation, whitespace, or minor synonym substitution.
 
@@ -1801,13 +1691,14 @@ assert!(dedup.check_and_register("What is the capital of Germany?"));
 
 | Metric | Label | Description |
 |--------|-------|-------------|
-| `dedup_semantic_hits_total` |, | Near-duplicates suppressed |
-| `dedup_semantic_miss_total` |, | Novel prompts passed through |
-| `avg_similarity_score` |, | Rolling average Hamming distance of matched pairs |
+| `dedup_semantic_hits_total` | none | Near-duplicates suppressed |
+| `dedup_semantic_miss_total` | none | Novel prompts passed through |
+| `avg_similarity_score` | none | Rolling average Hamming distance of matched pairs |
 
----
+</details>
 
-## Prompt Cache
+<details>
+<summary><b>Prompt Cache</b></summary>
 
 Content-addressed, in-process LRU cache for LLM inference responses.  Cache
 keys are SHA-256 hashes of `(model_id + prompt)`.  Entries carry a TTL and are
@@ -1850,9 +1741,10 @@ cache.flush();
 | `GET` | `/api/v1/cache/stats` | Return hit rate, entry count, evictions |
 | `DELETE` | `/api/v1/cache` | Flush all entries |
 
----
+</details>
 
-## Rate Limiter
+<details>
+<summary><b>Rate Limiter</b></summary>
 
 Per-model limits combining a requests-per-minute sliding window with a tokens-per-minute token bucket (with a burst multiplier), managed by a `RateLimiterRegistry`.
 
@@ -1885,24 +1777,31 @@ for (model, throttled) in limiter.stats() {
 |--------|------|-------------|
 | `GET` | `/api/v1/rate-limiter/stats` | Per-model count of throttled requests |
 
----
+</details>
 
-## Known Issues / Roadmap
+## Known issues and roadmap
 
-- **CI**: the CI workflow is currently failing on `main`; pin a released version if you depend on the crate.
 - **prometheus 0.13**: Has RUSTSEC-2024-0437 (protobuf DoS). Mitigated by API key auth on `/metrics`. Migration to 0.14 blocked by `prometheus::proto` API removal, tracked internally for Q3 2026.
 - **Request replay UI**: Dead-letter queue replay works via API; a TUI panel for it is planned.
 - **Per-stage circuit breaker metrics**: Currently aggregated; per-stage breakdown is planned.
 - **PromptGuard embedding mode**: Current detection is lexical (no external deps). A future optional mode will use local embedding models for semantic similarity detection.
 - **ArbitrageEngine + circuit breaker integration**: A future release will auto-exclude circuit-breaker-open providers from the arbitrage candidate set.
-- **PoolSizer → pipeline integration**: Currently advisory only. Future versions will wire `PoolSizer` directly to the pipeline stage worker count.
+- **PoolSizer and pipeline integration**: Currently advisory only. Future versions will wire `PoolSizer` directly to the pipeline stage worker count.
+- **Docker**: the Dockerfile does not build a working image yet ([#5](https://github.com/Mattbusel/tokio-prompt-orchestrator/issues/5)).
+- **RAG stage**: stage 1 has no pluggable retriever yet ([#6](https://github.com/Mattbusel/tokio-prompt-orchestrator/issues/6)).
 
----
+## Contributing
+
+1. Fork the repository and create a feature branch off `main`.
+2. Run `cargo fmt --all` and `cargo clippy -- -D warnings` before pushing.
+3. Add tests for any new public API surface. Panic-free code is required (`unwrap`/`expect` denied by Clippy lint).
+4. Open a pull request against `main`. CI must pass before merge.
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full guide.
 
 ## License
 
 MIT. See [`LICENSE`](https://github.com/Mattbusel/tokio-prompt-orchestrator/blob/main/LICENSE).
-
 
 ## Hire the author
 
