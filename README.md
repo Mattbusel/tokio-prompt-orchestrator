@@ -1,71 +1,106 @@
+# tokio-prompt-orchestrator
+
+**Put a queue, deduplication and a circuit breaker in front of your AI model calls: the same question asked twice costs one call, and when the provider goes down your app gets a fast, clear failure instead of a pile of hung requests.**
+
+<p>
+  <a href="https://crates.io/crates/tokio-prompt-orchestrator"><img alt="crates.io" src="https://img.shields.io/crates/v/tokio-prompt-orchestrator.svg"></a>
+  <a href="https://docs.rs/tokio-prompt-orchestrator"><img alt="docs.rs" src="https://img.shields.io/docsrs/tokio-prompt-orchestrator"></a>
+  <a href="https://github.com/Mattbusel/tokio-prompt-orchestrator/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Mattbusel/tokio-prompt-orchestrator/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/Mattbusel/tokio-prompt-orchestrator/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/Mattbusel/tokio-prompt-orchestrator"></a>
+  <a href="https://github.com/Mattbusel/tokio-prompt-orchestrator/blob/main/LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
+</p>
+
+<img alt="Recorded session. Part 1: cargo run --example llm_pipeline answers 12 requests with 3 model calls, then during a simulated outage 5 calls fail with 503, the circuit breaker opens and the next 3 fail fast. Part 2: orchestrator --provider echo answers a question typed at its prompt while a second terminal sends a prompt with curl, fetches the result and reads /health." src="https://raw.githubusercontent.com/Mattbusel/tokio-prompt-orchestrator/main/assets/demo.gif" width="100%">
+
+<sub>A real recording (sped up only where it was waiting): the `llm_pipeline` example, then the `orchestrator` binary serving a terminal prompt and curl at the same time. <a href="https://mattbusel.github.io/tokio-prompt-orchestrator/">The site</a> has a step-by-step replay.</sub>
+
+It sits in front of Anthropic, OpenAI, llama.cpp, vLLM or your own backend. Use it as a ready-made server (`orchestrator`), or as a Rust library inside your own app.
+
+## Install
+
+| Where | Command |
+|---|---|
+| **Windows** (PowerShell) | `irm https://raw.githubusercontent.com/Mattbusel/tokio-prompt-orchestrator/main/install.ps1 \| iex` |
+| **macOS / Linux** | `curl -fsSL https://raw.githubusercontent.com/Mattbusel/tokio-prompt-orchestrator/main/install.sh \| sh` |
+| Homebrew (macOS, Linux) | `brew install mattbusel/tap/tokio-prompt-orchestrator` |
+| Scoop (Windows) | `scoop bucket add mattbusel https://github.com/Mattbusel/scoop-bucket; scoop install mattbusel/tokio-prompt-orchestrator` |
+| Rust, prebuilt | `cargo binstall tokio-prompt-orchestrator` |
+| Rust, from source | `cargo install tokio-prompt-orchestrator --features web-api` |
+| As a library | `cargo add tokio-prompt-orchestrator` |
+| By hand | Download a zip or tarball from [Releases](https://github.com/Mattbusel/tokio-prompt-orchestrator/releases/latest) (Windows x64, macOS Apple Silicon and Intel, Linux x64) |
+
+Every method installs the same `orchestrator` command. The install scripts check the download against the release's `SHA256SUMS.txt`.
+
+## Use it in 3 steps
+
+**1. Start it.** Echo mode needs no API key and no internet:
+
+```bash
+orchestrator --provider echo
+```
+
+You see a box listing the web address (`http://127.0.0.1:8080`) and a `>` prompt. Type a question and press Enter: echo mode answers with the prompt the pipeline built, so you can see every stage ran.
+
+**2. Send it a prompt over HTTP**, from a second terminal, the way your app or agent would:
+
+```bash
+curl -s -X POST localhost:8080/api/v1/infer -H 'Content-Type: application/json' -d '{"prompt": "Summarize this ticket"}'
+```
+
+```json
+{"request_id":"b5658253-a3f4-42c3-96ee-17121f27feb9","status":"processing"}
+```
+
+**3. Get the answer** with that `request_id` (the call waits until it is ready):
+
+```bash
+curl -s localhost:8080/api/v1/result/b5658253-a3f4-42c3-96ee-17121f27feb9
+```
+
+```json
+{"request_id":"b5658253-a3f4-42c3-96ee-17121f27feb9","status":"completed","result":"CONTEXT: Retrieved documents for 'Summarize this ticket' User Query: Summarize this ticket Assistant:"}
+```
+
+Then point it at a real model: `orchestrator --reset` asks for a provider and key once and saves them, or pass them directly:
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-... orchestrator --provider anthropic --model claude-sonnet-4-6
+```
+
+`orchestrator --help` lists every flag. `curl -s localhost:8080/health` shows the circuit breaker state and queue depths.
+
+## Results
+
+`cargo run --example llm_pipeline` (from a clone of this repo, no key needed) sends 12 requests from 4 users, then simulates a provider outage. From the recording above:
+
+| | What happened | Where it lives |
+|---|---|---|
+| **Deduplication** | 12 requests, **3 model calls**: the 9 repeats were answered from the dedup cache. 12 answers in 0.9 s | `enhanced::Deduplicator`, wrapped around the worker |
+| **Circuit breaker** | After **5 failures** it opened; the next **3** requests were refused without calling the provider. It lets one probe through after 60 s | `enhanced::CircuitBreaker`, built into stage 3 |
+| **Dead-letter queue** | All **8** outage requests were recorded with a reason; nothing was dropped silently | `handles.dlq`, a 1000-entry ring buffer |
+| **Backpressure** | Every stage hands off through a bounded channel, so a slow model makes producers wait or shed instead of growing memory | `spawn_pipeline(worker)` |
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Mattbusel/tokio-prompt-orchestrator/main/assets/banner-dark.png">
   <img alt="tokio-prompt-orchestrator: 12 requests from 4 users become 3 model calls through dedup; during a simulated outage 5 calls fail, the circuit breaker opens and refuses 3 more, and all 8 land in the dead-letter queue. Drawn from one real run of the llm_pipeline example." src="https://raw.githubusercontent.com/Mattbusel/tokio-prompt-orchestrator/main/assets/banner-light.png" width="100%">
 </picture>
 
-<p align="center">
-  <a href="https://mattbusel.github.io/tokio-prompt-orchestrator/"><b>Site with a live replay</b></a> ·
-  <a href="#quick-start">Quick start</a> ·
-  <a href="https://docs.rs/tokio-prompt-orchestrator">docs.rs</a> ·
-  <a href="https://crates.io/crates/tokio-prompt-orchestrator">crates.io</a> ·
-  <a href="https://github.com/Mattbusel/tokio-prompt-orchestrator/actions/workflows/ci.yml">CI</a>
-</p>
-
-A Tokio pipeline for serving LLM requests: prompts flow through five bounded stages (retrieve, assemble, infer, post-process, stream) with a circuit breaker and a dead-letter queue built in, plus building blocks for request deduplication, retries, caching and rate limiting, in front of Anthropic, OpenAI, llama.cpp, vLLM or your own backend.
-
-It runs as a library, as a binary with a REST, WebSocket and SSE API, as an MCP server for Claude Desktop, and with a terminal dashboard. Optional feature flags add Prometheus metrics, OpenTelemetry tracing, Redis-backed distributed mode and a self-tuning control loop.
-
-## Quick start
-
-### See it work in one command (no API key)
-
-```bash
-git clone https://github.com/Mattbusel/tokio-prompt-orchestrator
-cd tokio-prompt-orchestrator
-cargo run --example llm_pipeline
-```
-
-It pushes 12 requests from 4 users through the pipeline, then simulates a provider outage. This is the real output (the banner above is drawn from the same run):
-
-<img alt="Output of cargo run --example llm_pipeline: 12 answers in 1.0s from 3 model calls, then 5 requests fail with 503, the breaker opens, 3 more fail fast, and all 8 are listed from the dead-letter queue" src="https://raw.githubusercontent.com/Mattbusel/tokio-prompt-orchestrator/main/assets/terminal-llm-pipeline.png" width="100%">
-
-Same example against a real model (3 short API calls; the outage is simulated in front of the provider, so it costs nothing):
+The same example against a real model (3 short API calls; the outage is simulated in front of the provider, so it costs nothing extra):
 
 ```bash
 PROVIDER=anthropic ANTHROPIC_API_KEY=sk-ant-... cargo run --example llm_pipeline
 PROVIDER=openai    OPENAI_API_KEY=sk-...        cargo run --example llm_pipeline
 ```
 
-The source is [`examples/llm_pipeline.rs`](examples/llm_pipeline.rs): about 200 lines, and a good template for wiring your own backend.
+The source is [`examples/llm_pipeline.rs`](https://github.com/Mattbusel/tokio-prompt-orchestrator/blob/main/examples/llm_pipeline.rs): about 200 lines, and a good template for wiring your own backend.
 
-### Run the server
-
-```bash
-# Terminal prompt plus the REST/WebSocket API on http://127.0.0.1:8080, offline echo mode
-cargo run --features web-api -- --provider echo
-
-# A real provider
-ANTHROPIC_API_KEY=sk-ant-... cargo run --features web-api -- --provider anthropic --model claude-sonnet-4-6
-
-# Full feature set + TUI dashboard
-cargo run --features full,tui --bin tui
-```
-
-<img alt="The orchestrator binary in echo mode answering a prompt typed in the terminal, while a second terminal posts a prompt to /api/v1/infer and fetches the result" src="https://raw.githubusercontent.com/Mattbusel/tokio-prompt-orchestrator/main/assets/terminal-server.png" width="100%">
-
-Without `--provider` the first launch runs a setup wizard (Anthropic, OpenAI, llama.cpp, or offline echo) and saves the choice to `orchestrator.env`.
-
-**Prebuilt binaries.** The [releases](https://github.com/Mattbusel/tokio-prompt-orchestrator/releases/latest) page has archives for Linux x86_64, macOS (Apple Silicon and Intel) and Windows x86_64, built with the web API. Use 1.4.1 or later: the 1.4.0 binaries exited right after printing the banner.
-
-### Use the library
+## Use the library
 
 ```toml
 [dependencies]
 tokio-prompt-orchestrator = "1.4"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
-
-For the code on `main`: `tokio-prompt-orchestrator = { git = "https://github.com/Mattbusel/tokio-prompt-orchestrator" }`.
 
 ```rust,no_run
 use std::{collections::HashMap, sync::Arc};
@@ -92,14 +127,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## What you get
+For the code on `main`: `tokio-prompt-orchestrator = { git = "https://github.com/Mattbusel/tokio-prompt-orchestrator" }`. API reference: [docs.rs](https://docs.rs/tokio-prompt-orchestrator).
 
-| | What happened in the run above | Where |
-|---|---|---|
-| **Deduplication** | 12 requests, **3 model calls**; the 9 repeats were answered from the dedup cache in 0.3 ms total | `enhanced::Deduplicator`, wrapped around the worker |
-| **Circuit breaker** | After **5 failures** it opened; the next 3 requests were refused without calling the provider. It probes again after 60 s | `enhanced::CircuitBreaker`, built into stage 3 |
-| **Dead-letter queue** | All **8** outage requests were recorded with a reason; nothing was dropped silently | `handles.dlq`, a 1000-entry ring buffer |
-| **Backpressure** | Every stage hands off through a bounded channel, so a slow model makes producers wait or shed instead of growing memory | `spawn_pipeline(worker)` |
+<details>
+<summary><b>More ways to run the server</b> (from source, full feature set, TUI)</summary>
+
+```bash
+# From a clone: terminal prompt plus the REST/WebSocket API on http://127.0.0.1:8080, offline echo mode
+cargo run --features web-api -- --provider echo
+
+# A real provider
+ANTHROPIC_API_KEY=sk-ant-... cargo run --features web-api -- --provider anthropic --model claude-sonnet-4-6
+
+# Full feature set + TUI dashboard
+cargo run --features full,tui --bin tui
+```
+
+<img alt="The orchestrator binary in echo mode answering a prompt typed in the terminal, while a second terminal posts a prompt to /api/v1/infer and fetches the result" src="https://raw.githubusercontent.com/Mattbusel/tokio-prompt-orchestrator/main/assets/terminal-server.png" width="100%">
+
+Without `--provider` the first launch runs a setup wizard (Anthropic, OpenAI, llama.cpp, or offline echo) and saves the choice to `orchestrator.env` next to the binary. Use 1.4.1 or later: the 1.4.0 binaries exited right after printing the banner.
+
+</details>
 
 ## Architecture
 

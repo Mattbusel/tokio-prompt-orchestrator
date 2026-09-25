@@ -118,9 +118,10 @@ cd tokio-prompt-orchestrator
 cargo run --example llm_pipeline</pre></div>
     </div>
     <div class="step">
-      <h3><span class="n">2</span>Run the server</h3>
-      <p>Interactive terminal plus an HTTP API on port 8080. <code>echo</code> needs no key.</p>
-      <div class="code"><button class="copy" type="button" data-target="c2">Copy</button><pre id="c2" class="mono">cargo run --features web-api -- --provider echo
+      <h3><span class="n">2</span>Install and run the server</h3>
+      <p>Interactive terminal plus an HTTP API on port 8080. <code>echo</code> needs no key. Windows (one PowerShell line), Homebrew, Scoop and <code>cargo binstall</code>: see <a href="https://github.com/Mattbusel/tokio-prompt-orchestrator#install">Install</a>.</p>
+      <div class="code"><button class="copy" type="button" data-target="c2">Copy</button><pre id="c2" class="mono">curl -fsSL https://raw.githubusercontent.com/Mattbusel/tokio-prompt-orchestrator/main/install.sh | sh
+orchestrator --provider echo
 
 # then, from another terminal
 curl -s -X POST http://127.0.0.1:8080/api/v1/infer \

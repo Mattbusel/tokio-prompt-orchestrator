@@ -1,67 +1,146 @@
 name: Release
 
-# Builds the `orchestrator` binary for Linux, macOS and Windows when a
-# version tag (v*) is pushed, and attaches the archives to a GitHub Release.
-
+# Push a tag like v1.4.2 to build the binaries for Linux, macOS and Windows and
+# attach them, with SHA256SUMS.txt, to a GitHub Release. Publishing to
+# crates.io stays manual. Asset names (orchestrator-<tag>-<target>.<ext>) are
+# relied on by cargo-binstall metadata in Cargo.toml, install.sh, install.ps1,
+# the Homebrew formula and the Scoop manifest: do not rename them.
 on:
   push:
-    tags: ["v*"]
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  # Build-only dry run when this workflow itself changes (nothing is released).
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build, e.g. v1.4.2"
+        required: true
 
 permissions:
   contents: write
 
 env:
+  CARGO_TERM_COLOR: always
   # .cargo/config.toml sets a custom target-dir; build into ./target here.
   CARGO_TARGET_DIR: target
+  TAG: ${{ github.event_name == 'pull_request' && 'pr-test' || github.event.inputs.tag || github.ref_name }}
+  NAME: orchestrator
+  # Every binary that needs no extra feature, so `cargo binstall` finds them all.
+  BINS: orchestrator replay coordinator validate
 
 jobs:
   build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            archive: tar.gz
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            archive: tar.gz
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            archive: tar.gz
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            archive: zip
-    runs-on: ${{ matrix.os }}
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.sha || env.TAG }}
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+
       - name: Build
-        run: cargo build --release --locked --bin orchestrator --features web-api --target ${{ matrix.target }}
-      - name: Package (unix)
-        if: matrix.archive == 'tar.gz'
         shell: bash
         run: |
-          name="orchestrator-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          args=""
+          for b in $BINS; do args="$args --bin $b"; done
+          cargo build --release --locked --features web-api --target ${{ matrix.target }} $args
+
+      - name: Smoke test
+        if: matrix.target != 'x86_64-apple-darwin'
+        shell: bash
+        run: ./target/${{ matrix.target }}/release/orchestrator --version
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          name="${NAME}-${TAG}-${{ matrix.target }}"
           mkdir "$name"
-          cp "target/${{ matrix.target }}/release/orchestrator" README.md LICENSE "$name/"
+          for b in $BINS; do cp "target/${{ matrix.target }}/release/$b" "$name/"; done
+          cp README.md LICENSE "$name/"
           tar czf "$name.tar.gz" "$name"
-          echo "ASSET=$name.tar.gz" >> "$GITHUB_ENV"
-      - name: Package (windows)
-        if: matrix.archive == 'zip'
-        shell: bash
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          name="orchestrator-${GITHUB_REF_NAME}-${{ matrix.target }}"
-          mkdir "$name"
-          cp "target/${{ matrix.target }}/release/orchestrator.exe" README.md LICENSE "$name/"
-          7z a "$name.zip" "$name" > /dev/null
-          echo "ASSET=$name.zip" >> "$GITHUB_ENV"
-      - uses: softprops/action-gh-release@v2
+          $name = "$env:NAME-$env:TAG-${{ matrix.target }}"
+          New-Item -ItemType Directory $name | Out-Null
+          foreach ($b in $env:BINS.Split(' ')) { Copy-Item "target/${{ matrix.target }}/release/$b.exe" $name }
+          Copy-Item README.md, LICENSE $name
+          Compress-Archive -Path $name -DestinationPath "$name.zip"
+          $hash = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
+
+      - uses: actions/upload-artifact@v4
         with:
-          files: ${{ env.ASSET }}
-          generate_release_notes: true
+          name: ${{ matrix.target }}
+          path: |
+            ${{ env.NAME }}-*.tar.gz*
+            ${{ env.NAME }}-*.zip*
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd dist
+          cat *.sha256 | sed 's/\r$//' | sort -k2 > SHA256SUMS.txt
+          rm -f *.sha256
+          cat SHA256SUMS.txt
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ls -l dist
+          cat > notes.md <<NOTES
+          Prebuilt \`orchestrator\` binaries (built with the web API) for ${TAG}.
+
+          | System | File |
+          |--------|------|
+          | Windows x86_64 | \`${NAME}-${TAG}-x86_64-pc-windows-msvc.zip\` |
+          | macOS Apple Silicon | \`${NAME}-${TAG}-aarch64-apple-darwin.tar.gz\` |
+          | macOS Intel | \`${NAME}-${TAG}-x86_64-apple-darwin.tar.gz\` |
+          | Linux x86_64 | \`${NAME}-${TAG}-x86_64-unknown-linux-gnu.tar.gz\` |
+
+          Or install in one line: see the Install section of the README. Unpack and run \`orchestrator --provider echo\` to try it with no API key. The binaries are unsigned: Windows SmartScreen may show "unknown publisher" (More info, then Run anyway); on macOS right-click the file and choose Open. Verify downloads with SHA256SUMS.txt. See CHANGELOG.md for what changed.
+          NOTES
+          sed -i 's/^          //' notes.md
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --title "tokio-prompt-orchestrator ${TAG}" --notes-file notes.md
+          fi
