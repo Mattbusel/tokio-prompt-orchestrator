@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790368373168,
+  "lastUpdate": 1790376865390,
   "repoUrl": "https://github.com/Mattbusel/tokio-prompt-orchestrator",
   "entries": {
     "Pipeline Benchmarks": [
@@ -82,6 +82,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "session_id_creation",
             "value": 13,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Vladislav Busel",
+            "username": "Mattbusel"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "d9a33e1183362b32f21f7bd174b1b468163812a5",
+          "message": "Site, README and visuals from a real llm_pipeline run; fix the web-api binary exiting at startup (#11)\n\n- orchestrator built with web-api (the release binaries) exited right after its\n  banner: the REPL found the output channel taken and ended the program. Split\n  pipeline output by request id so the REPL and HTTP API both work.\n- Banner and --help list the real HTTP routes and the stdio mcp binary; banner\n  box aligns; clear message when the port is in use.\n- New README: banner and terminal captures from real runs, theme-aware\n  architecture diagram, corrected endpoints, config and deployment notes,\n  long reference sections collapsed.\n- Project site in site/ with a replay of the recorded run; the Pages workflow\n  publishes it with rustdoc under /api/ and keeps /dev/bench/.\n- Social preview card at .github/social-preview.png.",
+          "timestamp": "2026-09-25T18:49:39-04:00",
+          "tree_id": "cfaa38d494552227fd6bd45d860cf9cdcafab5f3",
+          "url": "https://github.com/Mattbusel/tokio-prompt-orchestrator/commit/d9a33e1183362b32f21f7bd174b1b468163812a5"
+        },
+        "date": 1790376863501,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "full_pipeline_echo_worker",
+            "value": 11148255,
+            "range": "± 142435",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/10",
+            "value": 51054346,
+            "range": "± 161310",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/50",
+            "value": 51073036,
+            "range": "± 149945",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/100",
+            "value": 51085970,
+            "range": "± 118227",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/512",
+            "value": 25137,
+            "range": "± 490",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/1024",
+            "value": 25116,
+            "range": "± 552",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/2048",
+            "value": 24889,
+            "range": "± 535",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "send_with_shed_normal",
+            "value": 122,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "shard_session",
+            "value": 10,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "session_id_creation",
+            "value": 12,
             "range": "± 0",
             "unit": "ns/iter"
           }
