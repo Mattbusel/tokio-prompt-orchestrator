@@ -55,7 +55,7 @@ cargo run --features full,tui --bin tui
 
 Without `--provider` the first launch runs a setup wizard (Anthropic, OpenAI, llama.cpp, or offline echo) and saves the choice to `orchestrator.env`.
 
-**Prebuilt binaries.** The [releases](https://github.com/Mattbusel/tokio-prompt-orchestrator/releases/latest) page has archives for Linux x86_64, macOS (Apple Silicon and Intel) and Windows x86_64, built with the web API. The 1.4.0 binaries exit right after printing the banner; that is fixed on `main` and ships in the next release, so build from source until then.
+**Prebuilt binaries.** The [releases](https://github.com/Mattbusel/tokio-prompt-orchestrator/releases/latest) page has archives for Linux x86_64, macOS (Apple Silicon and Intel) and Windows x86_64, built with the web API. Use 1.4.1 or later: the 1.4.0 binaries exited right after printing the banner.
 
 ### Use the library
 
