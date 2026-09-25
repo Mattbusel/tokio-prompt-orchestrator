@@ -144,7 +144,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # No rust-cache here: a restored partial criterion/ directory makes
+      # `--output-format bencher` fail looking for a baseline sample.json.
       - name: Run benchmarks
         run: |
           cargo bench --bench pipeline \
