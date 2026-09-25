@@ -5,6 +5,60 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-09-25
+
+Version 1.3.0 was never published to crates.io, so this release also carries
+everything listed under 1.3.0 below.
+
+### Added
+
+- `examples/llm_pipeline.rs`: an end-to-end pipeline example that runs with no
+  API key (mock model) or against Anthropic/OpenAI with `PROVIDER=`. Shows
+  request deduplication (12 requests, 3 model calls) and the circuit breaker
+  plus dead-letter queue during a simulated provider outage.
+- `enhanced::retry_if` is re-exported (its doc example referenced it).
+- Release workflow: pushing a `v*` tag builds `orchestrator` for Linux,
+  macOS (arm64, x86_64) and Windows and attaches the archives to the release.
+- CI `test` job: integration tests, doctests, example builds and a run of the
+  `llm_pipeline` example.
+
+### Fixed
+
+- `web-api` feature did not compile (stale `rate_limiter::RateLimiter` type).
+  `GET /api/v1/rate-limiter/stats` now returns per-model throttled counts from
+  `RateLimiterRegistry`.
+- `priority_queue`: aging thresholds were applied in reverse order
+  (Background waited for the High threshold); promoted items now keep their
+  enqueue order in the destination level.
+- `context_mgr`: `SummarizeOldest` left the context over budget because the
+  placeholder message was not counted.
+- `hot_config`: `set`/`get` panicked when called inside a Tokio runtime.
+- `config::watcher`: the reload loop blocked a Tokio worker thread (and hung
+  current-thread runtimes); the debounce dropped the last write of a burst.
+- `multi_modal`: serializing a `ContentPart::Text` always failed. Text parts
+  now serialize as `{"type":"text","text":"..."}`.
+- `prompt_template`: `{{ x | default:y }}` errored when `x` was unset;
+  `truncate` could panic on multi-byte text.
+- `prompt_versioning::blame` returned a version for out-of-range lines.
+- `prompt_optimizer`: filler removal missed words before punctuation and
+  mangled words that contain a filler (for example "displease").
+- `job_scheduler`: intervals shorter than 100 ms fired late.
+- `intent_classifier`: "Analyse X" was classified as a command.
+- `retry_policy::retry_async` panicked with `max_attempts = 0`.
+- `orchestrator` binary: `--provider` on the command line was ignored unless a
+  saved config existed. `cargo run` now picks the `orchestrator` binary
+  (`default-run`).
+- README: the quick start used a nonexistent `--worker` flag; code fragments
+  are marked so `cargo test --doc` passes; broken intra-doc links fixed.
+- Clippy (`-D warnings`, Rust 1.98) and rustdoc (`-D warnings`) are clean;
+  `Cargo.lock` updated for patched `h2`, `rustls`, `quinn-proto` and
+  `crossbeam-epoch`.
+
+### Changed
+
+- Published package excludes `releases/` (a prebuilt binary), editor and hook
+  files.
+
 ## [1.3.0] - 2026-03-22
 
 ### Added
