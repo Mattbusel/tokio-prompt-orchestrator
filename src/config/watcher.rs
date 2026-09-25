@@ -112,9 +112,12 @@ impl ConfigWatcher {
 
         let watcher = Arc::new(Mutex::new(watcher));
 
-        // Spawn background task to process file events
+        // Process file events on a dedicated OS thread. The loop blocks on
+        // `recv_timeout`, so running it as a Tokio task would stall a runtime
+        // worker (and hang a current-thread runtime completely). The thread
+        // exits when the watcher is dropped and the notify channel closes.
         let config_path = watch_path.clone();
-        tokio::spawn(async move {
+        std::thread::spawn(move || {
             let debounce = Duration::from_millis(200);
             let mut last_reload = std::time::Instant::now()
                 .checked_sub(debounce)

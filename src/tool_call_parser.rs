@@ -275,8 +275,8 @@ fn extract_balanced_braces(text: &str) -> Vec<&str> {
                 }
                 depth += 1;
             }
-            b'}' => {
-                if depth > 0 {
+            b'}'
+                if depth > 0 => {
                     depth -= 1;
                     if depth == 0 {
                         if let Some(s) = start.take() {
@@ -284,7 +284,6 @@ fn extract_balanced_braces(text: &str) -> Vec<&str> {
                         }
                     }
                 }
-            }
             _ => {}
         }
         i += 1;

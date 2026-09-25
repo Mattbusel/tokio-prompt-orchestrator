@@ -154,7 +154,7 @@ impl EvalHarness {
         let mut results: Vec<EvalResult> = Vec::new();
 
         for (case, (response, latency_ms, cost_usd)) in
-            self.cases.iter().zip(responses.into_iter())
+            self.cases.iter().zip(responses)
         {
             let primary_score = self.score(&response, case, &self.primary_metric);
             let passed = primary_score >= 0.5;

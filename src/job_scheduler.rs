@@ -83,10 +83,10 @@ fn cron_next_tick(
         .as_secs();
 
     // Search forward one second at a time (up to 24 h ahead).
-    let max_search = 24 * 3600_u64;
-    let mut candidate = wall_now + 1; // at least one second in the future
+    let max_search = 24 * 3600_usize;
 
-    for _ in 0..max_search {
+    // Start at least one second in the future.
+    for candidate in (wall_now + 1..).take(max_search) {
         // Decompose candidate into h/m/s.
         let s = candidate % 60;
         let m = (candidate / 60) % 60;
@@ -101,7 +101,6 @@ fn cron_next_tick(
             let delta_secs = candidate.saturating_sub(wall_now);
             return now + Duration::from_secs(delta_secs);
         }
-        candidate += 1;
     }
 
     // Fallback: 24 h from now (should never happen with valid cron fields).

@@ -2527,7 +2527,7 @@ async fn batch_handler(
         .prompts
         .into_iter()
         .enumerate()
-        .zip(sub_request_ids.into_iter())
+        .zip(sub_request_ids)
         .map(|((i, prompt), request_id)| {
             let state = Arc::clone(&state);
             let session_prefix = session_prefix.clone();

@@ -176,11 +176,9 @@ impl ProgressBar {
 
     fn render(&self) {
         let bar_width: usize = 40;
-        let filled = if self.total > 0 {
-            (self.current * bar_width) / self.total
-        } else {
-            0
-        };
+        let filled = (self.current * bar_width)
+            .checked_div(self.total)
+            .unwrap_or(0);
         let empty = bar_width.saturating_sub(filled);
         let bar: String = format!(
             "[{}{}] {}/{} ok:{} fail:{} skip:{}",
@@ -376,7 +374,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "  [{:>4}] session={} prompt={:?}",
                 i + 1,
                 entry.session_id.as_deref().unwrap_or("-"),
-                &entry.prompt.chars().take(60).collect::<String>()
+                entry.prompt.chars().take(60).collect::<String>()
             );
         }
         return Ok(());
