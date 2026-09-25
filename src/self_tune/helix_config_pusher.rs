@@ -10,9 +10,9 @@
 //!
 //! ## How it works
 //!
-//! 1. Reads [`LiveTuning`](super::actuator::LiveTuning) parameters every
+//! 1. Reads [`LiveTuning`] parameters every
 //!    `push_interval` (default 30 s).
-//! 2. Maps Tokio Prompt parameters to [`RouterConfigPatch`] fields using the
+//! 2. Maps Tokio Prompt parameters to `RouterConfigPatch` fields using the
 //!    conversion documented below.
 //! 3. Sends a `PATCH /api/config` request to HelixRouter only when a parameter
 //!    has changed by more than `change_threshold` (default 5 %).
@@ -32,7 +32,7 @@
 //!
 //! ## NOT Responsible For
 //!
-//! - Reading HelixRouter's pressure signal (see [`helix_probe`]).
+//! - Reading HelixRouter's pressure signal (see `helix_probe`).
 //! - Authenticating to HelixRouter (no auth in current protocol).
 
 #[cfg(feature = "self-tune")]
@@ -147,7 +147,7 @@ impl HelixConfigPusher {
     /// Run the push loop indefinitely.
     ///
     /// On each tick, reads current tuning parameters, builds a sparse
-    /// [`ConfigPatch`], and PATCHes HelixRouter only when at least one
+    /// `ConfigPatch`, and PATCHes HelixRouter only when at least one
     /// parameter has changed beyond the configured threshold.
     ///
     /// Errors are soft-logged; the loop never exits on a failed push.

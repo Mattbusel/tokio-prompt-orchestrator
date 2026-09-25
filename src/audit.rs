@@ -191,7 +191,7 @@ impl AuditLog {
     pub fn export_jsonl(&self, writer: &mut dyn Write) -> std::io::Result<()> {
         for entry in &self.entries {
             let line = serde_json::to_string(entry)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                .map_err(std::io::Error::other)?;
             writeln!(writer, "{}", line)?;
         }
         Ok(())

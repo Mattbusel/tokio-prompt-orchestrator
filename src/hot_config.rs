@@ -21,12 +21,9 @@
 //! ```rust
 //! use tokio_prompt_orchestrator::hot_config::{HotConfig, ConfigValue};
 //!
-//! # #[tokio::main]
-//! # async fn main() {
 //! let cfg = HotConfig::from_defaults();
 //! cfg.set("workers", ConfigValue::Int(4));
 //! assert_eq!(cfg.get("workers"), Some(ConfigValue::Int(4)));
-//! # }
 //! ```
 
 use std::{
@@ -36,7 +33,8 @@ use std::{
     sync::Arc,
     time::{Duration, Instant, SystemTime},
 };
-use tokio::sync::{watch, RwLock};
+use parking_lot::RwLock;
+use tokio::sync::watch;
 
 // ---------------------------------------------------------------------------
 // ConfigValue
@@ -324,13 +322,11 @@ impl HotConfig {
     ///
     /// Increments the version counter and notifies all subscribers.
     pub fn set(&self, key: &str, value: ConfigValue) {
-        // Use blocking write — acceptable in non-async contexts.
+        // A short synchronous lock: safe to call from sync code and from async tasks.
         let snapshot = Arc::clone(&self.snapshot);
         let key = key.to_string();
         let tx = self.version_tx.clone();
-        // This runs synchronously; callers in async context should use a
-        // spawn_blocking wrapper if needed.
-        let mut guard = snapshot.blocking_write();
+        let mut guard = snapshot.write();
         guard.values.insert(key, value);
         guard.version += 1;
         let v = guard.version;
@@ -340,7 +336,7 @@ impl HotConfig {
 
     /// Read the value for `key` from the current snapshot.
     pub fn get(&self, key: &str) -> Option<ConfigValue> {
-        let guard = self.snapshot.blocking_read();
+        let guard = self.snapshot.read();
         guard.values.get(key).cloned()
     }
 
@@ -397,11 +393,11 @@ impl HotConfig {
                     last_mtime = current_mtime;
                     if let Ok(new_snap) = load_toml(path.to_str().unwrap_or("")) {
                         let new_version = {
-                            let guard = snapshot.read().await;
+                            let guard = snapshot.read();
                             guard.version + 1
                         };
                         {
-                            let mut guard = snapshot.write().await;
+                            let mut guard = snapshot.write();
                             guard.values = new_snap.values;
                             guard.version = new_version;
                             guard.loaded_at = Instant::now();
@@ -502,12 +498,12 @@ mod tests {
     fn set_increments_version() {
         let cfg = HotConfig::from_defaults();
         let initial_version = {
-            let guard = cfg.snapshot.blocking_read();
+            let guard = cfg.snapshot.read();
             guard.version
         };
         cfg.set("x", ConfigValue::Bool(true));
         let new_version = {
-            let guard = cfg.snapshot.blocking_read();
+            let guard = cfg.snapshot.read();
             guard.version
         };
         assert_eq!(new_version, initial_version + 1);

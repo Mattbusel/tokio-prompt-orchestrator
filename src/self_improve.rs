@@ -94,7 +94,7 @@ pub struct LoopConfig {
     pub target_throughput_rps: f64,
     /// Optional HelixRouter pressure probe configuration.
     ///
-    /// When set, the loop spawns a background [`HelixPressureProbe`] that polls
+    /// When set, the loop spawns a background `HelixPressureProbe` that polls
     /// HelixRouter's `/api/stats` and feeds its `pressure_score` into the
     /// `TelemetryBus`, closing the cross-repo feedback loop.
     ///
@@ -177,7 +177,7 @@ pub struct SelfImprovingLoop {
 }
 
 impl SelfImprovingLoop {
-    /// Construct the loop.  No background work starts until [`spawn`] is called.
+    /// Construct the loop.  No background work starts until `spawn` is called.
     ///
     /// # Errors
     /// Returns [`CostError`] if `cfg.budget` contains invalid values (e.g. negative
@@ -232,7 +232,7 @@ impl SelfImprovingLoop {
 
     /// Spawn the background control loop as a detached Tokio task.
     ///
-    /// If `LoopConfig::helix_probe` is `Some`, a [`HelixPressureProbe`] background
+    /// If `LoopConfig::helix_probe` is `Some`, a `HelixPressureProbe` background
     /// task is also spawned to feed HelixRouter's pressure signal into the bus.
     ///
     /// The loop runs until the telemetry bus is dropped (broadcast channel closes).

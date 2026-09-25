@@ -451,7 +451,7 @@ pub mod render {
         let header = Line::from(vec![
             Span::raw(format!("{:<10}", "Stage")),
             Span::styled(
-                format!(" {:>bar_w$}", format!("{total_ms:.0} ms total")),
+                format!(" {:>w$}", format!("{total_ms:.0} ms total"), w = bar_w as usize),
                 Style::default()
                     .fg(Color::DarkGray)
                     .add_modifier(Modifier::DIM),
@@ -517,7 +517,7 @@ pub mod render {
                         Style::default().fg(Color::DarkGray),
                     ),
                     Span::styled(
-                        format!("{:-<bar_w$}", ""),
+                        format!("{:-<w$}", "", w = bar_w as usize),
                         Style::default().fg(Color::DarkGray),
                     ),
                 ])

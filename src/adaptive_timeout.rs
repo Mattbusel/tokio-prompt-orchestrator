@@ -157,7 +157,7 @@ impl AdaptiveTimeoutManager {
             .map(|p95| p95 * 1.5)
             .unwrap_or(DEFAULT_MS);
 
-        let clamped = timeout_ms.max(MIN_MS).min(MAX_MS);
+        let clamped = timeout_ms.clamp(MIN_MS, MAX_MS);
         Duration::from_millis(clamped as u64)
     }
 

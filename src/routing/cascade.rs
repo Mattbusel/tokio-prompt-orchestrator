@@ -20,8 +20,9 @@
 //! ```rust
 //! use std::time::Duration;
 //! use tokio_prompt_orchestrator::config::WorkerKind;
-//! use tokio_prompt_orchestrator::routing::cascade::{CascadeEntry, ProviderCascade};
-//! use tokio_prompt_orchestrator::enhanced::circuit_breaker::CircuitBreakerConfig;
+//! use tokio_prompt_orchestrator::routing::cascade::{
+//!     CascadeEntry, CircuitBreakerConfig, ProviderCascade,
+//! };
 //!
 //! let cascade = ProviderCascade::new(vec![
 //!     CascadeEntry::new(WorkerKind::LlamaCpp, CircuitBreakerConfig::default()),
@@ -49,11 +50,13 @@ lazy_static! {
 
     /// Total attempts per provider label, incremented each time a provider is tried.
     static ref CASCADE_ATTEMPTS: CounterVec = {
+        #[allow(clippy::expect_used)] // constant metric definition; cannot fail at runtime
         let cv = CounterVec::new(
             Opts::new("cascade_attempts_total", "Total cascade attempts per provider"),
             &["provider"],
         )
         .expect("cascade_attempts_total metric construction");
+        #[allow(clippy::expect_used)]
         CASCADE_REGISTRY
             .register(Box::new(cv.clone()))
             .expect("cascade_attempts_total registration");
@@ -62,11 +65,13 @@ lazy_static! {
 
     /// Total failures per provider label, incremented when a provider call errors.
     static ref CASCADE_FAILURES: CounterVec = {
+        #[allow(clippy::expect_used)] // constant metric definition; cannot fail at runtime
         let cv = CounterVec::new(
             Opts::new("cascade_failures_total", "Total cascade failures per provider"),
             &["provider"],
         )
         .expect("cascade_failures_total metric construction");
+        #[allow(clippy::expect_used)]
         CASCADE_REGISTRY
             .register(Box::new(cv.clone()))
             .expect("cascade_failures_total registration");
@@ -257,7 +262,7 @@ impl<E: fmt::Display + fmt::Debug> std::error::Error for CascadeError<E> {}
 /// A configurable chain of LLM providers that tries primary → secondary →
 /// tertiary on failure.
 ///
-/// Unlike the binary [`LocalWithFallback`] routing decision, `ProviderCascade`
+/// Unlike the binary `LocalWithFallback` routing decision, `ProviderCascade`
 /// supports an arbitrary number of providers and maintains per-provider
 /// circuit breakers, latency telemetry, and Prometheus counters.
 ///
@@ -373,7 +378,7 @@ impl ProviderCascade {
             }
 
             let label = entry.provider_label();
-            let _ = CASCADE_ATTEMPTS.with_label_values(&[label]).inc();
+            CASCADE_ATTEMPTS.with_label_values(&[label]).inc();
 
             attempts = attempts.saturating_add(1);
             let call_start = Instant::now();
@@ -416,7 +421,7 @@ impl ProviderCascade {
                 }
                 Err(e) => {
                     entry.failure_count.fetch_add(1, Ordering::Relaxed);
-                    let _ = CASCADE_FAILURES.with_label_values(&[label]).inc();
+                    CASCADE_FAILURES.with_label_values(&[label]).inc();
 
                     // Record failure with the circuit breaker.
                     let _: Result<(), _> = entry

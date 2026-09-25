@@ -235,8 +235,9 @@ impl ConversationContext {
                 .position(|m| m.role != Role::System);
             match idx {
                 Some(i) => {
-                    let removed = self.messages.remove(i).expect("index exists");
-                    self.total_tokens = self.total_tokens.saturating_sub(removed.token_count);
+                    if let Some(removed) = self.messages.remove(i) {
+                        self.total_tokens = self.total_tokens.saturating_sub(removed.token_count);
+                    }
                 }
                 None => break, // only system message left, nothing more to drop
             }
@@ -246,18 +247,24 @@ impl ConversationContext {
     /// Replace the oldest non-system messages with a single summary placeholder
     /// until within `budget`.
     fn summarize_oldest(&mut self, budget: usize) {
+        if self.total_tokens <= budget {
+            return;
+        }
+        // Reserve room for the placeholder itself so the result fits the budget.
+        let reserve = Message::new(Role::System, "[1 messages summarized]").token_count;
         let mut summarized = 0usize;
-        while self.total_tokens > budget {
+        while self.total_tokens + reserve > budget {
             let idx = self
                 .messages
                 .iter()
                 .position(|m| m.role != Role::System);
             match idx {
                 Some(i) => {
-                    let removed = self.messages.remove(i).expect("index exists");
-                    self.total_tokens =
-                        self.total_tokens.saturating_sub(removed.token_count);
-                    summarized += 1;
+                    if let Some(removed) = self.messages.remove(i) {
+                        self.total_tokens =
+                            self.total_tokens.saturating_sub(removed.token_count);
+                        summarized += 1;
+                    }
                 }
                 None => break,
             }

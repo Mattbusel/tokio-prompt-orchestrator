@@ -1,6 +1,6 @@
 //! Dead-Letter Queue Replay Scheduler
 //!
-//! [`DlqReplayScheduler`] wraps the pipeline's [`DeadLetterQueue`] and adds
+//! [`DlqReplayScheduler`] wraps the pipeline's `DeadLetterQueue` and adds
 //! controlled re-injection of shed requests back into the pipeline with
 //! exponential backoff between each replay, optional per-session filtering,
 //! and age-based eviction.
@@ -8,7 +8,7 @@
 //! ## Design
 //!
 //! The scheduler holds its own internal queue of [`ReplayEntry`] items.
-//! A "dropped" request from the [`DeadLetterQueue`] can be converted into a
+//! A "dropped" request from the `DeadLetterQueue` can be converted into a
 //! `ReplayEntry` and pushed here. The scheduler does **not** automatically
 //! drain the main `DeadLetterQueue` — callers feed it explicitly, which keeps
 //! the concern separation clean and lets callers control replay policy.
@@ -68,11 +68,13 @@ lazy_static! {
 
     /// Total DLQ entries successfully replayed into the pipeline.
     static ref DLQ_REPLAYED: Counter = {
+        #[allow(clippy::expect_used)] // constant metric definition; cannot fail at runtime
         let c = Counter::with_opts(Opts::new(
             "dlq_replayed_total",
             "Total dead-letter queue entries successfully re-injected into the pipeline",
         ))
         .expect("dlq_replayed_total metric construction");
+        #[allow(clippy::expect_used)]
         DLQ_REGISTRY
             .register(Box::new(c.clone()))
             .expect("dlq_replayed_total registration");
@@ -81,11 +83,13 @@ lazy_static! {
 
     /// Total DLQ entries removed by age_out().
     static ref DLQ_AGED_OUT: Counter = {
+        #[allow(clippy::expect_used)] // constant metric definition; cannot fail at runtime
         let c = Counter::with_opts(Opts::new(
             "dlq_aged_out_total",
             "Total dead-letter queue entries evicted because they exceeded max_age",
         ))
         .expect("dlq_aged_out_total metric construction");
+        #[allow(clippy::expect_used)]
         DLQ_REGISTRY
             .register(Box::new(c.clone()))
             .expect("dlq_aged_out_total registration");
@@ -141,7 +145,7 @@ impl ReplayEntry {
         Instant::now() >= self.next_attempt_at
     }
 
-    /// Returns `true` if the entry is older than `max_age` (based on [`queued_at`]).
+    /// Returns `true` if the entry is older than `max_age` (based on `queued_at`).
     ///
     /// # Panics
     ///
@@ -325,7 +329,7 @@ impl DlqReplayScheduler {
 
             match sender.try_send(entry.request.clone()) {
                 Ok(()) => {
-                    let _ = DLQ_REPLAYED.inc();
+                    DLQ_REPLAYED.inc();
                     self.replayed_total.fetch_add(1, Ordering::Relaxed);
                     info!(
                         request_id = %request_id,
@@ -369,7 +373,7 @@ impl DlqReplayScheduler {
         let evicted = before - q.len();
 
         if evicted > 0 {
-            let _ = DLQ_AGED_OUT.inc_by(evicted as f64);
+            DLQ_AGED_OUT.inc_by(evicted as f64);
             self.aged_out_total
                 .fetch_add(evicted as u64, Ordering::Relaxed);
             info!(

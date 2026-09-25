@@ -71,7 +71,7 @@ fn warn_if_low_remaining(headers: &reqwest::header::HeaderMap, provider: &str) {
 /// Trait for model inference workers
 ///
 /// Implementations must be thread-safe (Send + Sync) for use across tasks.
-/// The trait is object-safe to allow dynamic dispatch via Arc<dyn ModelWorker>.
+/// The trait is object-safe to allow dynamic dispatch via `Arc<dyn ModelWorker>`.
 ///
 /// # Resilience
 ///

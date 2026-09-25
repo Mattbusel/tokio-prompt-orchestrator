@@ -50,11 +50,11 @@ async fn body_size_middleware(
     let (parts, body) = req.into_parts();
     match axum::body::to_bytes(body, max_size.saturating_add(1)).await {
         Ok(bytes) if bytes.len() > max_size => {
-            return (
+            (
                 StatusCode::PAYLOAD_TOO_LARGE,
                 Json(serde_json::json!({"error": "Request body too large"})),
             )
-                .into_response();
+                .into_response()
         }
         Ok(bytes) => {
             let req = Request::from_parts(parts, Body::from(bytes));
@@ -548,7 +548,7 @@ struct AppState {
     /// Shared in-process prompt cache.
     prompt_cache: crate::cache::PromptCache,
     /// Per-model rate limiter.
-    rate_limiter: crate::rate_limiter::RateLimiter,
+    rate_limiter: crate::rate_limiter::RateLimiterRegistry,
     /// Set to `true` when a shutdown signal has been received.  New inference
     /// requests are rejected with HTTP 503 while this is `true`.
     shutting_down: Arc<AtomicBool>,
@@ -685,7 +685,7 @@ pub async fn start_server(
         session_budget: Arc::new(crate::session::SessionBudget::new()),
         ab_runner: Arc::new(crate::ab_test::AbTestRunner::new()),
         prompt_cache: crate::cache::PromptCache::new(crate::cache::CacheConfig::default()),
-        rate_limiter: crate::rate_limiter::RateLimiter::new(vec![]),
+        rate_limiter: crate::rate_limiter::RateLimiterRegistry::new(),
         template_library: Arc::new(std::sync::RwLock::new(
             crate::template::TemplateLibrary::new(),
         )),
@@ -2531,7 +2531,6 @@ async fn batch_handler(
         .map(|((i, prompt), request_id)| {
             let state = Arc::clone(&state);
             let session_prefix = session_prefix.clone();
-            let item_timeout = item_timeout;
             let batch_id = batch_id.clone();
             async move {
                 let session_id = session_prefix
@@ -3244,10 +3243,7 @@ async fn rate_limiter_stats_handler(State(state): State<Arc<AppState>>) -> impl 
     #[derive(Serialize)]
     struct ModelStats {
         model_id: String,
-        requests_allowed: u64,
-        requests_denied: u64,
-        current_tokens: f64,
-        capacity: f64,
+        requests_throttled: u64,
     }
 
     #[derive(Serialize)]
@@ -3255,16 +3251,13 @@ async fn rate_limiter_stats_handler(State(state): State<Arc<AppState>>) -> impl 
         models: Vec<ModelStats>,
     }
 
-    let stats = state.rate_limiter.stats();
-    let models = stats
-        .per_model
+    let models = state
+        .rate_limiter
+        .stats()
         .into_iter()
-        .map(|m| ModelStats {
-            model_id: m.model_id,
-            requests_allowed: m.requests_allowed,
-            requests_denied: m.requests_denied,
-            current_tokens: m.current_tokens,
-            capacity: m.capacity,
+        .map(|(model_id, requests_throttled)| ModelStats {
+            model_id,
+            requests_throttled,
         })
         .collect();
     Json(RateLimiterStatsResponse { models })

@@ -1,7 +1,7 @@
 #![cfg(feature = "intelligence")]
 //! Backward-compatible re-export of the lexical deduplication module.
 //!
-//! This module has been superseded by [`super::lexical_dedup`].  All public
+//! This module has been superseded by [`lexical_dedup`](crate::intelligence::lexical_dedup).  All public
 //! types are re-exported here so that existing `use intelligence::semantic_dedup::*`
 //! imports continue to compile without changes.
 //!

@@ -339,7 +339,7 @@ impl TournamentRunner {
 
         // Score candidates and pick the winner.
         let scorer = &*self.scorer;
-        let (winner_idx, winner_response, winner_elapsed, best_score) = candidates
+        let (winner_idx, winner_response, _winner_elapsed, best_score) = candidates
             .into_iter()
             .map(|(idx, resp, elapsed)| {
                 let score = scorer.score(&resp, elapsed);

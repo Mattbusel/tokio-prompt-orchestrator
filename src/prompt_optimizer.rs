@@ -136,7 +136,7 @@ impl VariantGenerator {
     /// Create a new generator.
     #[must_use]
     pub fn new(strategy: VariantStrategy, num_variants: usize) -> Self {
-        Self { strategy, num_variants: num_variants.max(1).min(32) }
+        Self { strategy, num_variants: num_variants.clamp(1, 32) }
     }
 
     /// Generate variants.
@@ -155,7 +155,7 @@ impl VariantGenerator {
             }
             VariantStrategy::Reframe => {
                 let frames = [
-                    format!("{base_prompt}"),
+                    base_prompt.to_string(),
                     format!("Regarding the following: {base_prompt}\nWhat is the best answer?"),
                     format!("I need help with: {base_prompt}"),
                     format!("Question: {base_prompt}\nAnswer:"),
@@ -871,30 +871,14 @@ impl PromptCompressor {
         // Step 2 – deduplicate consecutive identical sentences.
         out = dedup_sentences(&out);
 
-        // Step 3 – remove filler phrases.
-        const FILLERS: &[&str] = &[
-            "please ", "kindly ", "as mentioned above, ", "as mentioned above ",
-            "as previously mentioned, ", "as previously mentioned ",
-            "it is worth noting that ", "it should be noted that ",
-            "note that ", "please note that ",
-        ];
-        for filler in FILLERS {
-            // Case-insensitive removal.
-            let lower = out.to_lowercase();
-            let mut result = String::with_capacity(out.len());
-            let mut pos = 0usize;
-            loop {
-                if pos >= out.len() { break; }
-                if let Some(idx) = lower[pos..].find(filler) {
-                    let abs = pos + idx;
-                    result.push_str(&out[pos..abs]);
-                    pos = abs + filler.len();
-                } else {
-                    result.push_str(&out[pos..]);
-                    break;
-                }
+        // Step 3 – remove filler phrases (case-insensitive, whole words only,
+        // including at the end of a sentence).
+        if let Some(re) = filler_regex() {
+            out = re.replace_all(&out, " ").into_owned();
+            out = collapse_whitespace(&out);
+            if let Some(space_punct) = space_before_punct_regex() {
+                out = space_punct.replace_all(&out, "$1").into_owned();
             }
-            out = result;
         }
 
         // Step 4 – abbreviate common patterns.
@@ -918,6 +902,24 @@ impl PromptCompressor {
     }
 }
 
+/// Filler phrases dropped by [`PromptCompressor::compress`]. Longer phrases
+/// come first so "please note that" wins over "please".
+fn filler_regex() -> Option<&'static regex::Regex> {
+    static RE: std::sync::OnceLock<Option<regex::Regex>> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(
+            r"(?i)\b(?:please note that|it is worth noting that|it should be noted that|as previously mentioned|as mentioned above|note that|please|kindly)\b",
+        )
+        .ok()
+    })
+    .as_ref()
+}
+
+fn space_before_punct_regex() -> Option<&'static regex::Regex> {
+    static RE: std::sync::OnceLock<Option<regex::Regex>> = std::sync::OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r" +([.,;:!?])").ok()).as_ref()
+}
+
 fn collapse_whitespace(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut prev_space = false;
@@ -939,7 +941,7 @@ fn dedup_sentences(s: &str) -> String {
     let sentences: Vec<&str> = s.split(". ").collect();
     let mut result: Vec<&str> = Vec::with_capacity(sentences.len());
     for sentence in &sentences {
-        if result.last().map_or(true, |last| *last != *sentence) {
+        if result.last().is_none_or(|last| *last != *sentence) {
             result.push(sentence);
         }
     }
@@ -1069,6 +1071,13 @@ mod round32_tests {
         let out = c.compress("Please summarise this kindly.");
         assert!(!out.to_lowercase().contains("please"));
         assert!(!out.to_lowercase().contains("kindly"));
+        assert_eq!(out, "summarise this.");
+    }
+
+    #[test]
+    fn compressor_keeps_words_containing_fillers() {
+        let c = PromptCompressor::new(4096, 0.8);
+        assert_eq!(c.compress("This will displease unkindly users."), "This will displease unkindly users.");
     }
 
     #[test]

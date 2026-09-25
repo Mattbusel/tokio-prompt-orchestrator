@@ -10,5 +10,5 @@ pub mod prompt_opt;
 pub mod quality;
 pub mod router;
 /// Legacy module re-exported for backward compatibility.
-/// Use [`lexical_dedup`] instead.
+/// Use [`lexical_dedup`](crate::intelligence::lexical_dedup) instead.
 pub mod semantic_dedup;

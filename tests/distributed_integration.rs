@@ -293,7 +293,9 @@ fn test_leader_election_renewal_interval() {
     let client = redis::Client::open("redis://localhost:6379");
     if let Ok(c) = client {
         let election = LeaderElection::from_client(Arc::new(c), "n1", 20);
-        assert_eq!(election.renewal_interval(), Duration::from_secs(10));
+        // Renewal runs every ttl/3 (integer seconds) so a leader gets two
+        // renewal attempts per lease.
+        assert_eq!(election.renewal_interval(), Duration::from_secs(6));
     }
 }
 
@@ -488,7 +490,7 @@ fn test_leader_election_initial_state_is_follower() {
             "initial role watcher value must be Follower(None)"
         );
         assert_eq!(election.node_id(), "node-test");
-        assert_eq!(election.renewal_interval(), Duration::from_secs(15));
+        assert_eq!(election.renewal_interval(), Duration::from_secs(10)); // ttl / 3
     }
 }
 

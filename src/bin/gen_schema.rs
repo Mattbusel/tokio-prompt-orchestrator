@@ -1,6 +1,6 @@
 //! # gen_schema — JSON Schema generator for `PipelineConfig`
 //!
-//! Derives the JSON Schema for the root [`PipelineConfig`] struct and writes
+//! Derives the JSON Schema for the root `PipelineConfig` struct and writes
 //! it to `config.schema.json` in the current working directory.
 //!
 //! ## Usage
@@ -36,10 +36,7 @@ use tokio_prompt_orchestrator::config::export_schema;
 
 fn main() -> io::Result<()> {
     let schema_json = export_schema().map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            format!("failed to generate JSON Schema: {e}"),
-        )
+        io::Error::other(format!("failed to generate JSON Schema: {e}"))
     })?;
 
     let out_path = Path::new("config.schema.json");

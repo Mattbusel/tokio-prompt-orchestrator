@@ -240,20 +240,16 @@ impl ContentModerator {
         {
             let mut search = text;
             let mut offset = 0;
-            loop {
-                if let Some((pos, val)) = Self::find_credit_card(search) {
-                    matches.push(PiiMatch {
-                        pii_type: "credit_card".to_string(),
-                        value: val.clone(),
-                        start: offset + pos,
-                        end: offset + pos + val.len(),
-                    });
-                    let advance = pos + val.len();
-                    offset += advance;
-                    search = &search[advance..];
-                } else {
-                    break;
-                }
+            while let Some((pos, val)) = Self::find_credit_card(search) {
+                matches.push(PiiMatch {
+                    pii_type: "credit_card".to_string(),
+                    value: val.clone(),
+                    start: offset + pos,
+                    end: offset + pos + val.len(),
+                });
+                let advance = pos + val.len();
+                offset += advance;
+                search = &search[advance..];
             }
         }
 
@@ -261,27 +257,23 @@ impl ContentModerator {
         {
             let mut search = text;
             let mut offset = 0;
-            loop {
-                if let Some((pos, val)) = Self::find_ip(search) {
-                    matches.push(PiiMatch {
-                        pii_type: "ip_address".to_string(),
-                        value: val.clone(),
-                        start: offset + pos,
-                        end: offset + pos + val.len(),
-                    });
-                    let advance = pos + val.len();
-                    offset += advance;
-                    search = &search[advance..];
-                } else {
-                    break;
-                }
+            while let Some((pos, val)) = Self::find_ip(search) {
+                matches.push(PiiMatch {
+                    pii_type: "ip_address".to_string(),
+                    value: val.clone(),
+                    start: offset + pos,
+                    end: offset + pos + val.len(),
+                });
+                let advance = pos + val.len();
+                offset += advance;
+                search = &search[advance..];
             }
         }
 
         matches
     }
 
-    /// Replace matched PII spans with "[REDACTED]".
+    /// Replace matched PII spans with "`REDACTED`".
     pub fn redact_pii(text: &str, matches: &[PiiMatch]) -> String {
         if matches.is_empty() {
             return text.to_string();
@@ -338,11 +330,9 @@ impl ContentModerator {
                     in_word = false;
                 }
                 start = i + c.len_utf8();
-            } else {
-                if !in_word {
-                    start = i;
-                    in_word = true;
-                }
+            } else if !in_word {
+                start = i;
+                in_word = true;
             }
         }
         if in_word {
@@ -373,7 +363,7 @@ impl ContentModerator {
                     let before_ok = i == 0 || !bytes[i - 1].is_ascii_digit();
                     let after_ok = i + 11 >= bytes.len() || !bytes[i + 11].is_ascii_digit();
                     if before_ok && after_ok {
-                        let val = std::str::from_utf8(&bytes[i..i + 11]).unwrap().to_string();
+                        let val = String::from_utf8_lossy(&bytes[i..i + 11]).into_owned();
                         return Some((i, val));
                     }
                 }
@@ -393,7 +383,7 @@ impl ContentModerator {
                     let before_ok = i == 0 || !bytes[i - 1].is_ascii_digit();
                     let after_ok = i + 16 >= bytes.len() || !bytes[i + 16].is_ascii_digit();
                     if before_ok && after_ok {
-                        let val = std::str::from_utf8(slice).unwrap().to_string();
+                        let val = String::from_utf8_lossy(slice).into_owned();
                         return Some((i, val));
                     }
                 }
@@ -412,7 +402,7 @@ impl ContentModerator {
                     let before_ok = i == 0 || !bytes[i - 1].is_ascii_digit();
                     let after_ok = i + 19 >= bytes.len() || !bytes[i + 19].is_ascii_digit();
                     if before_ok && after_ok {
-                        let val = std::str::from_utf8(&bytes[i..i + 19]).unwrap().to_string();
+                        let val = String::from_utf8_lossy(&bytes[i..i + 19]).into_owned();
                         return Some((i, val));
                     }
                 }

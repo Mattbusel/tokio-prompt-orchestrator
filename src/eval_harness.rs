@@ -109,6 +109,12 @@ pub struct EvalHarness {
     primary_metric: EvalMetric,
 }
 
+impl Default for EvalHarness {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EvalHarness {
     /// Create a new harness with [`EvalMetric::ExactMatch`] as the primary metric.
     pub fn new() -> Self {
@@ -244,9 +250,9 @@ impl EvalHarness {
     /// Rank strategies by composite score: `pass_rate * 0.6 - avg_cost_usd_norm * 0.2 - avg_latency_norm * 0.2`.
     ///
     /// Returns references to reports in descending composite score order.
-    pub fn compare_strategies<'a>(
-        reports: &'a [EvalReport],
-    ) -> Vec<(&'a EvalReport, f64)> {
+    pub fn compare_strategies(
+        reports: &[EvalReport],
+    ) -> Vec<(&EvalReport, f64)> {
         if reports.is_empty() {
             return Vec::new();
         }

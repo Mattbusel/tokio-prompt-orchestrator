@@ -180,7 +180,7 @@ impl SemanticDeduplicator {
 
     /// Record `text` as a recently processed request.
     ///
-    /// Call this after confirming a request is novel (via [`is_novel`]) and
+    /// Call this after confirming a request is novel (via `is_novel`) and
     /// sending it to the LLM.
     pub fn register(&self, text: &str) {
         let fp = SimHashFingerprint::compute(text);
@@ -226,7 +226,7 @@ impl SemanticDeduplicator {
     }
 
     /// Manually evict all expired entries.  Called automatically on every
-    /// [`register`](Self::register) and [`check_and_register`] call.
+    /// [`register`](Self::register) and `check_and_register` call.
     pub fn evict_expired(&self) {
         let now = SystemTime::now();
         self.inner.store.retain(|_, entry| {

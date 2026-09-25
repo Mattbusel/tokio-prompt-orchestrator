@@ -371,7 +371,7 @@ impl PromptValidator {
     /// Estimate token count using the ~4 chars/token heuristic.
     pub fn estimate_tokens(text: &str) -> usize {
         let char_count = text.chars().count();
-        (char_count + 3) / 4 // ceiling division
+        char_count.div_ceil(4) // ceiling division
     }
 
     /// Compute the fraction of repeated 3-grams (words) in `text`. Returns 0.0–1.0.

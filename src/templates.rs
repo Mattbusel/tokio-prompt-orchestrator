@@ -254,13 +254,13 @@ impl TemplateRegistry {
 
     /// Register (or replace) a template.
     pub fn register(&self, template: PromptTemplate) {
-        let mut guard = self.inner.write().unwrap();
+        let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
         guard.insert(template.name.clone(), template);
     }
 
     /// Remove a template by name.
     pub fn unregister(&self, name: &str) {
-        let mut guard = self.inner.write().unwrap();
+        let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
         guard.remove(name);
     }
 
@@ -270,7 +270,7 @@ impl TemplateRegistry {
         name: &str,
         vars: &HashMap<&str, &str>,
     ) -> Result<String, TemplateError> {
-        let guard = self.inner.read().unwrap();
+        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
         let tmpl = guard.get(name).ok_or_else(|| TemplateError::NotFound(name.to_owned()))?;
 
         // Validate required variables
@@ -288,20 +288,20 @@ impl TemplateRegistry {
         name: &str,
         vars: &HashMap<&str, &str>,
     ) -> Result<(Option<String>, String), TemplateError> {
-        let guard = self.inner.read().unwrap();
+        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
         let tmpl = guard.get(name).ok_or_else(|| TemplateError::NotFound(name.to_owned()))?;
         Ok(tmpl.render_full(vars))
     }
 
     /// Get a snapshot of a template (cloned).
     pub fn get(&self, name: &str) -> Option<PromptTemplate> {
-        let guard = self.inner.read().unwrap();
+        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
         guard.get(name).cloned()
     }
 
     /// List all registered template names.
     pub fn names(&self) -> Vec<String> {
-        let guard = self.inner.read().unwrap();
+        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
         guard.keys().cloned().collect()
     }
 
@@ -487,7 +487,7 @@ impl AbExperiment {
 
     /// Record that a request was routed to variant `idx`.
     pub fn record_request(&self, idx: usize) {
-        let mut guard = self.metrics.write().unwrap();
+        let mut guard = self.metrics.write().unwrap_or_else(|e| e.into_inner());
         if let Some(m) = guard.get_mut(idx) {
             m.requests += 1;
         }
@@ -495,7 +495,7 @@ impl AbExperiment {
 
     /// Record a successful response for variant `idx`.
     pub fn record_success(&self, idx: usize, latency_ms: u64, quality: f64) {
-        let mut guard = self.metrics.write().unwrap();
+        let mut guard = self.metrics.write().unwrap_or_else(|e| e.into_inner());
         if let Some(m) = guard.get_mut(idx) {
             m.successes += 1;
             m.total_latency_ms += latency_ms;
@@ -505,18 +505,18 @@ impl AbExperiment {
 
     /// Return a snapshot of all variant metrics.
     pub fn metrics(&self) -> Vec<VariantMetrics> {
-        self.metrics.read().unwrap().clone()
+        self.metrics.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Return the index of the leading variant by quality score.
     /// Returns `None` if no successes have been recorded.
     pub fn leading_variant(&self) -> Option<usize> {
-        let guard = self.metrics.read().unwrap();
+        let guard = self.metrics.read().unwrap_or_else(|e| e.into_inner());
         guard
             .iter()
             .enumerate()
             .filter(|(_, m)| m.successes > 0)
-            .max_by(|(_, a), (_, b)| a.avg_quality().partial_cmp(&b.avg_quality()).unwrap())
+            .max_by(|(_, a), (_, b)| a.avg_quality().total_cmp(&b.avg_quality()))
             .map(|(i, _)| i)
     }
 
@@ -524,7 +524,7 @@ impl AbExperiment {
     ///
     /// Returns `None` if sample sizes are insufficient (< 30 per variant).
     pub fn significance(&self, a: usize, b: usize) -> Option<f64> {
-        let guard = self.metrics.read().unwrap();
+        let guard = self.metrics.read().unwrap_or_else(|e| e.into_inner());
         let ma = guard.get(a)?;
         let mb = guard.get(b)?;
         if ma.requests < 30 || mb.requests < 30 {
@@ -608,12 +608,8 @@ fn is_truthy(value: &str) -> bool {
 fn render_if_blocks(template: &str, vars: &HashMap<&str, &str>) -> String {
     let mut output = template.to_string();
 
-    loop {
-        // Find the next {{#if <condition>}} tag
-        let open_start = match output.find("{{#if ") {
-            Some(i) => i,
-            None => break,
-        };
+    while let Some(open_start) = output.find("{{#if ") {
+        // Found the next {{#if <condition>}} tag
         let tag_end = match output[open_start..].find("}}") {
             Some(j) => open_start + j + 2,
             None => break,
@@ -659,12 +655,8 @@ fn render_if_blocks(template: &str, vars: &HashMap<&str, &str>) -> String {
 fn render_each_blocks(template: &str, vars: &HashMap<&str, &str>) -> String {
     let mut output = template.to_string();
 
-    loop {
-        // Find the next {{#each <list_key>}} tag
-        let open_start = match output.find("{{#each ") {
-            Some(i) => i,
-            None => break,
-        };
+    while let Some(open_start) = output.find("{{#each ") {
+        // Found the next {{#each <list_key>}} tag
         let tag_end = match output[open_start..].find("}}") {
             Some(j) => open_start + j + 2,
             None => break,

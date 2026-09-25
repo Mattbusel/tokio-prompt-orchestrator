@@ -422,6 +422,7 @@ impl<'de> serde::Deserialize<'de> for Provider {
 /// This type never panics.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[derive(Default)]
 pub struct WorkerConfig {
     /// Model name to use (e.g. `"gpt-4o"`, `"claude-opus-4-6"`).
     pub model: Option<String>,
@@ -438,18 +439,6 @@ pub struct WorkerConfig {
     pub port: Option<u16>,
 }
 
-impl Default for WorkerConfig {
-    fn default() -> Self {
-        Self {
-            model: None,
-            api_base_url: None,
-            max_tokens: None,
-            temperature: None,
-            host: None,
-            port: None,
-        }
-    }
-}
 
 /// Per-worker configuration map, keyed by provider name.
 ///

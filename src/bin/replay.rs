@@ -1,6 +1,6 @@
 //! Dead-Letter Queue Replay Binary
 //!
-//! Reads failed [`PromptRequest`] records from a dead-letter queue dump (NDJSON
+//! Reads failed `PromptRequest` records from a dead-letter queue dump (NDJSON
 //! format) and replays them through a running orchestrator's HTTP API.
 //!
 //! ## Usage
@@ -24,7 +24,7 @@
 //! {"prompt":"Hello pipeline","session_id":"s1","metadata":{},"deadline_secs":null}
 //! ```
 //!
-//! The replay tool also accepts the raw [`DroppedRequest`] format exported from
+//! The replay tool also accepts the raw `DroppedRequest` format exported from
 //! the `/api/v1/debug/dlq` endpoint:
 //!
 //! ```json
@@ -129,6 +129,7 @@ struct InferResponse {
     request_id: String,
     status: String,
     #[serde(default)]
+    #[allow(dead_code)] // part of the response schema; not printed by replay
     error: Option<String>,
 }
 

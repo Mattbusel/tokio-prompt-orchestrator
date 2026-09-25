@@ -30,7 +30,7 @@
 //! ```
 
 use dashmap::DashMap;
-use futures::{Stream, StreamExt as _};
+use futures::Stream;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};

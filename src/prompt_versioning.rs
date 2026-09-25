@@ -174,7 +174,9 @@ impl PromptRepository {
     /// the specified line differs from its parent.  Returns `None` if the
     /// repository is empty or the line index is out of range.
     pub fn blame(&self, line: usize) -> Option<&PromptVersion> {
-        if self.versions.is_empty() {
+        // The line must exist in the latest version.
+        let latest = self.versions.last()?;
+        if line >= latest.content.lines().count() {
             return None;
         }
 

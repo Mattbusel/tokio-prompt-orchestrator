@@ -92,9 +92,9 @@ fn cron_next_tick(
         let m = (candidate / 60) % 60;
         let h = (candidate / 3600) % 24;
 
-        let h_ok = hour.map_or(true, |hh| hh as u64 == h);
-        let m_ok = minute.map_or(true, |mm| mm as u64 == m);
-        let s_ok = second.map_or(true, |ss| ss as u64 == s);
+        let h_ok = hour.is_none_or(|hh| hh as u64 == h);
+        let m_ok = minute.is_none_or(|mm| mm as u64 == m);
+        let s_ok = second.is_none_or(|ss| ss as u64 == s);
 
         if h_ok && m_ok && s_ok {
             // Convert wall-clock delta back to a monotonic Instant.
@@ -260,8 +260,13 @@ impl Scheduler {
     /// Background run loop.  Checks all jobs every 100 ms and fires any whose
     /// `next_tick` has arrived.  Each handler is spawned in its own Tokio task.
     pub async fn run_loop(&self) {
+        // Poll at least every 100 ms, sooner when a job is due earlier, so
+        // intervals shorter than the poll period still fire on time.
+        const MAX_POLL: Duration = Duration::from_millis(100);
+        const MIN_POLL: Duration = Duration::from_millis(1);
+        let mut wait = MAX_POLL;
         loop {
-            sleep(Duration::from_millis(100)).await;
+            sleep(wait).await;
             let now = Instant::now();
 
             // Collect jobs that should fire this tick.
@@ -288,6 +293,18 @@ impl Scheduler {
             for (_id, handler) in to_fire {
                 tokio::spawn(handler());
             }
+
+            let earliest = {
+                let jobs = self.jobs.lock().await;
+                jobs.values()
+                    .filter(|(job, _)| job.enabled)
+                    .filter_map(|(job, _)| job.next_tick(now))
+                    .min()
+            };
+            wait = earliest
+                .map(|t| t.saturating_duration_since(Instant::now()))
+                .unwrap_or(MAX_POLL)
+                .clamp(MIN_POLL, MAX_POLL);
         }
     }
 

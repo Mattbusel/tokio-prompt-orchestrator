@@ -158,7 +158,6 @@ impl BpeApproxTokenizer {
         let mut chunks: Vec<String> = Vec::new();
         let mut current = String::new();
         let mut current_tokens = 0usize;
-        let mut overlap_buf: Vec<String> = Vec::new();
 
         for sentence in &sentences {
             let s_tokens = Self::count_tokens(sentence, family);
@@ -166,7 +165,7 @@ impl BpeApproxTokenizer {
             if current_tokens + s_tokens > max_tokens && !current.is_empty() {
                 chunks.push(current.clone());
                 // Build overlap from tail of current chunk.
-                overlap_buf = build_overlap(&current, overlap, family);
+                let overlap_buf = build_overlap(&current, overlap, family);
                 current = overlap_buf.join(" ");
                 current_tokens = Self::count_tokens(&current, family);
             }

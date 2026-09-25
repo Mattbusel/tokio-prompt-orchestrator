@@ -53,7 +53,7 @@
 //! let sla = Duration::from_millis(500);
 //! let winner = engine.select_provider(Some(sla));
 //! // anthropic is cheaper AND within the 500ms SLA → selected
-//! assert_eq!(winner.map(|p| p.name.as_str()), Some("anthropic"));
+//! assert_eq!(winner.as_ref().map(|p| p.name.as_str()), Some("anthropic"));
 //! ```
 
 use std::collections::HashMap;
@@ -295,7 +295,7 @@ impl ArbitrageEngine {
         });
 
         // Compute P95 for each provider
-        let mut candidates: Vec<(&ProviderState, u64)> = map
+        let candidates: Vec<(&ProviderState, u64)> = map
             .values()
             .map(|state| {
                 let p95 = {

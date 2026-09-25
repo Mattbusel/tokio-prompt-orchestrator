@@ -4,13 +4,13 @@
 //!
 //! Closes the **two-way** cross-repo feedback loop between Tokio Prompt and
 //! HelixRouter.  [`HelixPressureProbe`](super::helix_probe) *reads* HelixRouter's
-//! pressure signal into the [`TelemetryBus`]; this module *writes* back a derived
+//! pressure signal into the `TelemetryBus`; this module *writes* back a derived
 //! configuration adjustment whenever the observed pipeline pressure crosses
 //! configured thresholds.
 //!
 //! ## How it works
 //!
-//! On each telemetry tick the [`SelfImprovingLoop`] calls
+//! On each telemetry tick the `SelfImprovingLoop` calls
 //! [`HelixFeedbackPusher::maybe_push`] with the current blended pressure value.
 //!
 //! | Condition          | Patch sent to HelixRouter                         |
@@ -31,7 +31,7 @@
 //!
 //! ## NOT Responsible For
 //!
-//! - Reading HelixRouter's pressure signal (see [`helix_probe`]).
+//! - Reading HelixRouter's pressure signal (see `helix_probe`).
 //! - Pushing per-parameter tuning decisions derived from LiveTuning
 //!   (see [`helix_config_pusher`](super::helix_config_pusher)).
 

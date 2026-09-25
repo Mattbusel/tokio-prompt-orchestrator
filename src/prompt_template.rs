@@ -340,8 +340,8 @@ fn parse_if(tokens: &[Token], pos: &mut usize, first_tag: &str, depth: usize) ->
                 if t == "endif" {
                     *pos += 1;
                     break;
-                } else if t.starts_with("elif ") {
-                    let cond = t["elif ".len()..].trim().to_string();
+                } else if let Some(rest) = t.strip_prefix("elif ") {
+                    let cond = rest.trim().to_string();
                     *pos += 1;
                     let body = parse_nodes(tokens, pos, depth + 1)?;
                     branches.push((cond, body));
@@ -446,8 +446,16 @@ fn eval_expr(expr: &str, ctx: &TemplateContext) -> Result<String, TemplateError>
     let parts: Vec<&str> = expr.splitn(2, '|').collect();
     let var_name = parts[0].trim();
 
-    // Resolve variable (support dot-path like "obj.field").
-    let value = resolve_var(var_name, ctx)?;
+    // Resolve variable (support dot-path like "obj.field"). A missing
+    // variable is only an error when no `default:` filter can supply a value.
+    let has_default = parts
+        .get(1)
+        .is_some_and(|f| f.split('|').any(|p| p.trim().starts_with("default:")));
+    let value = match resolve_var(var_name, ctx) {
+        Ok(v) => v,
+        Err(_) if has_default => String::new(),
+        Err(e) => return Err(e),
+    };
 
     // Apply filters if any.
     if parts.len() == 2 {
@@ -494,10 +502,10 @@ fn apply_single_filter(value: String, filter: &str) -> Result<String, TemplateEr
         Ok(value.trim().to_string())
     } else if let Some(rest) = filter.strip_prefix("truncate:") {
         let n: usize = rest.trim().parse().map_err(|_| TemplateError::InvalidSyntax(format!("truncate: expected number, got {rest}")))?;
-        if value.len() > n {
-            Ok(format!("{}...", &value[..n]))
-        } else {
-            Ok(value)
+        // Count characters, not bytes, so multi-byte text never splits mid-char.
+        match value.char_indices().nth(n) {
+            Some((cut, _)) => Ok(format!("{}...", &value[..cut])),
+            None => Ok(value),
         }
     } else if let Some(rest) = filter.strip_prefix("default:") {
         if value.is_empty() { Ok(rest.trim().to_string()) } else { Ok(value) }
@@ -683,6 +691,6 @@ mod tests {
         ctx.set_str("text", "The quick brown fox.");
         ctx.set_str("target_lang", "French");
         let result = lib.render("translate", &ctx);
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "{result:?}");
     }
 }

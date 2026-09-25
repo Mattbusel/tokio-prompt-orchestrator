@@ -204,7 +204,7 @@ impl<T> Inner<T> {
     fn age(&mut self) {
         // Levels 4 → 1 are promotable (Background, Low, Normal, High).
         for src_level in (1..=4usize).rev() {
-            let threshold_idx = src_level - 1; // maps level 4→[0], 3→[1], 2→[2], 1→[3]
+            let threshold_idx = 4 - src_level; // maps level 4→[0], 3→[1], 2→[2], 1→[3]
             let threshold_ms = self.config.age_threshold_ms[threshold_idx];
             let dst_level = src_level - 1;
 
@@ -230,7 +230,15 @@ impl<T> Inner<T> {
                 arc_item
                     .effective_priority
                     .store(dst_level as u8, Ordering::Relaxed);
-                self.buckets[dst_level].push_back(arc_item);
+                // Keep the destination bucket ordered by enqueue time: a promoted
+                // item has waited longer than anything enqueued after it, so it
+                // goes ahead of those items rather than to the back.
+                let dst = &mut self.buckets[dst_level];
+                let pos = dst
+                    .iter()
+                    .position(|other| other.enqueued_at > arc_item.enqueued_at)
+                    .unwrap_or(dst.len());
+                dst.insert(pos, arc_item);
                 self.total_promotions += 1;
             }
         }
@@ -244,6 +252,8 @@ impl<T> Inner<T> {
                 let wait_ms = arc_item.wait_ms();
                 let original_level = arc_item.priority as usize;
                 // Unwrap the Arc — we own the only reference at this point.
+                // A second reference would be a bug in the aging pass, so fail loudly.
+                #[allow(clippy::expect_used)]
                 let item = Arc::try_unwrap(arc_item)
                     .ok()
                     .map(|pi| pi.item)
@@ -273,9 +283,9 @@ impl<T> Inner<T> {
 
     fn stats(&self) -> QueueStats {
         let mut avg_wait_ms = [0.0f64; Priority::COUNT];
-        for i in 0..Priority::COUNT {
+        for (i, avg) in avg_wait_ms.iter_mut().enumerate() {
             if self.dequeue_count[i] > 0 {
-                avg_wait_ms[i] = self.wait_sum_ms[i] / self.dequeue_count[i] as f64;
+                *avg = self.wait_sum_ms[i] / self.dequeue_count[i] as f64;
             }
         }
         QueueStats {

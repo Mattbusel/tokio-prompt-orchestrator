@@ -38,7 +38,7 @@
 //!
 //! ### 1. `DEFAULT_INFERENCE_TIMEOUT_SECS` (per-worker call)
 //!
-//! The constant [`DEFAULT_INFERENCE_TIMEOUT_SECS`] (120 s) caps each
+//! The constant `DEFAULT_INFERENCE_TIMEOUT_SECS` (120 s) caps each
 //! individual call to [`ModelWorker::infer`]. If the model backend does not
 //! respond within this window the inference future is cancelled and an error
 //! is returned to the stage. This default is overridden by
@@ -720,6 +720,7 @@ async fn assemble_stage(
 /// `Arc<Mutex<Receiver<…>>>` so Tokio's work-stealing distributes items across
 /// workers.  This function remains a single-worker unit so it stays testable
 /// in isolation.
+#[allow(clippy::too_many_arguments)]
 async fn inference_stage(
     mut rx: mpsc::Receiver<AssembleOutput>,
     tx: mpsc::Sender<InferenceOutput>,
@@ -923,6 +924,7 @@ async fn inference_stage(
 /// Multiple tasks share the same `Arc<tokio::sync::Mutex<Receiver>>` so that
 /// each call to `.lock().await.recv().await` atomically claims one item from
 /// the channel.  This avoids the need for an external dispatcher task.
+#[allow(clippy::too_many_arguments)]
 async fn inference_stage_pool_worker(
     rx: Arc<tokio::sync::Mutex<mpsc::Receiver<AssembleOutput>>>,
     tx: mpsc::Sender<InferenceOutput>,

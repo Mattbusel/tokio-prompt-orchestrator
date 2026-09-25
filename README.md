@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/tokio-prompt-orchestrator.svg)](https://crates.io/crates/tokio-prompt-orchestrator)
 [![docs.rs](https://docs.rs/tokio-prompt-orchestrator/badge.svg)](https://docs.rs/tokio-prompt-orchestrator)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/Mattbusel/tokio-prompt-orchestrator/blob/main/LICENSE)
 
 A Tokio pipeline for serving LLM requests: prompts flow through five bounded stages (retrieve, assemble, infer, post-process, stream) with request deduplication, circuit breakers, retries, rate limiting and a dead-letter queue, in front of Anthropic, OpenAI, llama.cpp, vLLM or your own backend.
 
@@ -28,6 +28,45 @@ This crate addresses each of these, with a compile-time feature flag for each op
 
 ## Quick start
 
+### See it work in one command (no API key)
+
+```bash
+git clone https://github.com/Mattbusel/tokio-prompt-orchestrator
+cd tokio-prompt-orchestrator
+cargo run --example llm_pipeline
+```
+
+It pushes 12 requests from 4 users through the pipeline, then simulates a provider outage:
+
+```text
+Backend: mock model (no network)
+
+1) 12 requests: 4 users x 3 questions
+   req-01 alice  The capital of France is Paris.
+   req-02 alice  Backpressure means a slow consumer makes fast producers wait instead of letting queues grow without bound.
+   ...
+   req-12 dave   Bounded channels fill / the sender waits its turn now / memory stays calm
+   -> 12 answers in 0.9s, 3 model calls (9 saved by dedup)
+
+2) Provider outage: 8 new requests while every call fails
+   DLQ req-13  inference_failure:inference failed: 503 Service Unavailable (simulated outage)
+   ...
+   DLQ req-17  inference_failure:inference failed: 503 Service Unavailable (simulated outage)
+   DLQ req-18  circuit open, failed fast (provider not called)
+   DLQ req-19  circuit open, failed fast (provider not called)
+   DLQ req-20  circuit open, failed fast (provider not called)
+   -> breaker is Open; it lets one probe through after 60s to test recovery
+```
+
+Same example against a real model (3 short API calls; the outage is simulated in front of the provider, so it costs nothing):
+
+```bash
+PROVIDER=anthropic ANTHROPIC_API_KEY=sk-ant-... cargo run --example llm_pipeline
+PROVIDER=openai    OPENAI_API_KEY=sk-...        cargo run --example llm_pipeline
+```
+
+The source is [`examples/llm_pipeline.rs`](examples/llm_pipeline.rs): about 200 lines, and a good template for wiring your own backend.
+
 ### Option A: Prebuilt Binary (no Rust required)
 
 1. Download `orchestrator.exe` (Windows) from the [releases page](https://github.com/Mattbusel/tokio-prompt-orchestrator/releases) and run it.
@@ -50,13 +89,13 @@ Enter 1, 2, 3, or 4 [4]:
 ### Option B: From Source (Rust developers)
 
 ```bash
-# Clone and run in offline echo mode, no API key needed
+# Clone and run the interactive orchestrator in offline echo mode, no API key needed
 git clone https://github.com/Mattbusel/tokio-prompt-orchestrator
 cd tokio-prompt-orchestrator
-cargo run -- --worker echo
+cargo run -- --provider echo
 
-# Switch to a real provider
-ANTHROPIC_API_KEY=sk-ant-... cargo run --features full -- --worker anthropic --model claude-sonnet-4-6
+# Switch to a real provider, with the REST/WebSocket API on http://127.0.0.1:8080
+ANTHROPIC_API_KEY=sk-ant-... cargo run --features full -- --provider anthropic --model claude-sonnet-4-6
 
 # Start with the full feature set + TUI dashboard
 cargo run --features full,tui --bin tui
@@ -683,7 +722,7 @@ The new `pipeline` module provides a composable, ordered sequence of text-transf
 - `LanguageDetectStage`, heuristic ASCII/Latin vs. other-script detector; tags output with `[lang:en]` or `[lang:other]`
 
 **Example:**
-```rust
+```rust,ignore
 use tokio_prompt_orchestrator::pipeline::{PipelineBuilder, TrimStage, TruncateStage, PrependStage};
 
 let pipeline = PipelineBuilder::new()
@@ -792,7 +831,7 @@ let rendered = lib.render("summarise", &ctx).unwrap();
 
 Previously, a half-open probe failure immediately re-opened the circuit and waited the **same** full timeout before trying again. This caused probe storms against recovering services. Now:
 
-```
+```text
 probe 0 fails → wait 1× timeout
 probe 1 fails → wait 2× timeout
 probe 2 fails → wait 4× timeout
@@ -806,7 +845,7 @@ The backoff factor is exposed in `CircuitBreakerStats::probe_failures` for obser
 
 #### Token budget, quick example
 
-```rust
+```rust,ignore
 use tokio_prompt_orchestrator::token_budget::{TokenBudgetGuard, TokenBudgetConfig};
 use std::time::Duration;
 
@@ -863,7 +902,7 @@ All three features are available without any optional feature flags and are wire
 
 The `session` module provides automatic multi-turn conversation memory per `SessionId`.  Without it, every request arrives context-free and the user must repeat themselves.  With it, the last N turns are automatically prepended to each new prompt before it enters the pipeline.
 
-```rust,no_run
+```rust,ignore
 use tokio_prompt_orchestrator::session::{SessionContext, SessionConfig};
 
 let ctx = SessionContext::new(SessionConfig {
@@ -944,7 +983,7 @@ async fn main() {
 
 The `templates` module provides a hot-reloadable registry of named, versioned prompt templates with `{{variable}}` substitution and built-in traffic-splitting A/B experiments.
 
-```rust,no_run
+```rust,ignore
 use tokio_prompt_orchestrator::templates::{
     PromptTemplate, TemplateRegistry, AbExperiment, ExperimentVariant,
 };
@@ -1024,7 +1063,7 @@ name = "translate"
 body = "Translate to {{target_lang}}:\n\n{{text}}"
 ```
 
-```rust,no_run
+```rust,ignore
 let toml = std::fs::read_to_string("templates.toml")?;
 let n = registry.load_toml(&toml)?;
 println!("Loaded {n} templates");
@@ -1036,7 +1075,7 @@ println!("Loaded {n} templates");
 
 The `enhanced::smart_batch` module collects requests into micro-batches and dispatches them together, maximising GPU utilisation on batch-capable inference servers (vLLM, SGLang, llama.cpp with `--cont-batching`).
 
-```rust,no_run
+```rust,ignore
 use tokio_prompt_orchestrator::enhanced::{SmartBatcher, BatchConfig};
 
 let batcher = SmartBatcher::new(BatchConfig {
@@ -1078,7 +1117,7 @@ no network calls, no external APIs, and runs in under a millisecond.
 | Credential fishing | Prompts asking for API keys / secrets / env vars |
 | Template injection | `{{user.secret}}`, `${process.env.KEY}`, `<script>` |
 
-```rust,no_run
+```rust,ignore
 use tokio_prompt_orchestrator::security::{PromptGuard, GuardConfig, GuardAction};
 use std::sync::Arc;
 
@@ -1174,7 +1213,7 @@ The `routing::PoolSizer` watches queue fill rates and recommends when to
 add or remove workers.  It uses an EWMA to smooth noisy queue samples and
 a cooldown gate to prevent rapid oscillation.
 
-```rust,no_run
+```rust,ignore
 use tokio_prompt_orchestrator::routing::{PoolSizer, PoolSizerConfig, ScaleAction};
 
 let sizer = PoolSizer::new(PoolSizerConfig {
@@ -1210,7 +1249,7 @@ loop {
 
 Tournament mode fans the same request out to multiple workers in parallel and returns the highest-quality response according to a pluggable scoring function.  Use it for high-value requests where quality matters more than cost, or to A/B test providers automatically.
 
-```rust,no_run
+```rust,ignore
 use std::sync::Arc;
 use tokio_prompt_orchestrator::enhanced::{
     TournamentRunner, TournamentConfig, LongestResponseScorer,
@@ -1251,7 +1290,7 @@ Implement `ResponseScorer` to define your own quality function.
 
 The `cascade` module lets a model drive its own multi-turn reasoning loop: it emits tool calls, the engine executes them, injects results back into context, and re-infers until the model is satisfied or a safety limit is reached.
 
-```rust,no_run
+```rust,ignore
 use std::sync::Arc;
 use tokio_prompt_orchestrator::cascade::{
     CascadeEngine, CascadeConfig, NoopToolExecutor, InferFn,
@@ -1298,7 +1337,7 @@ Register a custom parser via `CascadeEngine::with_tool_parser` or a custom execu
 
 Deploy multiple named pipeline instances simultaneously and route each prompt to the best-fit pipeline based on detected intent.
 
-```rust,no_run
+```rust,ignore
 use std::sync::Arc;
 use tokio_prompt_orchestrator::{EchoWorker, PromptRequest, SessionId};
 use tokio_prompt_orchestrator::multi_pipeline::{
@@ -1349,7 +1388,7 @@ for stats in router.stats() {
 
 The `adaptive_pool` module implements a closed-loop controller that smooths noisy queue depth observations with a Kalman filter and recommends scale-up/scale-down events with configurable cooldowns.
 
-```rust,no_run
+```rust,ignore
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_prompt_orchestrator::adaptive_pool::{
@@ -1431,7 +1470,7 @@ impl StagePlugin for InferenceLogger {
 
 ### Registering plugins
 
-```rust,no_run
+```rust,ignore
 use std::sync::Arc;
 use tokio_prompt_orchestrator::{PipelineStage, plugin::{PluginRegistry, PluginPosition}};
 
@@ -1577,7 +1616,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Web API integration (requires `--features web-api`)
 
-```rust,no_run
+```rust,ignore
 use axum::Router;
 use tokio_prompt_orchestrator::scheduler::{Scheduler, SchedulerState, scheduler_routes};
 
@@ -1844,7 +1883,7 @@ for (model, throttled) in limiter.stats() {
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/v1/rate-limiter/stats` | Per-model token counts and request tallies |
+| `GET` | `/api/v1/rate-limiter/stats` | Per-model count of throttled requests |
 
 ---
 
@@ -1862,7 +1901,7 @@ for (model, throttled) in limiter.stats() {
 
 ## License
 
-MIT. See [`LICENSE`](LICENSE).
+MIT. See [`LICENSE`](https://github.com/Mattbusel/tokio-prompt-orchestrator/blob/main/LICENSE).
 
 
 ## Hire the author

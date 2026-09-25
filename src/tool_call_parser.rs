@@ -420,8 +420,7 @@ fn find_matching_close(bytes: &[u8], start: usize, open: u8, close: u8) -> Optio
     let mut depth = 0usize;
     let mut in_str = false;
     let mut escape = false;
-    for i in start..bytes.len() {
-        let b = bytes[i];
+    for (i, &b) in bytes.iter().enumerate().skip(start) {
         if escape {
             escape = false;
             continue;

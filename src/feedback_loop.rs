@@ -100,17 +100,14 @@ impl FeedbackStore {
         let cap = guard.capacity;
         let key = variant.to_string();
         // Ensure both maps have an entry.
-        guard.data.entry(key.clone()).or_insert_with(Vec::new);
-        guard.heads.entry(key.clone()).or_insert(0);
-        // Read the current head index without holding a mutable borrow on guard.
-        let current_head = *guard.heads.get(&key).expect("just inserted");
-        let buf = guard.data.get_mut(&key).expect("just inserted");
+        let guard = &mut *guard;
+        let head = guard.heads.entry(key.clone()).or_insert(0);
+        let buf = guard.data.entry(key).or_default();
         if buf.len() < cap {
             buf.push(feedback);
         } else {
-            buf[current_head] = feedback;
-            let next_head = (current_head + 1) % cap;
-            *guard.heads.get_mut(&key).expect("just inserted") = next_head;
+            buf[*head] = feedback;
+            *head = (*head + 1) % cap;
         }
     }
 
