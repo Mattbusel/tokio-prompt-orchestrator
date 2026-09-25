@@ -69,7 +69,7 @@ The source is [`examples/llm_pipeline.rs`](examples/llm_pipeline.rs): about 200 
 
 ### Option A: Prebuilt Binary (no Rust required)
 
-1. Download `orchestrator.exe` (Windows) from the [releases page](https://github.com/Mattbusel/tokio-prompt-orchestrator/releases) and run it.
+1. Download the archive for your platform (Linux x86_64, macOS Apple Silicon or Intel, Windows x86_64) from the [latest release](https://github.com/Mattbusel/tokio-prompt-orchestrator/releases/latest), unpack it, and run `orchestrator` (`orchestrator.exe` on Windows). These builds include the REST/WebSocket API.
 
 2. The first launch runs an interactive setup wizard:
 
@@ -105,7 +105,7 @@ cargo run --features full,tui --bin tui
 
 ```toml
 [dependencies]
-tokio-prompt-orchestrator = "1.2"   # latest on crates.io; this repository is at 1.3.0
+tokio-prompt-orchestrator = "1.4"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
