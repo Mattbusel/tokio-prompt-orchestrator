@@ -393,9 +393,9 @@ pub struct PromptRequest {
 impl PromptRequest {
     /// Builder-style helper that sets an absolute deadline `duration` from now.
     ///
-    /// This is an infallible convenience wrapper around [`try_with_deadline`].
+    /// This is an infallible convenience wrapper around `try_with_deadline`.
     /// It accepts any positive `Duration`; for validated input (e.g. user-supplied
-    /// values) prefer [`try_with_deadline`] which rejects zero or excessively large
+    /// values) prefer `try_with_deadline` which rejects zero or excessively large
     /// timeouts at the call site.
     ///
     /// # Example

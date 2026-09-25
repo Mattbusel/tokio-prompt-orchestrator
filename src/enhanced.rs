@@ -40,7 +40,7 @@ pub use dedup::{dedup_key, DeduplicationResult, DeduplicationToken, Deduplicator
 pub use dlq_replay::{DlqReplayScheduler, ReplayEntry};
 pub use priority::{Priority, PriorityQueue, QueueStats};
 pub use rate_limit::RateLimiter;
-pub use retry::RetryPolicy;
+pub use retry::{retry_if, RetryPolicy};
 pub use semantic_dedup::{SemanticDeduplicator, SimHashFingerprint};
 pub use smart_batch::{BatchConfig, BatcherStats, SmartBatcher};
 pub use tournament::{

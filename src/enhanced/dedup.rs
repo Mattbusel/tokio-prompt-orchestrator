@@ -276,8 +276,16 @@ impl Deduplicator {
     /// use std::time::Duration;
     /// use tokio_prompt_orchestrator::enhanced::Deduplicator;
     ///
+    /// # #[tokio::main]
+    /// # async fn main() {
     /// let dedup = Deduplicator::new(Duration::from_secs(300));
+    /// # }
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Spawns a background cleanup task, so it must be called from within a
+    /// Tokio runtime.
     pub fn new(cache_duration: Duration) -> Self {
         let shutdown = Arc::new(AtomicBool::new(false));
         let cleanup_handle = Arc::new(tokio::sync::Mutex::new(None::<tokio::task::JoinHandle<()>>));
@@ -304,7 +312,9 @@ impl Deduplicator {
                 cleanup_expired(&requests, cache_duration);
             }
         });
-        *cleanup_handle.try_lock().expect("cleanup_handle uncontested at construction") = Some(handle);
+        if let Ok(mut slot) = cleanup_handle.try_lock() {
+            *slot = Some(handle);
+        }
 
         dedup
     }
@@ -591,8 +601,11 @@ impl Deduplicator {
     /// use std::time::Duration;
     /// use tokio_prompt_orchestrator::enhanced::Deduplicator;
     ///
+    /// # #[tokio::main]
+    /// # async fn main() {
     /// let dedup = Deduplicator::new(Duration::from_secs(300))
     ///     .with_semantic(0.95);
+    /// # }
     /// ```
     pub fn with_semantic(mut self, threshold: f32) -> Self {
         self.similarity_threshold = threshold;

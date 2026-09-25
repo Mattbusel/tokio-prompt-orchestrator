@@ -516,6 +516,7 @@ impl PluginContext {
     ///
     /// This function does not panic.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn post_inference(
         request_id: impl Into<String>,
         session_id: impl Into<String>,
@@ -1216,8 +1217,8 @@ impl Plugin for ResponseLengthCapPlugin {
 /// A plugin that records per-request start/end timestamps (milliseconds since
 /// Unix epoch) into a shared latency log.
 ///
-/// Call [`LatencyLoggerPlugin::record_start`] before inference and
-/// [`LatencyLoggerPlugin::record_end`] after inference to append the elapsed
+/// Call `LatencyLoggerPlugin::record_start` before inference and
+/// `LatencyLoggerPlugin::record_end` after inference to append the elapsed
 /// duration to the log.
 pub struct LatencyLoggerPlugin {
     /// Accumulated latency samples in milliseconds.

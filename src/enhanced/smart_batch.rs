@@ -216,9 +216,11 @@ impl SmartBatcher {
             }
         } else {
             let mut fifo = self.fifo.lock().await;
-            if let Some(bucket) = fifo.as_ref() {
-                if bucket.is_full(self.config.max_batch_size) || bucket.is_expired(max_wait) {
-                    let bucket = fifo.take().expect("just checked Some");
+            let ready = fifo.as_ref().is_some_and(|bucket| {
+                bucket.is_full(self.config.max_batch_size) || bucket.is_expired(max_wait)
+            });
+            if ready {
+                if let Some(bucket) = fifo.take() {
                     return self.flush_bucket(bucket);
                 }
             }
@@ -295,7 +297,7 @@ impl SmartBatcher {
         let bucket = map
             .entry(prefix)
             .or_insert_with(|| Bucket::new(request.clone()));
-        if bucket.requests.len() > 0
+        if !bucket.requests.is_empty()
             && !bucket.requests.iter().any(|r| r.request_id == request.request_id)
         {
             bucket.requests.push(request);

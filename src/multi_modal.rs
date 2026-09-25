@@ -7,11 +7,27 @@
 
 use serde::{Deserialize, Serialize};
 
+/// JSON body of a [`ContentPart::Text`] part. Internally tagged enums cannot
+/// hold a bare string, so the text is wrapped in an object.
+#[derive(Serialize, Deserialize)]
+struct TextBody<T> {
+    text: T,
+}
+
+fn ser_text<S: serde::Serializer>(text: &str, s: S) -> Result<S::Ok, S::Error> {
+    TextBody { text }.serialize(s)
+}
+
+fn de_text<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    TextBody::<String>::deserialize(d).map(|b| b.text)
+}
+
 /// A single piece of content within a multi-modal message.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentPart {
-    /// Plain text.
+    /// Plain text. Serialized as `{"type":"text","text":"..."}`.
+    #[serde(serialize_with = "ser_text", deserialize_with = "de_text")]
     Text(String),
 
     /// An image referenced by URL.

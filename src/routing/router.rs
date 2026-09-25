@@ -1,8 +1,8 @@
 //! Model routing logic.
 //!
-//! The [`ModelRouter`] combines a [`ComplexityScorer`](super::ComplexityScorer)
-//! with a [`RoutingConfig`](super::RoutingConfig) and a
-//! [`CostTracker`](super::CostTracker) to decide which worker backend should
+//! The [`ModelRouter`] combines a [`ComplexityScorer`]
+//! with a [`RoutingConfig`] and a
+//! [`CostTracker`] to decide which worker backend should
 //! serve each prompt and to adaptively adjust routing thresholds based on
 //! observed outcomes.
 

@@ -177,7 +177,7 @@ impl CostEstimator {
         match task_type {
             TaskType::Classification => 10.min(input_tokens),
             TaskType::Summarization => (input_tokens / 4).max(50),
-            TaskType::QuestionAnswering => (input_tokens / 3).max(30).min(500),
+            TaskType::QuestionAnswering => (input_tokens / 3).clamp(30, 500),
             TaskType::Translation => input_tokens,
             TaskType::CodeGeneration => (input_tokens * 2).max(100),
             TaskType::Creative => (input_tokens * 3).max(200),
@@ -199,9 +199,11 @@ impl CostEstimator {
             }
             None => {
                 // Unknown model: fall back to gpt-4o pricing, lower confidence.
-                let fallback = self.prices.get("gpt-4o").expect("gpt-4o always present");
-                let cost = (input_tokens as f64 / 1_000_000.0) * fallback.input_per_1m
-                    + (output_tokens as f64 / 1_000_000.0) * fallback.output_per_1m;
+                // `prices` is public, so gpt-4o may have been removed; estimate zero then.
+                let cost = self.prices.get("gpt-4o").map_or(0.0, |fallback| {
+                    (input_tokens as f64 / 1_000_000.0) * fallback.input_per_1m
+                        + (output_tokens as f64 / 1_000_000.0) * fallback.output_per_1m
+                });
                 (cost, 0.40)
             }
         }

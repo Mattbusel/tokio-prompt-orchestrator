@@ -1,7 +1,7 @@
 //! # Session Context Manager
 //!
-//! Tracks multi-turn conversation history per [`SessionId`] and enriches
-//! incoming [`PromptRequest`]s with relevant prior context before they enter
+//! Tracks multi-turn conversation history per `SessionId` and enriches
+//! incoming `PromptRequest`s with relevant prior context before they enter
 //! the pipeline.
 //!
 //! ## Overview
@@ -13,7 +13,7 @@
 //!
 //! The [`SessionContext`] type provides:
 //!
-//! - **Per-session history** stored in a [`DashMap`] (lock-free concurrent
+//! - **Per-session history** stored in a `DashMap` (lock-free concurrent
 //!   hash map).  Each entry is a bounded ring buffer of
 //!   [`ConversationTurn`]s.
 //! - **Auto-injection**: [`SessionContext::enrich`] prepends the last
@@ -53,7 +53,7 @@
 //!         meta: HashMap::new(),
 //!         deadline: None,
 //!     };
-//!     let enriched = ctx.enrich(req).await;
+//!     let (enriched, _action) = ctx.enrich(req).await;
 //!     assert_eq!(enriched.input, "What is the capital of France?");
 //!
 //!     // Record the model's response.
@@ -67,7 +67,7 @@
 //!         meta: HashMap::new(),
 //!         deadline: None,
 //!     };
-//!     let enriched2 = ctx.enrich(req2).await;
+//!     let (enriched2, _action) = ctx.enrich(req2).await;
 //!     assert!(enriched2.input.contains("Paris"));
 //! }
 //! ```

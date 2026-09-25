@@ -286,8 +286,12 @@ fn run_wizard(args: CliArgs) -> ResolvedConfig {
         && env::var("ANTHROPIC_API_KEY").is_err()
         && env::var("PROVIDER").is_err();
 
+    // `--provider` on the command line is an explicit choice: skip the menu
+    // and the model/port prompts, and use the flags (or defaults) as given.
+    let explicit_provider = args.provider.is_some();
+
     // ── Returning user: show saved settings and offer a menu ─────────────────
-    if !is_first_run && !args.reset {
+    if !is_first_run && !args.reset && !explicit_provider {
         let saved_provider = env::var("PROVIDER").unwrap_or_else(|_| "unknown".to_string());
         let saved_model = env::var("MODEL").unwrap_or_else(|_| "default".to_string());
         let key_status = match saved_provider.as_str() {
@@ -366,9 +370,10 @@ fn run_wizard(args: CliArgs) -> ResolvedConfig {
         }
     }
 
-    let is_interactive = is_first_run
-        || args.reset
-        || env::var("OPENAI_API_KEY").is_err() && env::var("ANTHROPIC_API_KEY").is_err();
+    let is_interactive = !explicit_provider
+        && (is_first_run
+            || args.reset
+            || env::var("OPENAI_API_KEY").is_err() && env::var("ANTHROPIC_API_KEY").is_err());
 
     // ── Welcome message on first run ─────────────────────────────────────────
     if is_first_run || args.reset {

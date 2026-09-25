@@ -318,6 +318,7 @@ impl PipelineBuilder {
     }
 
     /// Append a stage to the pipeline.
+    #[allow(clippy::should_implement_trait)]
     pub fn add<S: PipelineStage + 'static>(mut self, stage: S) -> Self {
         self.stages.push(Box::new(stage));
         self

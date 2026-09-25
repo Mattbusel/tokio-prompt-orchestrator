@@ -150,7 +150,7 @@ impl SessionManager {
     pub fn create_session(&self, model: &str, max_context: usize) -> String {
         let id = self.gen_id();
         let session = Session::new(id.clone(), model.to_owned(), max_context);
-        self.sessions.write().unwrap().insert(id.clone(), session);
+        self.sessions.write().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), session);
         id
     }
 
@@ -159,7 +159,7 @@ impl SessionManager {
     pub fn get_context(&self, session_id: &str) -> Option<Vec<Message>> {
         self.sessions
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(session_id)
             .map(|s| s.messages.iter().cloned().collect())
     }
@@ -175,7 +175,7 @@ impl SessionManager {
         user_msg_tokens: usize,
         assistant_msg_tokens: usize,
     ) {
-        let mut guard = self.sessions.write().unwrap();
+        let mut guard = self.sessions.write().unwrap_or_else(|e| e.into_inner());
         if let Some(session) = guard.get_mut(session_id) {
             session.add_message("user".to_owned(), String::new(), user_msg_tokens);
             session.add_message(
@@ -190,7 +190,7 @@ impl SessionManager {
     ///
     /// Returns the number of sessions removed.
     pub fn expire_sessions(&self, timeout_secs: u64) -> usize {
-        let mut guard = self.sessions.write().unwrap();
+        let mut guard = self.sessions.write().unwrap_or_else(|e| e.into_inner());
         let before = guard.len();
         guard.retain(|_, s| !s.is_expired(timeout_secs));
         before - guard.len()
@@ -198,7 +198,7 @@ impl SessionManager {
 
     /// Return the number of active sessions.
     pub fn active_count(&self) -> usize {
-        self.sessions.read().unwrap().len()
+        self.sessions.read().unwrap_or_else(|e| e.into_inner()).len()
     }
 }
 

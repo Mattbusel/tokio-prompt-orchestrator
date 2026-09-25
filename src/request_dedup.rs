@@ -15,7 +15,7 @@
 //!
 //! ## TTL pruning
 //!
-//! Entries older than [`RequestDeduplicator::TTL_SECS`] (30 s) are pruned on
+//! Entries older than `RequestDeduplicator::TTL_SECS` (30 s) are pruned on
 //! every call to `submit()` to prevent unbounded memory growth if the original
 //! caller crashes without completing.
 
@@ -73,7 +73,8 @@ pub struct DedupStats {
 }
 
 struct InFlightEntry {
-    /// Original request ID.
+    /// Original request ID (kept for debugging; read in tests).
+    #[allow(dead_code)]
     id: RequestId,
     /// Channels waiting for this request to complete.
     waiters: Vec<oneshot::Sender<Vec<String>>>,

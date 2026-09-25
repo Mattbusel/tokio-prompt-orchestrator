@@ -262,7 +262,7 @@ impl SentenceRanker {
     }
 
     /// Score sentences by TF-IDF relevance against the entire document.
-    fn score_sentences<'a>(&self, sentences: &[&'a str]) -> Vec<(usize, f64)> {
+    fn score_sentences(&self, sentences: &[&str]) -> Vec<(usize, f64)> {
         use std::collections::HashMap;
 
         if sentences.is_empty() {

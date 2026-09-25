@@ -42,11 +42,9 @@
 //!
 //!     let scheduler = Arc::new(Scheduler::new(tx));
 //!
-//!     scheduler.add(ScheduledPrompt::new(
-//!         "health-check",
-//!         "*/5 *",
-//!         "Are you operational?",
-//!     )).expect("valid cron expression");
+//!     let prompt = ScheduledPrompt::new("health-check", "*/5 *", "Are you operational?")
+//!         .expect("valid cron expression");
+//!     scheduler.add(prompt).await.expect("prompt registered");
 //!
 //!     let handle = scheduler.spawn();
 //!
@@ -589,7 +587,7 @@ impl From<&ScheduledPrompt> for ScheduleResponse {
     }
 }
 
-/// Build an Axum [`Router`] with all scheduler endpoints.
+/// Build an Axum `Router` with all scheduler endpoints.
 ///
 /// Merge this router into your application router:
 ///

@@ -80,6 +80,7 @@ struct RateLimitState {
 impl RateLimitState {
     /// Advance the window if more than 60 seconds have passed, then return
     /// whether a request consuming `tokens` would stay within the limits.
+    #[cfg(test)]
     fn would_exceed(&mut self, max_rpm: u32, max_tpm: u64, tokens: u64, now: u64) -> bool {
         const WINDOW_MS: u64 = 60_000;
         if now.saturating_sub(self.window_start_ms) >= WINDOW_MS {
@@ -128,7 +129,7 @@ impl ProviderManager {
 
     /// Set the estimated cost per token (USD) for a provider.
     ///
-    /// Used by [`best_provider_for_budget`].
+    /// Used by `best_provider_for_budget`.
     pub fn set_cost_per_token(&mut self, provider_id: &str, cost: f64) {
         self.cost_per_token.insert(provider_id.to_string(), cost);
     }
@@ -218,7 +219,7 @@ impl ProviderManager {
             .filter(|p| {
                 self.cost_per_token
                     .get(&p.id)
-                    .map_or(false, |&c| c <= cost_per_token_limit)
+                    .is_some_and(|&c| c <= cost_per_token_limit)
             })
             .min_by(|a, b| {
                 let ca = self.cost_per_token.get(&a.id).copied().unwrap_or(f64::MAX);
@@ -232,7 +233,7 @@ impl ProviderManager {
     fn is_healthy(&self, provider_id: &str) -> bool {
         self.health
             .get(provider_id)
-            .map_or(true, |h| h.is_healthy)
+            .is_none_or(|h| h.is_healthy)
     }
 
     fn is_eligible(&self, provider_id: &str, tokens: u64, now: u64) -> bool {

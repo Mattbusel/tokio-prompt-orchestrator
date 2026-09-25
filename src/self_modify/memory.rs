@@ -10,7 +10,7 @@
 //! - Dead-end approaches (so agents don't retry them)
 //!
 //! ## Backing store
-//! In-memory (DashMap + Mutex<Vec>) for the base implementation.
+//! In-memory (`DashMap` + `Mutex<Vec>`) for the base implementation.
 //! The distributed tier adds a Redis write-through layer behind the same API.
 //!
 //! ## Graceful degradation
@@ -234,7 +234,7 @@ impl AgentMemory {
     /// Create a memory store with an optional file-backed persistence path.
     ///
     /// If `persist_path` is `Some(path)`, the full modification history is
-    /// flushed to a JSON file on every [`insert_modification`] call so that
+    /// flushed to a JSON file on every `insert_modification` call so that
     /// state survives process restarts.  On construction, if the file already
     /// exists, its contents are loaded to restore the previous history.
     ///

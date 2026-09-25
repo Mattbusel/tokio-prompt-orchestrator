@@ -2,12 +2,12 @@
 //!
 //! ## Overview
 //!
-//! [`SessionBudget`] tracks cumulative token usage per [`SessionId`] and
+//! [`SessionBudget`] tracks cumulative token usage per `SessionId` and
 //! enforces configurable spending limits:
 //!
 //! - **Hard limit** — requests are rejected with [`BudgetError::HardLimitExceeded`]
 //!   before inference when spend would exceed this cap.
-//! - **Soft limit** — requests are allowed but a [`BudgetWarning`] signal is
+//! - **Soft limit** — requests are allowed but a `BudgetWarning` signal is
 //!   returned so callers can notify users or throttle gracefully.
 //! - **Daily reset** — accumulated spend is zeroed at UTC midnight (or on
 //!   explicit call to [`SessionBudget::reset_session`]).

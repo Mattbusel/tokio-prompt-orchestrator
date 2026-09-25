@@ -78,7 +78,7 @@ impl PromptRouter {
     /// Add a rule; the internal list is kept sorted by priority descending.
     pub fn add_rule(&mut self, rule: RoutingRule) {
         self.rules.push(rule);
-        self.rules.sort_by(|a, b| b.priority.cmp(&a.priority));
+        self.rules.sort_by_key(|r| std::cmp::Reverse(r.priority));
     }
 
     /// Route `prompt` (with optional `intent`) and return the first matching

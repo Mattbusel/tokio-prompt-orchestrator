@@ -328,7 +328,9 @@ impl WebhookDispatcher {
         };
 
         // Collect the configs we need to deliver to (under lock, then release)
-        let targets: Vec<(usize, String, Option<String>, HashMap<String, String>, Duration)> = {
+        // (index, url, secret, headers, timeout)
+        type Target = (usize, String, Option<String>, HashMap<String, String>, Duration);
+        let targets: Vec<Target> = {
             let Ok(states) = self.states.lock() else {
                 warn!("webhook dispatcher lock poisoned");
                 return;

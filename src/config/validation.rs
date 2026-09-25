@@ -37,7 +37,7 @@
 //! | `deduplication.max_entries` | Must be ≥ 1 when `deduplication.enabled = true` | `InvalidField` |
 //! | `observability.metrics_port` | If set, must be ≥ 1 | `InvalidField` |
 
-use super::{PipelineConfig, WorkersConfig};
+use super::PipelineConfig;
 
 /// Errors arising from configuration parsing, validation, or I/O.
 ///

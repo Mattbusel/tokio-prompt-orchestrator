@@ -191,6 +191,7 @@ impl PromptTemplate {
     ///
     /// Returns [`TemplateError::ParseError`] if there are unclosed `{{` blocks,
     /// or [`TemplateError::InvalidFilter`] for unrecognised filters.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(template: &str) -> Result<Self, TemplateError> {
         let tokens = Self::parse(template)?;
         Ok(Self {

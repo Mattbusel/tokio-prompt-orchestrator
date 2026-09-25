@@ -509,8 +509,8 @@ fn compress_conversation(conv: &mut Conversation, recency_keep: usize) {
         content: summary_text,
         timestamp: SystemTime::now(),
         token_estimate: estimate_tokens(&{
-            let mut s = "[Conversation summary]".to_owned();
-            s
+            
+            "[Conversation summary]".to_owned()
         }),
         tags: vec!["summary".to_owned()],
         is_summary: true,

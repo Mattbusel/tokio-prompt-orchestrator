@@ -49,10 +49,10 @@ fn gen_id64() -> u64 {
     let seq = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
     let time = now_ns();
     // Mix with a simple LCG step.
-    let mixed = seq
+    
+    seq
         .wrapping_mul(6_364_136_223_846_793_005)
-        .wrapping_add(time ^ 1_442_695_040_888_963_407);
-    mixed
+        .wrapping_add(time ^ 1_442_695_040_888_963_407)
 }
 
 /// Generates a pseudo-random u128 trace ID.
@@ -163,8 +163,10 @@ pub struct SpanEvent {
 
 /// The completion status of a span, mirroring the OpenTelemetry `StatusCode`.
 #[derive(Debug, Clone, PartialEq)]
+#[derive(Default)]
 pub enum SpanStatus {
     /// No explicit status has been set.
+    #[default]
     Unset,
     /// The operation completed successfully.
     Ok,
@@ -172,11 +174,6 @@ pub enum SpanStatus {
     Error(String),
 }
 
-impl Default for SpanStatus {
-    fn default() -> Self {
-        SpanStatus::Unset
-    }
-}
 
 // ── Span ──────────────────────────────────────────────────────────────────────
 

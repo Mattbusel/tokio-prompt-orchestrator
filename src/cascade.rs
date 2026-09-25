@@ -42,7 +42,7 @@
 //!
 //! Custom parsers can be registered via [`CascadeEngine::with_tool_parser`].
 
-use crate::{OrchestratorError, PromptRequest, SessionId};
+use crate::{OrchestratorError, SessionId};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

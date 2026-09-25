@@ -45,10 +45,10 @@ pub enum GraphError {
 ///
 /// # Invariants
 ///
-/// - Every `NodeId` returned by [`add_node`] is unique and stable for the
+/// - Every `NodeId` returned by `add_node` is unique and stable for the
 ///   lifetime of the graph.
-/// - [`add_edge`] rejects any edge that would create a cycle.
-/// - [`linearize`] always returns a valid topological ordering.
+/// - `add_edge` rejects any edge that would create a cycle.
+/// - `linearize` always returns a valid topological ordering.
 #[derive(Debug, Default)]
 pub struct ConversationGraph {
     /// All nodes indexed by their ID.
@@ -172,18 +172,16 @@ impl ConversationGraph {
     /// # Errors
     ///
     /// - [`GraphError::InvalidEdge`] if either path is empty.
-    /// - Propagates errors from [`add_edge`].
+    /// - Propagates errors from `add_edge`.
     pub fn merge_paths(
         &mut self,
         path_a: &[NodeId],
         path_b: &[NodeId],
     ) -> Result<NodeId, GraphError> {
-        if path_a.is_empty() || path_b.is_empty() {
+        let (Some(&tail_a), Some(&tail_b)) = (path_a.last(), path_b.last()) else {
             return Err(GraphError::InvalidEdge("paths must be non-empty".into()));
-        }
+        };
         let merge_id = self.add_node("merge", "", 0);
-        let tail_a = *path_a.last().expect("checked non-empty");
-        let tail_b = *path_b.last().expect("checked non-empty");
         self.add_edge(tail_a, merge_id)?;
         if tail_b != tail_a {
             self.add_edge(tail_b, merge_id)?;
@@ -199,7 +197,7 @@ impl ConversationGraph {
     ///
     /// - [`GraphError::NodeNotFound`] if `root` is unknown.
     /// - [`GraphError::CycleDetected`] if the reachable subgraph is not a DAG
-    ///   (should not happen if all edges were added through [`add_edge`]).
+    ///   (should not happen if all edges were added through `add_edge`).
     pub fn linearize(&self, root: NodeId) -> Result<Vec<NodeId>, GraphError> {
         if !self.nodes.contains_key(&root) {
             return Err(GraphError::NodeNotFound(root));

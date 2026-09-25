@@ -145,7 +145,7 @@ async fn test_openai_infer_timeout_returns_inference_error() {
 // ============================================================================
 
 #[tokio::test]
-async fn test_openai_infer_http_401_returns_inference_error() {
+async fn test_openai_infer_http_401_returns_auth_failed() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -163,10 +163,10 @@ async fn test_openai_infer_http_401_returns_inference_error() {
     let result = worker.infer("test").await;
     assert!(result.is_err());
     match result.unwrap_err() {
-        OrchestratorError::Inference(msg) => {
+        OrchestratorError::AuthFailed(msg) => {
             assert!(msg.contains("401"), "Error should include 401, got: {msg}");
         }
-        other => panic!("Expected Inference error, got: {other:?}"),
+        other => panic!("Expected AuthFailed error, got: {other:?}"),
     }
 }
 
@@ -284,7 +284,7 @@ async fn test_anthropic_infer_timeout_returns_inference_error() {
 // ============================================================================
 
 #[tokio::test]
-async fn test_anthropic_infer_http_401_returns_inference_error() {
+async fn test_anthropic_infer_http_401_returns_auth_failed() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/messages"))
@@ -302,10 +302,10 @@ async fn test_anthropic_infer_http_401_returns_inference_error() {
     let result = worker.infer("test").await;
     assert!(result.is_err());
     match result.unwrap_err() {
-        OrchestratorError::Inference(msg) => {
+        OrchestratorError::AuthFailed(msg) => {
             assert!(msg.contains("401"), "Error should include 401, got: {msg}");
         }
-        other => panic!("Expected Inference error, got: {other:?}"),
+        other => panic!("Expected AuthFailed error, got: {other:?}"),
     }
 }
 
@@ -415,7 +415,7 @@ async fn test_llamacpp_infer_timeout_returns_inference_error() {
 // ============================================================================
 
 #[tokio::test]
-async fn test_llamacpp_infer_http_401_returns_inference_error() {
+async fn test_llamacpp_infer_http_401_returns_auth_failed() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/completion"))
@@ -427,10 +427,10 @@ async fn test_llamacpp_infer_http_401_returns_inference_error() {
     let result = worker.infer("test").await;
     assert!(result.is_err());
     match result.unwrap_err() {
-        OrchestratorError::Inference(msg) => {
+        OrchestratorError::AuthFailed(msg) => {
             assert!(msg.contains("401"), "Error should include 401, got: {msg}");
         }
-        other => panic!("Expected Inference error, got: {other:?}"),
+        other => panic!("Expected AuthFailed error, got: {other:?}"),
     }
 }
 
@@ -560,7 +560,7 @@ async fn test_vllm_infer_timeout_returns_inference_error() {
 // ============================================================================
 
 #[tokio::test]
-async fn test_vllm_infer_http_401_returns_inference_error() {
+async fn test_vllm_infer_http_401_returns_auth_failed() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/generate"))
@@ -572,10 +572,10 @@ async fn test_vllm_infer_http_401_returns_inference_error() {
     let result = worker.infer("test").await;
     assert!(result.is_err());
     match result.unwrap_err() {
-        OrchestratorError::Inference(msg) => {
+        OrchestratorError::AuthFailed(msg) => {
             assert!(msg.contains("401"), "Error should include 401, got: {msg}");
         }
-        other => panic!("Expected Inference error, got: {other:?}"),
+        other => panic!("Expected AuthFailed error, got: {other:?}"),
     }
 }
 

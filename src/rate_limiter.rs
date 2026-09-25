@@ -92,7 +92,7 @@ impl TokenBucket {
     pub fn try_consume(&self, n: u64) -> bool {
         // Refill
         let elapsed_ms = {
-            let mut guard = self.last_refill.lock().unwrap();
+            let mut guard = self.last_refill.lock().unwrap_or_else(|e| e.into_inner());
             let now = Instant::now();
             let ms = now.duration_since(*guard).as_millis() as u64;
             if ms > 0 {
@@ -237,7 +237,7 @@ impl ModelRateLimiter {
     pub fn check_and_consume(&self, tokens: u64) -> Result<(), RateLimitError> {
         // Check sliding window first (cheaper)
         {
-            let mut win = self.sliding_window.lock().unwrap();
+            let mut win = self.sliding_window.lock().unwrap_or_else(|e| e.into_inner());
             if !win.check() {
                 let reset = win.reset_at_ms();
                 self.total_throttled.fetch_add(1, Ordering::Relaxed);
@@ -256,7 +256,7 @@ impl ModelRateLimiter {
 
         // Record in sliding window
         {
-            let mut win = self.sliding_window.lock().unwrap();
+            let mut win = self.sliding_window.lock().unwrap_or_else(|e| e.into_inner());
             win.record(tokens);
         }
 
@@ -283,7 +283,7 @@ impl RateLimiterRegistry {
     /// Overwrites any previous limiter for the same `model_id`.
     pub fn register(&self, model_id: String, config: RateLimiterConfig) {
         let limiter = ModelRateLimiter::new(model_id.clone(), &config);
-        self.limiters.write().unwrap().insert(model_id, limiter);
+        self.limiters.write().unwrap_or_else(|e| e.into_inner()).insert(model_id, limiter);
     }
 
     /// Check and consume `tokens` for the given model.
@@ -291,7 +291,7 @@ impl RateLimiterRegistry {
     /// Returns [`RateLimitError::UnknownModel`] if the model has not been
     /// registered.
     pub fn check(&self, model_id: &str, tokens: u64) -> Result<(), RateLimitError> {
-        let guard = self.limiters.read().unwrap();
+        let guard = self.limiters.read().unwrap_or_else(|e| e.into_inner());
         match guard.get(model_id) {
             Some(lim) => lim.check_and_consume(tokens),
             None => Err(RateLimitError::UnknownModel(model_id.to_owned())),
@@ -302,7 +302,7 @@ impl RateLimiterRegistry {
     pub fn stats(&self) -> Vec<(String, u64)> {
         self.limiters
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .iter()
             .map(|(id, lim)| (id.clone(), lim.total_throttled.load(Ordering::Relaxed)))
             .collect()

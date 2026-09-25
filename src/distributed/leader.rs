@@ -337,7 +337,7 @@ impl LeaderElection {
     /// Check if this node believes it is the leader (from local state).
     ///
     /// This is a local check based on the last election/renewal result,
-    /// not a Redis query. For authoritative status, use [`current_leader`].
+    /// not a Redis query. For authoritative status, use `current_leader`.
     ///
     /// # Panics
     /// This function never panics.

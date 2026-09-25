@@ -22,10 +22,10 @@
 //!     retryable_errors: vec![],
 //! };
 //!
-//! let mut call_count = 0u32;
+//! let call_count = std::sync::atomic::AtomicU32::new(0);
 //! let result: Result<(), String> = retry_async(&policy, || async {
-//!     call_count += 1;
-//!     if call_count < 3 { Err("transient".to_string()) } else { Ok(()) }
+//!     let n = call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+//!     if n < 3 { Err("transient".to_string()) } else { Ok(()) }
 //! }).await;
 //! assert!(result.is_ok());
 //! # });
@@ -311,14 +311,8 @@ where
     let mut state = RetryState::new();
     let mut last_err: Option<E> = None;
 
-    loop {
-        let delay = match state.next_delay(policy) {
-            Some(d) => d,
-            None => {
-                // Max attempts exhausted — return the last error.
-                break;
-            }
-        };
+    // Stops when max attempts are exhausted.
+    while let Some(delay) = state.next_delay(policy) {
 
         if delay > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
@@ -336,10 +330,12 @@ where
         }
     }
 
-    // Safety: if max_attempts >= 1 we always set last_err before breaking.
-    // If somehow we have 0 max_attempts, we never enter the loop.
-    // The unreachable path is guarded by the Option contract.
-    Err(last_err.expect("retry_async: max_attempts must be >= 1"))
+    // With max_attempts >= 1 the loop always records an error before ending.
+    // With max_attempts == 0 no attempt was made; make exactly one rather than panic.
+    match last_err {
+        Some(e) => Err(e),
+        None => f().await,
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

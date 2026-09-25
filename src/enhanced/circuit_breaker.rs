@@ -333,12 +333,11 @@ impl CircuitBreaker {
                     crate::metrics::inc_cb_transition("closed");
                 }
             }
-            CircuitStatus::Closed => {
+            CircuitStatus::Closed
                 // Reset failure count on success
-                if state.failures > 0 {
+                if state.failures > 0 => {
                     state.failures = 0;
                 }
-            }
             _ => {}
         }
     }

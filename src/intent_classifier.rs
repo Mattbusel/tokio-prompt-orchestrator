@@ -188,7 +188,7 @@ impl IntentClassifier {
 
     /// Classify the intent of `text` into a single [`IntentCategory`].
     ///
-    /// Uses the highest-confidence category from [`classify_with_confidence`].
+    /// Uses the highest-confidence category from `classify_with_confidence`.
     pub fn classify(&self, text: &str) -> IntentCategory {
         let mut ranked = self.classify_with_confidence(text);
         ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -277,8 +277,11 @@ impl IntentClassifier {
                                "investigate", "breakdown", "break down",
                                "summarise", "summarize", "interpret"];
         for kw in &analysis_words {
+            // Analysis verbs are also imperatives; weigh the more specific
+            // signal above the generic imperative score (0.65) so
+            // "Analyse X" is an analysis request, not a plain command.
             if lower.contains(kw) {
-                score += 0.50;
+                score += 0.70;
                 break;
             }
         }

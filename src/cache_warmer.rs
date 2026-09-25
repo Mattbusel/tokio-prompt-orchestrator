@@ -208,7 +208,7 @@ impl CacheWarmer {
         };
 
         let now = Instant::now();
-        let mut new_jobs: Vec<WarmingJob> = queries
+        let new_jobs: Vec<WarmingJob> = queries
             .into_iter()
             .map(|query| {
                 let id = self.next_id.fetch_add(1, Ordering::Relaxed);

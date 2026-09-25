@@ -141,8 +141,7 @@ impl OutputCache {
             }
             entry.access_count += 1;
             self.hits += 1;
-            // SAFETY: re-borrow as shared after the mutable borrow above ends.
-            return Some(self.entries.get(key).unwrap().response.as_str());
+            return Some(entry.response.as_str());
         }
         self.misses += 1;
         None

@@ -58,7 +58,6 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
 };
-use std::time::Duration;
 use tracing::{debug, info, warn};
 
 /// Broad classification of a prompt's intent and resource requirements.
@@ -100,7 +99,7 @@ impl std::fmt::Display for PromptClass {
 ///
 /// Uses lightweight, allocation-free checks to classify a prompt without
 /// calling any external model. For production use, swap in an embedding-based
-/// classifier via [`PromptClassifier`] trait implementations.
+/// classifier via `PromptClassifier` trait implementations.
 pub struct HeuristicClassifier {
     /// Minimum token-estimate for a prompt to be treated as a Document.
     pub document_token_threshold: usize,
