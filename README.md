@@ -1,281 +1,14 @@
 # tokio-prompt-orchestrator
 
-[![CI](https://github.com/Mattbusel/tokio-prompt-orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/Mattbusel/tokio-prompt-orchestrator/actions/workflows/ci.yml)
-[![Coverage](https://codecov.io/gh/Mattbusel/tokio-prompt-orchestrator/branch/main/graph/badge.svg)](https://codecov.io/gh/Mattbusel/tokio-prompt-orchestrator)
 [![Crates.io](https://img.shields.io/crates/v/tokio-prompt-orchestrator.svg)](https://crates.io/crates/tokio-prompt-orchestrator)
 [![docs.rs](https://docs.rs/tokio-prompt-orchestrator/badge.svg)](https://docs.rs/tokio-prompt-orchestrator)
-[![GitHub Pages](https://img.shields.io/badge/docs-GitHub%20Pages-blue.svg)](https://mattbusel.github.io/tokio-prompt-orchestrator/tokio_prompt_orchestrator/)
-[![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Production-grade, multi-core Tokio orchestration for LLM inference pipelines.**
+A Tokio pipeline for serving LLM requests: prompts flow through five bounded stages (retrieve, assemble, infer, post-process, stream) with request deduplication, circuit breakers, retries, rate limiting and a dead-letter queue, in front of Anthropic, OpenAI, llama.cpp, vLLM or your own backend.
 
-Five-stage bounded-backpressure DAG with deduplication, circuit breakers, rate limiting, **prompt injection/jailbreak detection**, **provider arbitrage** (cheapest provider meeting your latency SLA), **adaptive worker pool sizing**, and an optional autonomous self-improving control loop. Supports Anthropic, OpenAI, llama.cpp, vLLM, and any custom backend. Exposes REST, WebSocket, SSE, MCP (Claude Desktop), Prometheus metrics, and OpenTelemetry distributed tracing.
+It runs as a library, as a binary with a REST, WebSocket and SSE API, as an MCP server for Claude Desktop, and with a terminal dashboard. Optional feature flags add Prometheus metrics, OpenTelemetry tracing, Redis-backed distributed mode and a self-tuning control loop.
 
----
-
-## What's New
-
-### v1.9.0 — Plugin System and Request Deduplication
-
-#### Plugin System
-
-The new Round-7 plugin API in `src/plugin.rs` adds a full `Plugin` trait–based extension system that runs before and after inference.
-
-**Key types:** `Plugin` (trait), `PluginV2Chain`, `PluginV2Registry`, `PluginError`, `PluginInfo`
-
-**Built-in plugins:**
-- `ProfanityFilterPlugin` — blocks requests containing a configurable word list (case-insensitive)
-- `ResponseLengthCapPlugin { max_tokens }` — truncates response token lists exceeding the cap, returns `PluginError::ResponseModified`
-- `LatencyLoggerPlugin` — records per-request latency samples to a shared `Vec<u64>` via `record_latency(ms)`
-
-**Features:**
-- `Plugin::on_request(&mut PromptRequest)` — intercept and optionally reject requests before inference
-- `Plugin::on_response(&mut Vec<String>)` — inspect/mutate response tokens after inference
-- `PluginV2Registry::register(Box<dyn Plugin>)` — ordered plugin execution in registration order
-- `PluginV2Registry::disable(name)` / `enable(name)` — toggle plugins at runtime without removing them
-- `PluginV2Registry::list() -> Vec<PluginInfo>` — per-plugin stats: `request_calls`, `response_calls`, `errors`, `enabled`
-- `PluginError::RequestRejected { reason }`, `PluginError::ResponseModified`, `PluginError::Fatal`
-
-#### Request Deduplication
-
-The new `request_dedup` module coalesces identical in-flight requests to the same backend call.
-
-**Key types:** `RequestDeduplicator`, `DedupDecision`, `RequestId`, `DedupStats`
-
-**Features:**
-- SHA-256 key over `model_id + prompt_text` for exact content matching (reuses `sha2` crate)
-- `DedupDecision::Original(RequestId)` — first caller performs the real inference
-- `DedupDecision::Waiting(oneshot::Receiver<Vec<String>>)` — duplicate callers block until the original completes
-- `RequestDeduplicator::complete(model_id, prompt_text, result)` — fans out results to all waiters
-- 30-second TTL: stale entries are pruned on every `submit()` call to prevent memory leaks
-- `DedupStats { total_submitted, deduplicated, active_requests, dedup_rate }`
-
-### v1.8.0 — Session Manager and Streaming Aggregator
-
-#### Session Manager
-
-The new `session_mgr` module provides a concurrent, production-ready conversation session store.
-
-**Key types:** `SessionManager`, `Session`, `Message`, `Role`, `SessionStats`, `SessionError`
-
-**Features:**
-- Lock-free `Arc<DashMap<u64, Session>>` storage — safe to share across Tokio tasks
-- `SessionManager::create(system_prompt)` — opens a session, optionally pre-loading a system message
-- `SessionManager::append(session_id, role, content)` — appends `User`, `Assistant`, or `System` messages
-- `SessionManager::get_context(session_id, max_tokens)` — trims oldest messages to fit the token budget while always preserving the system message
-- `SessionManager::summarize_if_needed(session_id, threshold, summarizer)` — collapses old messages through a caller-supplied closure when the token count exceeds the threshold
-- `SessionManager::stats()` — returns `SessionStats` (total sessions, active sessions, average messages, total messages)
-
-**REST endpoints** (requires `web-api` feature):
-- `POST /api/v1/sessions` — create session; returns `{ "session_id": <u64> }`
-- `GET  /api/v1/sessions/:id` — fetch session metadata
-- `DELETE /api/v1/sessions/:id` — delete session
-- `POST /api/v1/sessions/:id/messages` — append message `{ "role": "user"|"assistant"|"system", "content": "..." }`
-
-#### Streaming Aggregator
-
-The new `stream_agg` module collects streaming token chunks into complete responses with real-time broadcast.
-
-**Key types:** `StreamAggregator`, `StreamChunk`, `AggStats`
-
-**Features:**
-- `StreamAggregator::feed(chunk)` — buffers a `StreamChunk`; broadcasts to subscribers
-- `StreamAggregator::complete(session_id)` — flushes and returns the full assembled text
-- `StreamAggregator::subscribe(session_id)` — returns a `Stream<Item = StreamChunk>` for real-time token delivery via `tokio::sync::broadcast`
-- `StreamAggregator::stats()` — returns `AggStats` (active streams, completed streams, total tokens)
-- Multiple sessions are fully isolated; clones share state via `Arc`
-
-### v1.7.0 — Prompt Pipeline and Audit Log
-
-#### Prompt Pipeline
-
-The new `pipeline` module provides a composable, ordered sequence of text-transformation stages.  Each stage is async and receives the previous stage's output as its input.
-
-**Key types:** `Pipeline`, `PipelineBuilder`, `PromptPipelineStage` (trait), `PipelineStats`, `PipelineResult`, `PipelineError`
-
-**Built-in stages:**
-- `TrimStage` — strips leading/trailing whitespace
-- `TruncateStage { max_chars }` — truncates at the last word boundary within the limit
-- `PrependStage { prefix }` — prepends a system-prompt or context prefix
-- `AppendStage { suffix }` — appends a context or citation suffix
-- `RegexReplaceStage { pattern, replacement }` — regex substitution (powered by the `regex` crate; pattern compiled once at construction)
-- `LanguageDetectStage` — heuristic ASCII/Latin vs. other-script detector; tags output with `[lang:en]` or `[lang:other]`
-
-**Example:**
-```rust
-use tokio_prompt_orchestrator::pipeline::{PipelineBuilder, TrimStage, TruncateStage, PrependStage};
-
-let pipeline = PipelineBuilder::new()
-    .add(TrimStage)
-    .add(TruncateStage { max_chars: 2000 })
-    .add(PrependStage { prefix: "System: answer concisely.\n\n".to_string() })
-    .build();
-
-let result = pipeline.run("  User question here  ".to_string()).await?;
-println!("{} chars in {}ms", result.stats.output_len, result.stats.elapsed_ms);
-```
-
-#### Audit Log
-
-The new `audit` module provides an append-only, capacity-bounded audit log for LLM inference requests and responses.  Entries can be filtered, queried, and bulk-exported as JSONL.
-
-**Key types:** `AuditLog`, `AuditEntry`, `AuditFilter`, `AuditStats`, `AuditQueryResponse`, `AuditStatsResponse`
-
-- **Append-only with eviction** — `AuditLog::new(capacity)` evicts the oldest entry when full (ring-buffer semantics via `VecDeque`).
-- **Flexible filtering** — `AuditFilter` combines `since`, `model_id`, `cache_hit`, and `min_latency_ms` predicates with AND semantics.
-- **JSONL export** — `export_jsonl(&mut dyn Write)` streams every entry as a newline-delimited JSON object, suitable for ingestion by log aggregators.
-- **Aggregate stats** — `AuditLog::stats()` returns `AuditStats` with cache-hit rate, average latency, and per-model entry counts.
-
-**HTTP endpoints** (when served via `web_api`):
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/v1/audit` | Query entries; optional `?model_id=`, `?cache_hit=`, `?min_latency_ms=` params |
-| GET | `/api/v1/audit/stats` | Aggregate statistics JSON |
-| GET | `/api/v1/audit/export` | Download all entries as JSONL |
-
----
-
-### v1.6.0 — Load Balancer and Template Engine
-
-#### Load Balancer
-
-The new `load_balancer` module provides a thread-safe, weighted round-robin load balancer for multi-model deployments.
-
-**Key types:** `LoadBalancer`, `ModelEndpoint`, `BalancerConfig`, `LoadBalancerStats`, `EndpointStats`
-
-- **Weighted round-robin** — smooth Nginx-style algorithm: each endpoint's `current_weight` grows by its `weight` on every selection; the winner has `total_weight` subtracted.
-- **Health tracking** — `mark_failure(id)` after 3 consecutive failures marks an endpoint unhealthy; `mark_success(id, latency_ms)` recovers it immediately.
-- **Failover** — when `failover = true`, unhealthy endpoints are skipped; `select()` returns `None` only when *all* endpoints are unhealthy.
-- **Latency EMA** — exponential moving average (α = 0.2) of observed latencies per endpoint.
-- **REST endpoint:** `GET /api/v1/load-balancer/stats`
-
-```rust
-use tokio_prompt_orchestrator::{LoadBalancer, BalancerConfig, ModelEndpoint};
-
-let lb = LoadBalancer::new(BalancerConfig {
-    endpoints: vec![
-        ModelEndpoint { id: "gpt-4o".into(), url: "https://api.openai.com/v1".into(),
-                        weight: 2, max_rps: 100.0, healthy: true, latency_p99_ms: 0.0 },
-        ModelEndpoint { id: "claude-3".into(), url: "https://api.anthropic.com/v1".into(),
-                        weight: 1, max_rps: 50.0, healthy: true, latency_p99_ms: 0.0 },
-    ],
-    ..Default::default()
-});
-
-let ep = lb.select().unwrap(); // weighted round-robin
-lb.mark_success(&ep.id, 42.0);
-```
-
-#### Template Engine
-
-The new `template` module provides a `{{variable}}` prompt template engine with filter support.
-
-**Key types:** `PromptTemplate`, `TemplateContext`, `TemplateValue`, `TemplateLibrary`, `TemplateError`
-
-Supported filters:
-| Filter | Example | Effect |
-|--------|---------|--------|
-| `upper` | `{{name \| upper}}` | Convert to uppercase |
-| `lower` | `{{name \| lower}}` | Convert to lowercase |
-| `truncate:N` | `{{text \| truncate:100}}` | Truncate to N characters |
-| `default:"val"` | `{{x \| default:"n/a"}}` | Use fallback when variable is missing |
-
-**REST endpoints:**
-- `POST /api/v1/templates` — register a named template `{"name":"...", "template":"..."}`
-- `GET /api/v1/templates` — list all registered template names
-- `POST /api/v1/templates/:name/render` — render `{"variables": {"key": "value"}}`
-
-```rust
-use tokio_prompt_orchestrator::{TemplateLibrary, TemplateContext, TemplateValue};
-
-let mut lib = TemplateLibrary::new();
-lib.register("summarise", "Summarise in {{max_words | default:\"50\"}} words:\n\n{{text}}").unwrap();
-
-let mut ctx = TemplateContext::new();
-ctx.set("text", TemplateValue::Text("The quick brown fox...".into()));
-
-let rendered = lib.render("summarise", &ctx).unwrap();
-```
-
----
-
-### v1.5.0 — Circuit Breaker Adaptive Backoff, Token Budget Middleware, SimHash Dedup
-
-| Feature | Module | What it does |
-|---------|--------|--------------|
-| **Adaptive circuit breaker probe intervals** | `enhanced::CircuitBreaker` | Half-open probe timeouts now use exponential backoff (`timeout × 2^N`, capped at 64×) so a flapping service is not hammered — each consecutive failed probe doubles the wait before the next attempt |
-| **Token budget middleware** | `token_budget::TokenBudgetGuard` | Pre-flight token estimation (⌈bytes/4⌉) gates every request before it reaches the LLM — enforces per-request and rolling-period caps with automatic window rollover and surplus credit-back after actual usage |
-| **Semantic deduplication (SimHash)** | `enhanced::SemanticDeduplicator` | 64-bit locality-sensitive hash catches paraphrased near-duplicates that bypass exact-match dedup — configurable Hamming-distance threshold with TTL expiry |
-
-#### Adaptive circuit breaker — how it works
-
-Previously, a half-open probe failure immediately re-opened the circuit and waited the **same** full timeout before trying again. This caused probe storms against recovering services. Now:
-
-```
-probe 0 fails → wait 1× timeout
-probe 1 fails → wait 2× timeout
-probe 2 fails → wait 4× timeout
-probe 3 fails → wait 8× timeout
-...
-probe 6+ fails → wait 64× timeout (capped)
-probe succeeds → reset to 0 (normal operation resumes)
-```
-
-The backoff factor is exposed in `CircuitBreakerStats::probe_failures` for observability.
-
-#### Token budget — quick example
-
-```rust
-use tokio_prompt_orchestrator::token_budget::{TokenBudgetGuard, TokenBudgetConfig};
-use std::time::Duration;
-
-let guard = TokenBudgetGuard::new(TokenBudgetConfig {
-    max_tokens_per_request: 4_096,   // reject single requests over 4k tokens
-    max_tokens_per_period:  100_000, // 100k tokens per hour
-    period: Duration::from_secs(3600),
-});
-
-match guard.check(&prompt) {
-    Ok(estimated) => { /* send to LLM */ }
-    Err(e) => { /* reject early — no API charge */ }
-}
-// After response arrives:
-guard.release(estimated, actual_tokens_from_provider);
-```
-
-### v1.4.0 — Prompt A/B Testing Framework and Semantic Deduplication
-
-This release adds two major data-science primitives for production LLM deployments:
-
-| Feature | Module | What it does |
-|---------|--------|--------------|
-| **Prompt A/B Testing** | `ab_test` | Statistically rigorous variant testing with consistent hashing (same user → same variant), Welch's t-test significance testing, Cohen's d effect size, and REST API |
-| **Semantic Deduplication** | `enhanced::semantic_dedup` | SimHash LSH near-duplicate detection — catches paraphrases and minor edits that bypass exact-match dedup |
-
-Both features are available without any optional feature flags.
-
-### REST API — A/B Tests
-
-```text
-POST   /api/v1/ab-tests                   Create or replace an experiment
-GET    /api/v1/ab-tests/:name/results     Get current statistical result
-DELETE /api/v1/ab-tests/:name             Remove experiment and discard samples
-```
-
-### v1.3.0 — Plugin Stage System, DLQ Replay Binary, and Cron Scheduler
-
-This release breaks the rigidity of the five-stage DAG by adding three major extensibility layers:
-
-| Feature | Module | What it does |
-|---------|--------|--------------|
-| **Custom Plugin Stage System** | `plugin` | Insert async middleware at any of the 10 pipeline hook points (before/after each stage) without forking the library |
-| **Dead-Letter Queue Replay Binary** | `src/bin/replay.rs` | `cargo run --bin replay` reads NDJSON from a file or stdin and resubmits failed requests with configurable retries and progress display |
-| **Cron Scheduler** | `scheduler` | POST a prompt template + cron expression; a Tokio background task fires it on schedule and injects it into the live pipeline |
-
-All three features are available without any optional feature flags and are wired into the web API when `--features web-api` is enabled.
-
----
+![TUI dashboard](assets/tui-dashboard.png)
 
 ## Why This Exists
 
@@ -285,19 +18,19 @@ Running LLM inference in production at scale exposes a class of problems that a 
 - **Provider instability**: Cloud APIs drop packets, timeout, rate-limit, and return 5xx errors. Without a circuit breaker, one bad minute cascades into minutes of queued failures.
 - **Latency tail management**: A slow model response blocks an unbounded goroutine/thread pool. Bounded async channels propagate backpressure instead.
 - **Cost opacity**: Nobody knows which prompt pattern is eating the budget until the invoice arrives.
-- **Manual tuning**: Worker counts, buffer sizes, retry delays — these need continuous adjustment as traffic patterns shift.
-- **Prompt injection**: Adversarial users can override system instructions or extract secrets — without a guard the model becomes a liability.
+- **Manual tuning**: Worker counts, buffer sizes, retry delays, these need continuous adjustment as traffic patterns shift.
+- **Prompt injection**: Adversarial users can override system instructions or extract secrets, without a guard the model becomes a liability.
 - **Provider lock-in**: All requests go to one provider even when another is cheaper and equally fast for your SLA.
 
-This crate solves all of the above out of the box, with zero unsafe code and a compile-time feature flag for each subsystem.
+This crate addresses each of these, with a compile-time feature flag for each optional subsystem.
 
 ---
 
-## New User Onboarding — 5 Minutes to First Response
+## Quick start
 
 ### Option A: Prebuilt Binary (no Rust required)
 
-1. Download `orchestrator.exe` from the [releases page](https://github.com/Mattbusel/tokio-prompt-orchestrator/releases) and run it.
+1. Download `orchestrator.exe` (Windows) from the [releases page](https://github.com/Mattbusel/tokio-prompt-orchestrator/releases) and run it.
 
 2. The first launch runs an interactive setup wizard:
 
@@ -307,7 +40,7 @@ Which AI provider do you want to use?
 1) Anthropic  (Claude)
 2) OpenAI     (GPT-4o)
 3) llama.cpp  (local, no key)
-4) echo       (offline test mode — no key needed)
+4) echo       (offline test mode, no key needed)
 
 Enter 1, 2, 3, or 4 [4]:
 ```
@@ -317,7 +50,7 @@ Enter 1, 2, 3, or 4 [4]:
 ### Option B: From Source (Rust developers)
 
 ```bash
-# Clone and run in offline echo mode — no API key needed
+# Clone and run in offline echo mode, no API key needed
 git clone https://github.com/Mattbusel/tokio-prompt-orchestrator
 cd tokio-prompt-orchestrator
 cargo run -- --worker echo
@@ -333,9 +66,11 @@ cargo run --features full,tui --bin tui
 
 ```toml
 [dependencies]
-tokio-prompt-orchestrator = "1.3"
+tokio-prompt-orchestrator = "1.2"   # latest on crates.io; this repository is at 1.3.0
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
+
+For the code on `main`: `tokio-prompt-orchestrator = { git = "https://github.com/Mattbusel/tokio-prompt-orchestrator" }`.
 
 **New capabilities at a glance:**
 
@@ -438,7 +173,7 @@ The pipeline is a five-stage directed acyclic graph of bounded async channels. E
 | **A/B Test Assignment** | `AbTestRunner` uses consistent FNV-1a hashing to map `(experiment, user_id)` pairs to variants deterministically; same user always sees same variant |
 | **Circuit Breaker** | Opens on consecutive failures, enters half-open probe mode after configurable timeout |
 | **Multi-provider Cascade Fallback** | `ProviderCascade` chains an ordered list of providers (primary → secondary → tertiary); open breakers are skipped automatically; per-provider latency and success-rate metrics tracked |
-| **Retry + Jitter** | Exponential backoff with full jitter — prevents synchronized retry storms |
+| **Retry + Jitter** | Exponential backoff with full jitter, prevents synchronized retry storms |
 | **Rate Limiter** | Token-bucket guard at the pipeline entry point |
 | **Dead-letter Queue** | Shed requests land in a ring buffer for inspection and replay |
 | **DLQ Replay Scheduler** | `DlqReplayScheduler` re-injects DLQ entries with exponential backoff; supports per-session replay and age-based eviction |
@@ -472,7 +207,7 @@ When the `self-improving` feature is enabled, a background control loop continuo
 | `SessionId` | `lib` | Session identifier for affinity sharding |
 | `OrchestratorError` | `lib` | Crate-level error enum |
 | `ModelWorker` | `worker` | Async trait implemented by all inference backends |
-| `EchoWorker` | `worker` | Returns prompt words as tokens — for testing, no API key |
+| `EchoWorker` | `worker` | Returns prompt words as tokens, for testing, no API key |
 | `OpenAiWorker` | `worker` | OpenAI chat completions API |
 | `AnthropicWorker` | `worker` | Anthropic Messages API |
 | `LlamaCppWorker` | `worker` | Local llama.cpp HTTP server |
@@ -560,8 +295,8 @@ node_id   = "node-1"
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `ANTHROPIC_API_KEY` | Required for `AnthropicWorker` | — |
-| `OPENAI_API_KEY` | Required for `OpenAiWorker` | — |
+| `ANTHROPIC_API_KEY` | Required for `AnthropicWorker` |, |
+| `OPENAI_API_KEY` | Required for `OpenAiWorker` |, |
 | `LLAMA_CPP_URL` | llama.cpp server URL | `http://localhost:8080` |
 | `VLLM_URL` | vLLM server URL | `http://localhost:8000` |
 | `RUST_LOG` | Log level filter | `info` |
@@ -788,16 +523,18 @@ For local models (< 100ms inference): halve all buffer sizes to save memory.
 
 ## Benchmarks
 
-Measured on AMD Ryzen 9 7950X (16 cores), Linux, with `EchoWorker` (no network I/O):
+From the last recorded run in [BENCHMARKS.md](BENCHMARKS.md) (Windows, x86_64, `EchoWorker`, so no network or model time):
 
-| Scenario | Throughput | p99 Latency |
-|----------|-----------|-------------|
-| Single worker, no features | 420k req/s | 12 µs |
-| 16 workers, dedup + circuit breaker | 2.8M req/s | 18 µs |
-| 16 workers, full feature set | 1.9M req/s | 31 µs |
-| 16 workers, self-improving enabled | 1.7M req/s | 38 µs |
+| Measurement | Result |
+|---|---|
+| `send_with_shed` (non-blocking send with shedding) | 204 ns p50 |
+| Circuit breaker check (closed) | about 0.4 µs p50 |
+| Dedup check (cached) | about 1.5 µs p50 |
+| Rate limiter check | 110 ns p50 |
+| 1000 concurrent `EchoWorker` calls | 7.1 ms total, about 140,800 req/s |
+| 100 identical concurrent prompts with dedup | 52.6 µs total, one inference |
 
-Run the benchmarks:
+In other words the orchestration overhead is small next to any real model call. Run them yourself:
 
 ```bash
 cargo bench --features full
@@ -857,6 +594,269 @@ See the [`examples/`](examples/) directory for:
 
 ---
 
+## Recent additions
+
+### Plugin System and Request Deduplication
+
+#### Plugin System
+
+The new Round-7 plugin API in `src/plugin.rs` adds a full `Plugin` trait–based extension system that runs before and after inference.
+
+**Key types:** `Plugin` (trait), `PluginV2Chain`, `PluginV2Registry`, `PluginError`, `PluginInfo`
+
+**Built-in plugins:**
+- `ProfanityFilterPlugin`, blocks requests containing a configurable word list (case-insensitive)
+- `ResponseLengthCapPlugin { max_tokens }`, truncates response token lists exceeding the cap, returns `PluginError::ResponseModified`
+- `LatencyLoggerPlugin`, records per-request latency samples to a shared `Vec<u64>` via `record_latency(ms)`
+
+**Features:**
+- `Plugin::on_request(&mut PromptRequest)`, intercept and optionally reject requests before inference
+- `Plugin::on_response(&mut Vec<String>)`, inspect/mutate response tokens after inference
+- `PluginV2Registry::register(Box<dyn Plugin>)`, ordered plugin execution in registration order
+- `PluginV2Registry::disable(name)` / `enable(name)`, toggle plugins at runtime without removing them
+- `PluginV2Registry::list() -> Vec<PluginInfo>`, per-plugin stats: `request_calls`, `response_calls`, `errors`, `enabled`
+- `PluginError::RequestRejected { reason }`, `PluginError::ResponseModified`, `PluginError::Fatal`
+
+#### Request Deduplication
+
+The new `request_dedup` module coalesces identical in-flight requests to the same backend call.
+
+**Key types:** `RequestDeduplicator`, `DedupDecision`, `RequestId`, `DedupStats`
+
+**Features:**
+- SHA-256 key over `model_id + prompt_text` for exact content matching (reuses `sha2` crate)
+- `DedupDecision::Original(RequestId)`, first caller performs the real inference
+- `DedupDecision::Waiting(oneshot::Receiver<Vec<String>>)`, duplicate callers block until the original completes
+- `RequestDeduplicator::complete(model_id, prompt_text, result)`, fans out results to all waiters
+- 30-second TTL: stale entries are pruned on every `submit()` call to prevent memory leaks
+- `DedupStats { total_submitted, deduplicated, active_requests, dedup_rate }`
+
+### Session Manager and Streaming Aggregator
+
+#### Session Manager
+
+The new `session_mgr` module provides a concurrent, production-ready conversation session store.
+
+**Key types:** `SessionManager`, `Session`, `Message`, `Role`, `SessionStats`, `SessionError`
+
+**Features:**
+- Lock-free `Arc<DashMap<u64, Session>>` storage, safe to share across Tokio tasks
+- `SessionManager::create(system_prompt)`, opens a session, optionally pre-loading a system message
+- `SessionManager::append(session_id, role, content)`, appends `User`, `Assistant`, or `System` messages
+- `SessionManager::get_context(session_id, max_tokens)`, trims oldest messages to fit the token budget while always preserving the system message
+- `SessionManager::summarize_if_needed(session_id, threshold, summarizer)`, collapses old messages through a caller-supplied closure when the token count exceeds the threshold
+- `SessionManager::stats()`, returns `SessionStats` (total sessions, active sessions, average messages, total messages)
+
+**REST endpoints** (requires `web-api` feature):
+- `POST /api/v1/sessions`, create session; returns `{ "session_id": <u64> }`
+- `GET  /api/v1/sessions/:id`, fetch session metadata
+- `DELETE /api/v1/sessions/:id`, delete session
+- `POST /api/v1/sessions/:id/messages`, append message `{ "role": "user"|"assistant"|"system", "content": "..." }`
+
+#### Streaming Aggregator
+
+The new `stream_agg` module collects streaming token chunks into complete responses with real-time broadcast.
+
+**Key types:** `StreamAggregator`, `StreamChunk`, `AggStats`
+
+**Features:**
+- `StreamAggregator::feed(chunk)`, buffers a `StreamChunk`; broadcasts to subscribers
+- `StreamAggregator::complete(session_id)`, flushes and returns the full assembled text
+- `StreamAggregator::subscribe(session_id)`, returns a `Stream<Item = StreamChunk>` for real-time token delivery via `tokio::sync::broadcast`
+- `StreamAggregator::stats()`, returns `AggStats` (active streams, completed streams, total tokens)
+- Multiple sessions are fully isolated; clones share state via `Arc`
+
+### Prompt Pipeline and Audit Log
+
+#### Prompt Pipeline
+
+The new `pipeline` module provides a composable, ordered sequence of text-transformation stages.  Each stage is async and receives the previous stage's output as its input.
+
+**Key types:** `Pipeline`, `PipelineBuilder`, `PromptPipelineStage` (trait), `PipelineStats`, `PipelineResult`, `PipelineError`
+
+**Built-in stages:**
+- `TrimStage`, strips leading/trailing whitespace
+- `TruncateStage { max_chars }`, truncates at the last word boundary within the limit
+- `PrependStage { prefix }`, prepends a system-prompt or context prefix
+- `AppendStage { suffix }`, appends a context or citation suffix
+- `RegexReplaceStage { pattern, replacement }`, regex substitution (powered by the `regex` crate; pattern compiled once at construction)
+- `LanguageDetectStage`, heuristic ASCII/Latin vs. other-script detector; tags output with `[lang:en]` or `[lang:other]`
+
+**Example:**
+```rust
+use tokio_prompt_orchestrator::pipeline::{PipelineBuilder, TrimStage, TruncateStage, PrependStage};
+
+let pipeline = PipelineBuilder::new()
+    .add(TrimStage)
+    .add(TruncateStage { max_chars: 2000 })
+    .add(PrependStage { prefix: "System: answer concisely.\n\n".to_string() })
+    .build();
+
+let result = pipeline.run("  User question here  ".to_string()).await?;
+println!("{} chars in {}ms", result.stats.output_len, result.stats.elapsed_ms);
+```
+
+#### Audit Log
+
+The new `audit` module provides an append-only, capacity-bounded audit log for LLM inference requests and responses.  Entries can be filtered, queried, and bulk-exported as JSONL.
+
+**Key types:** `AuditLog`, `AuditEntry`, `AuditFilter`, `AuditStats`, `AuditQueryResponse`, `AuditStatsResponse`
+
+- **Append-only with eviction**: `AuditLog::new(capacity)` evicts the oldest entry when full (ring-buffer semantics via `VecDeque`).
+- **Flexible filtering**: `AuditFilter` combines `since`, `model_id`, `cache_hit`, and `min_latency_ms` predicates with AND semantics.
+- **JSONL export**: `export_jsonl(&mut dyn Write)` streams every entry as a newline-delimited JSON object, suitable for ingestion by log aggregators.
+- **Aggregate stats**: `AuditLog::stats()` returns `AuditStats` with cache-hit rate, average latency, and per-model entry counts.
+
+**HTTP endpoints** (when served via `web_api`):
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/v1/audit` | Query entries; optional `?model_id=`, `?cache_hit=`, `?min_latency_ms=` params |
+| GET | `/api/v1/audit/stats` | Aggregate statistics JSON |
+| GET | `/api/v1/audit/export` | Download all entries as JSONL |
+
+---
+
+### Load Balancer and Template Engine
+
+#### Load Balancer
+
+The new `load_balancer` module provides a thread-safe, weighted round-robin load balancer for multi-model deployments.
+
+**Key types:** `LoadBalancer`, `ModelEndpoint`, `BalancerConfig`, `LoadBalancerStats`, `EndpointStats`
+
+- **Weighted round-robin**: smooth Nginx-style algorithm: each endpoint's `current_weight` grows by its `weight` on every selection; the winner has `total_weight` subtracted.
+- **Health tracking**: `mark_failure(id)` after 3 consecutive failures marks an endpoint unhealthy; `mark_success(id, latency_ms)` recovers it immediately.
+- **Failover**: when `failover = true`, unhealthy endpoints are skipped; `select()` returns `None` only when *all* endpoints are unhealthy.
+- **Latency EMA**: exponential moving average (α = 0.2) of observed latencies per endpoint.
+- **REST endpoint:** `GET /api/v1/load-balancer/stats`
+
+```rust
+use tokio_prompt_orchestrator::{LoadBalancer, BalancerConfig, ModelEndpoint};
+
+let lb = LoadBalancer::new(BalancerConfig {
+    endpoints: vec![
+        ModelEndpoint { id: "gpt-4o".into(), url: "https://api.openai.com/v1".into(),
+                        weight: 2, max_rps: 100.0, healthy: true, latency_p99_ms: 0.0 },
+        ModelEndpoint { id: "claude-3".into(), url: "https://api.anthropic.com/v1".into(),
+                        weight: 1, max_rps: 50.0, healthy: true, latency_p99_ms: 0.0 },
+    ],
+    ..Default::default()
+});
+
+let ep = lb.select().unwrap(); // weighted round-robin
+lb.mark_success(&ep.id, 42.0);
+```
+
+#### Template Engine
+
+The new `template` module provides a `{{variable}}` prompt template engine with filter support.
+
+**Key types:** `PromptTemplate`, `TemplateContext`, `TemplateValue`, `TemplateLibrary`, `TemplateError`
+
+Supported filters:
+| Filter | Example | Effect |
+|--------|---------|--------|
+| `upper` | `{{name \| upper}}` | Convert to uppercase |
+| `lower` | `{{name \| lower}}` | Convert to lowercase |
+| `truncate:N` | `{{text \| truncate:100}}` | Truncate to N characters |
+| `default:"val"` | `{{x \| default:"n/a"}}` | Use fallback when variable is missing |
+
+**REST endpoints:**
+- `POST /api/v1/templates`, register a named template `{"name":"...", "template":"..."}`
+- `GET /api/v1/templates`, list all registered template names
+- `POST /api/v1/templates/:name/render`, render `{"variables": {"key": "value"}}`
+
+```rust
+use tokio_prompt_orchestrator::{TemplateLibrary, TemplateContext, TemplateValue};
+
+let mut lib = TemplateLibrary::new();
+lib.register("summarise", "Summarise in {{max_words | default:\"50\"}} words:\n\n{{text}}").unwrap();
+
+let mut ctx = TemplateContext::new();
+ctx.set("text", TemplateValue::Text("The quick brown fox...".into()));
+
+let rendered = lib.render("summarise", &ctx).unwrap();
+```
+
+---
+
+### Circuit Breaker Adaptive Backoff, Token Budget Middleware, SimHash Dedup
+
+| Feature | Module | What it does |
+|---------|--------|--------------|
+| **Adaptive circuit breaker probe intervals** | `enhanced::CircuitBreaker` | Half-open probe timeouts now use exponential backoff (`timeout × 2^N`, capped at 64×) so a flapping service is not hammered, each consecutive failed probe doubles the wait before the next attempt |
+| **Token budget middleware** | `token_budget::TokenBudgetGuard` | Pre-flight token estimation (⌈bytes/4⌉) gates every request before it reaches the LLM, enforces per-request and rolling-period caps with automatic window rollover and surplus credit-back after actual usage |
+| **Semantic deduplication (SimHash)** | `enhanced::SemanticDeduplicator` | 64-bit locality-sensitive hash catches paraphrased near-duplicates that bypass exact-match dedup, configurable Hamming-distance threshold with TTL expiry |
+
+#### Adaptive circuit breaker, how it works
+
+Previously, a half-open probe failure immediately re-opened the circuit and waited the **same** full timeout before trying again. This caused probe storms against recovering services. Now:
+
+```
+probe 0 fails → wait 1× timeout
+probe 1 fails → wait 2× timeout
+probe 2 fails → wait 4× timeout
+probe 3 fails → wait 8× timeout
+...
+probe 6+ fails → wait 64× timeout (capped)
+probe succeeds → reset to 0 (normal operation resumes)
+```
+
+The backoff factor is exposed in `CircuitBreakerStats::probe_failures` for observability.
+
+#### Token budget, quick example
+
+```rust
+use tokio_prompt_orchestrator::token_budget::{TokenBudgetGuard, TokenBudgetConfig};
+use std::time::Duration;
+
+let guard = TokenBudgetGuard::new(TokenBudgetConfig {
+    max_tokens_per_request: 4_096,   // reject single requests over 4k tokens
+    max_tokens_per_period:  100_000, // 100k tokens per hour
+    period: Duration::from_secs(3600),
+});
+
+match guard.check(&prompt) {
+    Ok(estimated) => { /* send to LLM */ }
+    Err(e) => { /* reject early, no API charge */ }
+}
+// After response arrives:
+guard.release(estimated, actual_tokens_from_provider);
+```
+
+### Prompt A/B Testing Framework and Semantic Deduplication
+
+This release adds two major data-science primitives for production LLM deployments:
+
+| Feature | Module | What it does |
+|---------|--------|--------------|
+| **Prompt A/B Testing** | `ab_test` | Statistically rigorous variant testing with consistent hashing (same user → same variant), Welch's t-test significance testing, Cohen's d effect size, and REST API |
+| **Semantic Deduplication** | `enhanced::semantic_dedup` | SimHash LSH near-duplicate detection, catches paraphrases and minor edits that bypass exact-match dedup |
+
+Both features are available without any optional feature flags.
+
+### REST API, A/B Tests
+
+```text
+POST   /api/v1/ab-tests                   Create or replace an experiment
+GET    /api/v1/ab-tests/:name/results     Get current statistical result
+DELETE /api/v1/ab-tests/:name             Remove experiment and discard samples
+```
+
+### Plugin Stage System, DLQ Replay Binary, and Cron Scheduler
+
+These additions break the rigidity of the five-stage DAG by adding three major extensibility layers:
+
+| Feature | Module | What it does |
+|---------|--------|--------------|
+| **Custom Plugin Stage System** | `plugin` | Insert async middleware at any of the 10 pipeline hook points (before/after each stage) without forking the library |
+| **Dead-Letter Queue Replay Binary** | `src/bin/replay.rs` | `cargo run --bin replay` reads NDJSON from a file or stdin and resubmits failed requests with configurable retries and progress display |
+| **Cron Scheduler** | `scheduler` | POST a prompt template + cron expression; a Tokio background task fires it on schedule and injects it into the live pipeline |
+
+All three features are available without any optional feature flags and are wired into the web API when `--features web-api` is enabled.
+
+---
+
 ## Advanced Features
 
 ### Conversational Session Context
@@ -873,17 +873,17 @@ let ctx = SessionContext::new(SessionConfig {
     ..Default::default()
 });
 
-// First turn — no history injected.
+// First turn, no history injected.
 let (req1, _action) = ctx.enrich(request1).await;
 // Call your model worker...
 ctx.record_response(&session_id, "The model's answer.").await;
 
-// Second turn — prior dialogue prepended automatically.
+// Second turn, prior dialogue prepended automatically.
 let (req2, _action) = ctx.enrich(request2).await;
 // req2.input now contains the previous turn(s) as context.
 ```
 
-Sessions expire after a configurable TTL (default 30 min).  When history grows beyond `summarise_after_turns` the manager returns `SessionAction::RequestSummary` — send a summarisation request through the pipeline and call `ctx.summarise(...)` to replace the history with a condensed version.
+Sessions expire after a configurable TTL (default 30 min).  When history grows beyond `summarise_after_turns` the manager returns `SessionAction::RequestSummary`, send a summarisation request through the pipeline and call `ctx.summarise(...)` to replace the history with a condensed version.
 
 ---
 
@@ -996,7 +996,7 @@ fn main() {
     // Record outcome (latency_ms, quality 0.0–1.0)
     exp.record_success(idx, 280, 0.92);
 
-    // Significance test — returns None until each variant has >= 30 samples
+    // Significance test, returns None until each variant has >= 30 samples
     if let Some(p) = exp.significance(0, 1) {
         println!("p-value: {p:.4}  (< 0.05 = statistically significant)");
     }
@@ -1065,8 +1065,8 @@ Prefix grouping (`group_by_prefix_len > 0`) places requests with a shared prompt
 ### Prompt Injection and Jailbreak Detection
 
 The `security::PromptGuard` sits in front of the pipeline and classifies every
-prompt before it touches the inference backend.  Detection is entirely local —
-no network calls, no external APIs — and runs in under a millisecond.
+prompt before it touches the inference backend.  Detection is entirely local -
+no network calls, no external APIs, and runs in under a millisecond.
 
 **Threats detected:**
 
@@ -1115,7 +1115,7 @@ Guard metrics are exposed on the Prometheus `/metrics` endpoint when
 
 ---
 
-### Provider Arbitrage — Cheapest Provider Meeting Your Latency SLA
+### Provider Arbitrage, Cheapest Provider Meeting Your Latency SLA
 
 The `routing::ArbitrageEngine` tracks per-provider P95 latency in a rolling
 128-sample window and, given a latency budget, picks the cheapest provider
@@ -1146,7 +1146,7 @@ engine.register(ProviderProfile {
     name: "local-vllm".to_string(),
     cost_per_1k_input_tokens:  0.0,
     cost_per_1k_output_tokens: 0.0,
-    priority: 0,  // free — use when fast enough
+    priority: 0,  // free, use when fast enough
 });
 
 // Feed observed latencies after each request
@@ -1247,7 +1247,7 @@ Implement `ResponseScorer` to define your own quality function.
 
 ---
 
-## Cascading Inference — Multi-Turn Tool Call Loops
+## Cascading Inference, Multi-Turn Tool Call Loops
 
 The `cascade` module lets a model drive its own multi-turn reasoning loop: it emits tool calls, the engine executes them, injects results back into context, and re-infers until the model is satisfied or a safety limit is reached.
 
@@ -1258,7 +1258,7 @@ use tokio_prompt_orchestrator::cascade::{
 };
 use tokio_prompt_orchestrator::OrchestratorError;
 
-// Wire in your real worker — here we use a closure for brevity
+// Wire in your real worker, here we use a closure for brevity
 let infer: InferFn = Arc::new(|prompt: String| Box::pin(async move {
     // In production: call AnthropicWorker/OpenAiWorker here
     Ok::<String, OrchestratorError>(format!("Answer: {prompt}"))
@@ -1280,7 +1280,7 @@ println!("Turns taken: {}", result.turns.len());
 println!("Stopped because: {:?}", result.termination_reason);
 ```
 
-**Tool call format** — the model emits JSON blocks that the engine parses:
+**Tool call format**: the model emits JSON blocks that the engine parses:
 
 ```text
 <tool_call>
@@ -1319,7 +1319,7 @@ let router = MultiPipelineRouter::builder()
     .add_pipeline(PipelineDescriptor::new("code", PromptClass::Code, Arc::new(EchoWorker::new())))
     .build();
 
-// Route a request — classification is automatic
+// Route a request, classification is automatic
 let req = PromptRequest {
     session: SessionId::new("user-42"),
     request_id: "r1".to_string(),
@@ -1401,7 +1401,7 @@ The plugin system lets you inject custom async logic at any of the **10 hook poi
 
 | Type | Description |
 |------|-------------|
-| `StagePlugin` | Async trait — implement `process(PluginInput) -> PluginOutput` |
+| `StagePlugin` | Async trait, implement `process(PluginInput) -> PluginOutput` |
 | `PluginInput` | Request ID, session ID, payload (JSON), metadata map |
 | `PluginOutput` | Modified input + status: `Continue`, `Abort`, or `Error` |
 | `PluginPosition` | `Before(PipelineStage)` or `After(PipelineStage)` |
@@ -1423,7 +1423,7 @@ impl StagePlugin for InferenceLogger {
 
     async fn process(&self, input: PluginInput) -> PluginOutput {
         tracing::info!(request_id = %input.request_id, "entering inference stage");
-        // Return passthrough — input is forwarded unchanged.
+        // Return passthrough, input is forwarded unchanged.
         PluginOutput::passthrough(input)
     }
 }
@@ -1598,12 +1598,12 @@ let app: Router = Router::new().merge(scheduler_routes(state));
 ```bash
 curl -X POST http://localhost:8080/api/v1/schedule \
   -H "Content-Type: application/json" \
-  -d '{"name":"hourly-ping","schedule":"0 *","prompt_template":"Ping — respond OK."}'
+  -d '{"name":"hourly-ping","schedule":"0 *","prompt_template":"Ping, respond OK."}'
 ```
 
 Response:
 ```json
-{"id":"550e8400-e29b-41d4-a716-446655440000","name":"hourly-ping","schedule":"0 *","enabled":true,"prompt_preview":"Ping — respond OK."}
+{"id":"550e8400-e29b-41d4-a716-446655440000","name":"hourly-ping","schedule":"0 *","enabled":true,"prompt_preview":"Ping, respond OK."}
 ```
 
 #### Disable / re-enable
@@ -1634,14 +1634,14 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full guide.
 
 ## Prompt A/B Testing
 
-The `ab_test` module provides a complete framework for comparing prompt templates in production traffic — without any external service.
+The `ab_test` module provides a complete framework for comparing prompt templates in production traffic, without any external service.
 
 ### How It Works
 
 1. **Register** an experiment with two prompt variants and a traffic split.
-2. **Assign** each incoming request to a variant using consistent FNV-1a hashing — the same `(experiment_name, user_id)` pair always maps to the same variant, so users see a coherent experience.
+2. **Assign** each incoming request to a variant using consistent FNV-1a hashing, the same `(experiment_name, user_id)` pair always maps to the same variant, so users see a coherent experience.
 3. **Record** metric observations (output length, latency, user rating, or a custom scorer).
-4. **Analyse** — once `min_samples` observations accumulate per variant, Welch's t-test determines the winner at α = 0.05.  Effect size is reported as Cohen's d (Hedges-corrected).
+4. **Analyse**: once `min_samples` observations accumulate per variant, Welch's t-test determines the winner at α = 0.05.  Effect size is reported as Cohen's d (Hedges-corrected).
 
 ### Code Example
 
@@ -1744,17 +1744,17 @@ let dedup = SemanticDeduplicator::new(
     Duration::from_secs(300),   // Fingerprint TTL
 );
 
-// First request is novel — send to model.
+// First request is novel, send to model.
 if dedup.check_and_register("What is the capital of France?") {
     // call model...
 }
 
-// Near-duplicate (punctuation drop) — caught and suppressed.
+// Near-duplicate (punctuation drop), caught and suppressed.
 // check_and_register returns false; return cached result instead.
 let is_novel = dedup.check_and_register("What is the capital of France");
 assert!(!is_novel);
 
-// Different question — passes through.
+// Different question, passes through.
 assert!(dedup.check_and_register("What is the capital of Germany?"));
 ```
 
@@ -1762,9 +1762,9 @@ assert!(dedup.check_and_register("What is the capital of Germany?"));
 
 | Metric | Label | Description |
 |--------|-------|-------------|
-| `dedup_semantic_hits_total` | — | Near-duplicates suppressed |
-| `dedup_semantic_miss_total` | — | Novel prompts passed through |
-| `avg_similarity_score` | — | Rolling average Hamming distance of matched pairs |
+| `dedup_semantic_hits_total` |, | Near-duplicates suppressed |
+| `dedup_semantic_miss_total` |, | Novel prompts passed through |
+| `avg_similarity_score` |, | Rolling average Hamming distance of matched pairs |
 
 ---
 
@@ -1815,41 +1815,28 @@ cache.flush();
 
 ## Rate Limiter
 
-Per-model token bucket rate limiter with configurable capacity and refill rate.
-Supports non-blocking (`try_acquire`) and async waiting (`acquire`) modes.
+Per-model limits combining a requests-per-minute sliding window with a tokens-per-minute token bucket (with a burst multiplier), managed by a `RateLimiterRegistry`.
 
 ### Usage
 
 ```rust,no_run
-use tokio_prompt_orchestrator::rate_limiter::{BucketConfig, RateLimiter};
+use tokio_prompt_orchestrator::rate_limiter::{RateLimiterConfig, RateLimiterRegistry};
 
-let limiter = RateLimiter::new(vec![
-    BucketConfig {
-        model_id: "gpt-4o".to_string(),
-        requests_per_second: 10.0,
-        burst_capacity: 20,
-    },
-    BucketConfig {
-        model_id: "claude-sonnet-4-6".to_string(),
-        requests_per_second: 5.0,
-        burst_capacity: 10,
-    },
-]);
+let limiter = RateLimiterRegistry::new();
+limiter.register("gpt-4o".to_string(), RateLimiterConfig {
+    requests_per_minute: 600,
+    tokens_per_minute: 150_000,
+    burst_multiplier: 2.0,
+});
 
-// Non-blocking check.
-match limiter.try_acquire("gpt-4o") {
+// Check a request that will use about 1,200 tokens.
+match limiter.check("gpt-4o", 1_200) {
     Ok(()) => { /* proceed */ }
-    Err(e) => eprintln!("Rate limited: {e}"),
+    Err(e) => eprintln!("rate limited: {e}"),
 }
 
-// Async: wait until a token is available.
-// limiter.acquire("gpt-4o").await?;
-
-// Inspect per-model statistics.
-let stats = limiter.stats();
-for m in stats.per_model {
-    println!("Model {}: allowed={} denied={} tokens={:.1}",
-        m.model_id, m.requests_allowed, m.requests_denied, m.current_tokens);
+for (model, throttled) in limiter.stats() {
+    println!("{model}: {throttled} throttled");
 }
 ```
 
@@ -1863,7 +1850,8 @@ for m in stats.per_model {
 
 ## Known Issues / Roadmap
 
-- **prometheus 0.13**: Has RUSTSEC-2024-0437 (protobuf DoS). Mitigated by API key auth on `/metrics`. Migration to 0.14 blocked by `prometheus::proto` API removal — tracked internally for Q3 2026.
+- **CI**: the CI workflow is currently failing on `main`; pin a released version if you depend on the crate.
+- **prometheus 0.13**: Has RUSTSEC-2024-0437 (protobuf DoS). Mitigated by API key auth on `/metrics`. Migration to 0.14 blocked by `prometheus::proto` API removal, tracked internally for Q3 2026.
 - **Request replay UI**: Dead-letter queue replay works via API; a TUI panel for it is planned.
 - **Per-stage circuit breaker metrics**: Currently aggregated; per-stage breakdown is planned.
 - **PromptGuard embedding mode**: Current detection is lexical (no external deps). A future optional mode will use local embedding models for semantic similarity detection.
