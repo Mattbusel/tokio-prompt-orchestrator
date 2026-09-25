@@ -1,0 +1,53 @@
+<!doctype html>
+<!--
+  Source of assets/terminal-llm-pipeline.png (#llm) and assets/terminal-server.png (#web).
+  The text in captures.js is the verbatim stdout of those commands, captured on 2026-09-25.
+  Render with Playwright at deviceScaleFactor 2, full page, element #shot.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>terminal</title>
+<style>
+  :root {
+    --term: #121417; --chrome: #1b1e22; --line: #2a2f35; --txt: #d9d6cf; --dim: #7f848c;
+    --prompt: #2cc7a6; --q0: #f0b429; --bad: #ff6a4d;
+    --mono: "Cascadia Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  html, body { margin: 0; background: transparent; }
+  body { padding: 28px; width: max-content; }
+  #shot { display: flex; gap: 20px; align-items: flex-start; }
+  .win { background: var(--term); border: 1px solid var(--line); border-radius: 12px; overflow: hidden;
+         box-shadow: 0 1px 0 rgba(255,255,255,.04) inset, 0 18px 40px -18px rgba(0,0,0,.55); }
+  .bar { display: flex; align-items: center; gap: 8px; padding: 11px 14px; background: var(--chrome); border-bottom: 1px solid var(--line); }
+  .dot { width: 11px; height: 11px; border-radius: 50%; background: #3a4047; }
+  .title { font: 12px var(--mono); color: var(--dim); margin-left: 10px; }
+  pre { margin: 0; padding: 16px 20px 20px; font: 13px/1.55 var(--mono); color: var(--txt); white-space: pre; }
+  pre.wrap { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.24; }
+  .p { color: var(--prompt); }
+  .c { color: #fff; }
+</style>
+</head>
+<body>
+<div id="shot"></div>
+<script src="captures.js"></script>
+<script>
+  function esc(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;"); }
+  function win(title, body, style, wrap) {
+    return '<div class="win" style="' + (style || '') + '"><div class="bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="title">' + esc(title) + '</span></div><pre' + (wrap ? ' class="wrap"' : '') + '>' + body + '</pre></div>';
+  }
+  var C = window.CAPTURES, which = location.hash.slice(1) || "llm", html = "";
+  if (which === "llm") {
+    html = win(C.llm.title, '<span class="p">$</span> <span class="c">' + esc(C.llm.cmd) + '</span>\n' + esc(C.llm.out));
+  } else {
+    var left = '<span class="p">$</span> <span class="c">' + esc(C.web.cmd) + '</span>\n' + esc(C.web.out)
+      .replace(/^> (.+)$/gm, '<span class="p">&gt;</span> <span class="c">$1</span>');
+    var right = C.curl.cmds.map(function (c) {
+      return '<span class="p">$</span> <span class="c">' + esc(c[0]) + '</span>\n' + esc(c[1]);
+    }).join("\n\n");
+    html = win(C.web.title, left, "width:560px", true) + win("second terminal", right, "width:600px", true);
+  }
+  document.getElementById("shot").innerHTML = html;
+</script>
+</body>
+</html>

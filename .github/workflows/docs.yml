@@ -1,4 +1,8 @@
-name: Deploy Docs
+name: Deploy site
+
+# Publishes the project site (site/) to the gh-pages branch, with the rustdoc
+# API docs for main under /api/. keep_files leaves the benchmark history that
+# the CI bench job pushes to /dev/bench/ in place.
 
 on:
   push:
@@ -8,8 +12,12 @@ on:
 permissions:
   contents: write
 
+env:
+  # .cargo/config.toml sets a custom target-dir; build into ./target here.
+  CARGO_TARGET_DIR: target
+
 jobs:
-  deploy-docs:
+  deploy-site:
     runs-on: ubuntu-latest
 
     steps:
@@ -17,44 +25,27 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-docs-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-docs-
+      - uses: Swatinem/rust-cache@v2
 
       - name: Build rustdoc
         run: cargo doc --no-deps
         env:
           RUSTDOCFLAGS: "--cfg docsrs"
 
-      # GitHub Pages expects the site in a directory; add a redirect at the root.
-      - name: Add redirect index
+      - name: Assemble site
         run: |
-          mkdir -p target/doc
-          cat > target/doc/index.html << 'HTML'
-          <!DOCTYPE html>
-          <html>
-            <head>
-              <meta http-equiv="refresh"
-                    content="0; url=tokio_prompt_orchestrator/index.html" />
-            </head>
-            <body>
-              <a href="tokio_prompt_orchestrator/index.html">
-                tokio_prompt_orchestrator docs
-              </a>
-            </body>
-          </html>
-          HTML
+          mkdir -p _site/assets
+          cp -r site/. _site/
+          cp assets/*.png assets/*.svg _site/assets/
+          cp .github/social-preview.png _site/assets/
+          cp -r target/doc _site/api
+          touch _site/.nojekyll
+          test -f _site/api/tokio_prompt_orchestrator/index.html
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./target/doc
+          publish_dir: ./_site
           destination_dir: .
-          keep_files: false
+          keep_files: true

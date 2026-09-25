@@ -1,0 +1,27 @@
+Backend: mock model (no network)
+
+1) 12 requests: 4 users x 3 questions
+   req-01 alice  The capital of France is Paris.
+   req-02 alice  Backpressure means a slow consumer makes fast producers wait instead of letting queues grow without bound.
+   req-03 alice  Bounded channels fill / the sender waits its turn now / memory stays calm
+   req-04 bob    The capital of France is Paris.
+   req-05 bob    Backpressure means a slow consumer makes fast producers wait instead of letting queues grow without bound.
+   req-06 bob    Bounded channels fill / the sender waits its turn now / memory stays calm
+   req-07 carol  The capital of France is Paris.
+   req-08 carol  Backpressure means a slow consumer makes fast producers wait instead of letting queues grow without bound.
+   req-09 carol  Bounded channels fill / the sender waits its turn now / memory stays calm
+   req-10 dave   The capital of France is Paris.
+   req-11 dave   Backpressure means a slow consumer makes fast producers wait instead of letting queues grow without bound.
+   req-12 dave   Bounded channels fill / the sender waits its turn now / memory stays calm
+   -> 12 answers in 1.0s, 3 model calls (9 saved by dedup)
+
+2) Provider outage: 8 new requests while every call fails
+   DLQ req-13  inference_failure:inference failed: 503 Service Unavailable (simulated outage)
+   DLQ req-14  inference_failure:inference failed: 503 Service Unavailable (simulated outage)
+   DLQ req-15  inference_failure:inference failed: 503 Service Unavailable (simulated outage)
+   DLQ req-16  inference_failure:inference failed: 503 Service Unavailable (simulated outage)
+   DLQ req-17  inference_failure:inference failed: 503 Service Unavailable (simulated outage)
+   DLQ req-18  circuit open, failed fast (provider not called)
+   DLQ req-19  circuit open, failed fast (provider not called)
+   DLQ req-20  circuit open, failed fast (provider not called)
+   -> breaker is Open; it lets one probe through after 60s to test recovery

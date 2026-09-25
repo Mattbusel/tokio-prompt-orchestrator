@@ -2,7 +2,7 @@
 //!
 //! On first run the wizard prompts for all required settings and explains
 //! exactly where to get an API key.  Subsequent runs reuse values stored in
-//! orchestrator.env (same folder as the .exe).
+//! orchestrator.env (same folder as the binary).
 //!
 //! ## CLI flags (all optional — wizard fills anything missing)
 //!
@@ -141,13 +141,14 @@ fn print_help() {
         r#"orchestrator {}
 
 What it does
-  Routes your prompts through a resilience pipeline — deduplication,
-  retries, circuit breakers — so AI agents stay online under load.
+  Routes your prompts through a resilience pipeline (deduplication,
+  retries, circuit breakers) so AI agents stay online under load.
   Run it once, leave the window open, and any tool can use it.
 
 USAGE:
-    orchestrator.exe           (launches setup wizard on first run)
-    orchestrator.exe --reset   (change your key or provider)
+    orchestrator                    (launches setup wizard on first run)
+    orchestrator --provider echo    (offline test mode, no key needed)
+    orchestrator --reset            (change your key or provider)
 
 OPTIONS:
     --provider <openai|anthropic|llama|echo>   AI provider to use
@@ -167,14 +168,18 @@ GETTING AN API KEY:
     (Both require a free account and a few dollars of credit to start)
 
 CONNECTING AGENTS / IDEs:
-    POST http://127.0.0.1:8080/v1/prompt   — send a prompt, get a response
-    WS   ws://127.0.0.1:8080/v1/stream     — streaming responses
+    (needs a build with the web-api feature; the release binaries have it)
+    POST http://127.0.0.1:8080/api/v1/infer         {{"prompt": "..."}} returns a request_id
+    GET  http://127.0.0.1:8080/api/v1/result/<id>   waits for and returns the answer
+    WS   ws://127.0.0.1:8080/v1/stream              streaming responses
+    GET  http://127.0.0.1:8080/health               pipeline, breaker and queue health
 
-    Claude Desktop — add to claude_desktop_config.json:
-      {{ "mcpServers": {{ "orchestrator": {{ "url": "http://127.0.0.1:8080" }} }} }}
+    Claude Desktop and Claude Code use the separate `mcp` binary (stdio):
+      cargo build --release --features mcp --bin mcp
+      see examples/mcp_claude_desktop.md
 
 SETTINGS FILE:
-    orchestrator.env  (same folder as the .exe)
+    orchestrator.env  (same folder as the binary)
     Edit this file directly to change provider, key, or port."#,
         env!("CARGO_PKG_VERSION")
     );
@@ -396,16 +401,16 @@ fn run_wizard(args: CliArgs) -> ResolvedConfig {
         None => {
             println!("  Which AI provider do you want to use?");
             println!();
-            println!("  1) Anthropic  (Claude — recommended for most users)");
+            println!("  1) Anthropic  (Claude, recommended for most users)");
             println!("     Get a key: https://console.anthropic.com/settings/keys");
             println!();
             println!("  2) OpenAI     (GPT-4o and friends)");
             println!("     Get a key: https://platform.openai.com/api-keys");
             println!();
-            println!("  3) llama      (run models locally — no key needed)");
+            println!("  3) llama      (run models locally, no key needed)");
             println!("     Requires llama.cpp running on this machine");
             println!();
-            println!("  4) echo       (test mode — no key, no internet)");
+            println!("  4) echo       (test mode: no key, no internet)");
             println!();
             let choice = prompt_with_default("  Enter 1, 2, 3, or 4", "1");
             match choice.as_str() {
@@ -438,11 +443,11 @@ fn run_wizard(args: CliArgs) -> ResolvedConfig {
                     // For production use, consider using the OS keychain or a secrets manager.
                     save_env_value("ANTHROPIC_API_KEY", &key);
                     println!(
-                        "  ✓ Key saved to orchestrator.env (plaintext — keep this file private)."
+                        "  ✓ Key saved to orchestrator.env (plaintext, keep this file private)."
                     );
                 }
             } else if is_interactive {
-                println!("  ✓ Anthropic key already saved — skipping.");
+                println!("  ✓ Anthropic key already saved, skipping.");
             }
         }
         "openai" => {
@@ -463,11 +468,11 @@ fn run_wizard(args: CliArgs) -> ResolvedConfig {
                     // For production use, consider using the OS keychain or a secrets manager.
                     save_env_value("OPENAI_API_KEY", &key);
                     println!(
-                        "  ✓ Key saved to orchestrator.env (plaintext — keep this file private)."
+                        "  ✓ Key saved to orchestrator.env (plaintext, keep this file private)."
                     );
                 }
             } else if is_interactive {
-                println!("  ✓ OpenAI key already saved — skipping.");
+                println!("  ✓ OpenAI key already saved, skipping.");
             }
         }
         "llama" => {
@@ -544,50 +549,67 @@ fn print_banner(cfg: &ResolvedConfig) {
     } else {
         "open (no bearer token)"
     };
+    let web_compiled = cfg!(feature = "web-api");
+    let web_on = web_compiled && !cfg.no_web;
     let web_status = if cfg.no_web {
         "disabled (--no-web)".to_string()
+    } else if !web_compiled {
+        "off (build with --features web-api)".to_string()
     } else {
         format!("http://{}:{}", cfg.host, cfg.port)
     };
+    let provider = if cfg.provider == cfg.model {
+        cfg.provider.clone()
+    } else {
+        format!("{} ({})", cfg.provider, cfg.model)
+    };
+
+    // Inner width of the box, in characters. Every row is padded to it so the
+    // right-hand border lines up whatever the values are.
+    const W: usize = 52;
+    let rule = "\u{2550}".repeat(W);
+    let row = |text: &str| {
+        let len = text.chars().count();
+        println!(
+            "\u{2551}{text}{}\u{2551}",
+            " ".repeat(W.saturating_sub(len))
+        );
+    };
 
     println!();
-    println!("╔══════════════════════════════════════════════════╗");
-    println!(
-        "║   tokio-prompt-orchestrator v{:<19}║",
+    println!("\u{2554}{rule}\u{2557}");
+    row(&format!(
+        "  tokio-prompt-orchestrator v{}",
         env!("CARGO_PKG_VERSION")
-    );
-    println!("╠══════════════════════════════════════════════════╣");
-    println!(
-        "║  Provider : {:<38}║",
-        format!("{} ({})", cfg.provider, cfg.model)
-    );
-    println!("║  Web API  : {:<38}║", web_status);
-    println!("║  Auth     : {:<38}║", auth_status);
-    println!("║  Log level: {:<38}║", cfg.log_level);
+    ));
+    println!("\u{2560}{rule}\u{2563}");
+    row(&format!("  Provider  : {provider}"));
+    row(&format!("  Web API   : {web_status}"));
+    if web_on {
+        row(&format!("  Auth      : {auth_status}"));
+    }
+    row(&format!("  Log level : {}", cfg.log_level));
     if let Some(cap) = cfg.max_spend {
-        println!("║  Budget cap: ${:<37}║", format!("{cap:.2}"));
+        row(&format!("  Budget cap: ${cap:.2}"));
     }
 
-    if !cfg.no_web {
+    println!("\u{2560}{rule}\u{2563}");
+    row("  HOW TO USE");
+    row("");
+    row("  Terminal: type any question below");
+    if web_on {
         let base = format!("http://{}:{}", cfg.host, cfg.port);
         let ws_base = format!("ws://{}:{}", cfg.host, cfg.port);
-        println!("╠══════════════════════════════════════════════════╣");
-        println!("║  HOW TO USE                                      ║");
-        println!("║                                                  ║");
-        println!("║  Terminal  ─ type any question below             ║");
-        println!("║                                                  ║");
-        println!("║  Agents / IDEs ─ HTTP while this window is open: ║");
-        println!("║   POST {:<41}║", format!("{base}/v1/prompt"));
-        println!("║   WS   {:<41}║", format!("{ws_base}/v1/stream"));
-        println!("║                                                  ║");
-        println!("║  Claude Desktop ─ claude_desktop_config.json:   ║");
-        println!("║   mcpServers > orchestrator > url:               ║");
-        println!("║     {:<45}║", format!("\"{base}\""));
-        println!("║                                                  ║");
-        println!("║  To change key/provider: run with --reset        ║");
+        row("");
+        row("  Agents and IDEs, over HTTP while this runs:");
+        row(&format!("    POST {base}/api/v1/infer"));
+        row(&format!("    GET  {base}/api/v1/result/<id>"));
+        row(&format!("    WS   {ws_base}/v1/stream"));
+        row(&format!("    GET  {base}/health"));
     }
-
-    println!("╚══════════════════════════════════════════════════╝");
+    row("");
+    row("  To change key or provider: run with --reset");
+    println!("\u{255A}{rule}\u{255D}");
     println!();
 }
 
@@ -642,7 +664,7 @@ fn build_worker(cfg: &ResolvedConfig) -> Result<Arc<dyn ModelWorker>, String> {
         unknown => Err(format!(
             "Unknown provider '{unknown}'.\n\
              Valid options: anthropic, openai, llama, echo\n\
-             Run orchestrator.exe --reset to choose again."
+             Run orchestrator --reset to choose again."
         )),
     }
 }
@@ -651,24 +673,39 @@ fn build_worker(cfg: &ResolvedConfig) -> Result<Arc<dyn ModelWorker>, String> {
 // Terminal REPL — runs concurrently with the web API
 // ---------------------------------------------------------------------------
 
+/// Why the REPL loop ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplEnd {
+    /// The user typed `exit` or `quit`.
+    UserExit,
+    /// Standard input closed (for example when run without a terminal).
+    InputClosed,
+    /// The pipeline or its output channel closed.
+    PipelineClosed,
+}
+
+/// Prefix of every request id the REPL sends, so pipeline output meant for
+/// the terminal can be told apart from output meant for HTTP clients.
+const REPL_REQUEST_PREFIX: &str = "repl-";
+
 async fn run_repl(
     input_tx: tokio::sync::mpsc::Sender<PromptRequest>,
     output_rx: tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<PostOutput>>>,
-) {
+) -> ReplEnd {
     let mut rx = {
         let mut guard = output_rx.lock().await;
         match guard.take() {
             Some(r) => r,
             None => {
-                eprintln!("[repl] output channel already taken — REPL disabled");
-                return;
+                eprintln!("[repl] output channel already taken, REPL disabled");
+                return ReplEnd::PipelineClosed;
             }
         }
     };
 
     let session = SessionId("repl".to_string());
 
-    println!("Ask me anything — try: What can you help me with?");
+    println!("Ask me anything. Try: What can you help me with?");
     println!("Commands: 'exit' to quit  |  'settings' to change key/provider\n");
 
     loop {
@@ -687,15 +724,16 @@ async fn run_repl(
         .unwrap_or(None);
 
         let prompt = match line {
-            None => break,
+            None => return ReplEnd::InputClosed,
             Some(ref s) if s.eq_ignore_ascii_case("exit") || s.eq_ignore_ascii_case("quit") => {
-                break
+                println!("Goodbye.");
+                return ReplEnd::UserExit;
             }
             Some(ref s) if s.eq_ignore_ascii_case("settings") => {
                 println!();
                 println!("  To change your key or provider, close this window and");
-                println!("  reopen orchestrator.exe — choose [S] at the startup menu.");
-                println!("  Or run: orchestrator.exe --reset");
+                println!("  reopen orchestrator and choose [S] at the startup menu.");
+                println!("  Or run: orchestrator --reset");
                 println!();
                 continue;
             }
@@ -713,14 +751,14 @@ async fn run_repl(
 
         if input_tx.send(req).await.is_err() {
             eprintln!("Pipeline closed unexpectedly.");
-            break;
+            return ReplEnd::PipelineClosed;
         }
 
         match tokio::time::timeout(std::time::Duration::from_secs(60), rx.recv()).await {
             Ok(Some(out)) => println!("\n{}\n", out.text),
             Ok(None) => {
                 eprintln!("Pipeline output closed.");
-                break;
+                return ReplEnd::PipelineClosed;
             }
             Err(_) => eprintln!(
                 "\nNo response after 60 seconds. \
@@ -728,8 +766,6 @@ async fn run_repl(
             ),
         }
     }
-
-    println!("Goodbye.");
 }
 
 fn uuid_simple() -> String {
@@ -741,7 +777,7 @@ fn uuid_simple() -> String {
         .unwrap_or(0);
     static CTR: AtomicU64 = AtomicU64::new(0);
     let seq = CTR.fetch_add(1, Ordering::Relaxed);
-    format!("repl-{nanos:08x}-{seq:04x}")
+    format!("{REPL_REQUEST_PREFIX}{nanos:08x}-{seq:04x}")
 }
 
 // ---------------------------------------------------------------------------
@@ -860,7 +896,7 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
                     last_mtime = current_mtime;
                     tracing::info!(
                         path = %env_path.display(),
-                        "orchestrator.env changed — reloading runtime-safe settings"
+                        "orchestrator.env changed, reloading runtime-safe settings"
                     );
                     match std::fs::read_to_string(&env_path) {
                         Ok(contents) => {
@@ -891,7 +927,7 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
                             tracing::warn!(
                                 path = %env_path.display(),
                                 error = %e,
-                                "config hot-reload failed — continuing with previous settings"
+                                "config hot-reload failed, continuing with previous settings"
                             );
                         }
                     }
@@ -923,7 +959,7 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
 
     tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
-            tracing::info!("Ctrl+C received — initiating graceful shutdown");
+            tracing::info!("Ctrl+C received, initiating graceful shutdown");
             let _ = shutdown_tx.send(());
         }
     });
@@ -937,7 +973,7 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
     if cfg.no_web {
         let repl_output_rx = tokio::sync::Mutex::new(output_rx_raw);
         let repl_handle = tokio::spawn(async move {
-            run_repl(repl_tx, repl_output_rx).await;
+            let _ = run_repl(repl_tx, repl_output_rx).await;
         });
         tokio::select! {
             _ = repl_handle => {}
@@ -951,24 +987,50 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
             // REPL runs without output_rx — it will print the disabled message
             // and return immediately, which is fine since the web API is the
             // primary interface.
-            let repl_output_rx =
-                tokio::sync::Mutex::new(None::<tokio::sync::mpsc::Receiver<PostOutput>>);
+            let mut pipeline_out = match output_rx_raw {
+                Some(rx) => rx,
+                None => {
+                    tracing::error!(
+                        "output_rx was already taken before web API start (this is a bug)"
+                    );
+                    std::process::exit(1);
+                }
+            };
+
+            // The pipeline has one output channel but two consumers: the
+            // terminal REPL and the web API. Split it by request id so both
+            // work at the same time.
+            let (repl_out_tx, repl_out_rx) = tokio::sync::mpsc::channel::<PostOutput>(64);
+            let (web_out_tx, output_rx) = tokio::sync::mpsc::channel::<PostOutput>(1024);
+            tokio::spawn(async move {
+                while let Some(out) = pipeline_out.recv().await {
+                    let target = if out.request_id.starts_with(REPL_REQUEST_PREFIX) {
+                        &repl_out_tx
+                    } else {
+                        &web_out_tx
+                    };
+                    if target.send(out).await.is_err() {
+                        tracing::debug!("output consumer closed; dropping pipeline output");
+                    }
+                }
+            });
+
+            // Typing `exit` stops the program. If stdin closes (no terminal,
+            // for example under a service manager) keep serving HTTP.
+            let repl_output_rx = tokio::sync::Mutex::new(Some(repl_out_rx));
             let repl_handle = tokio::spawn(async move {
-                run_repl(repl_tx, repl_output_rx).await;
+                match run_repl(repl_tx, repl_output_rx).await {
+                    ReplEnd::UserExit => {}
+                    ReplEnd::InputClosed | ReplEnd::PipelineClosed => {
+                        tracing::info!("terminal input closed; still serving the web API");
+                        std::future::pending::<()>().await;
+                    }
+                }
             });
 
             let pipeline_tx = handles.input_tx.clone();
             let dlq = handles.dlq.clone();
             let circuit_breaker = handles.circuit_breaker.clone();
-            let output_rx = match output_rx_raw {
-                Some(rx) => rx,
-                None => {
-                    tracing::error!(
-                        "output_rx was already taken before web API start — this is a bug"
-                    );
-                    std::process::exit(1);
-                }
-            };
             let config = ServerConfig {
                 host: cfg.host.clone(),
                 port: cfg.port,
@@ -979,6 +1041,12 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
                 result = start_server(config, pipeline_tx, output_rx, dlq, circuit_breaker, Some(shutdown_rx)) => {
                     if let Err(e) = result {
                         tracing::error!(error = %e, "Web API server error");
+                        eprintln!("\nThe web API could not start: {e}");
+                        eprintln!(
+                            "If another program is using port {}, pick a free one with --port <N>, \
+                             or run without HTTP using --no-web.",
+                            cfg.port
+                        );
                         std::process::exit(1);
                     }
                 }
@@ -989,12 +1057,12 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
         #[cfg(not(feature = "web-api"))]
         {
             eprintln!(
-                "Warning: built without 'web-api' feature — web server disabled.\n\
+                "Warning: built without the 'web-api' feature, so the web server is off.\n\
                  Rebuild with: cargo build --features web-api"
             );
             let repl_output_rx = tokio::sync::Mutex::new(output_rx_raw);
             let repl_handle = tokio::spawn(async move {
-                run_repl(repl_tx, repl_output_rx).await;
+                let _ = run_repl(repl_tx, repl_output_rx).await;
             });
             tokio::select! {
                 _ = repl_handle => {}
@@ -1016,6 +1084,16 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_repl_request_ids_carry_the_routing_prefix() {
+        // The web-mode output splitter relies on this prefix to send
+        // terminal answers back to the REPL instead of the HTTP tracker.
+        let a = uuid_simple();
+        let b = uuid_simple();
+        assert!(a.starts_with(REPL_REQUEST_PREFIX));
+        assert_ne!(a, b);
+    }
 
     #[test]
     fn test_default_model_openai() {
