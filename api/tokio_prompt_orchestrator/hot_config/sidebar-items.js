@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ConfigError","ConfigValue"],"fn":["load_toml"],"struct":["ConfigSnapshot","HotConfig"],"trait":["FromConfigValue"]};

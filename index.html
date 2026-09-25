@@ -1,12 +1,240 @@
-<!DOCTYPE html>
-<html>
-  <head>
-    <meta http-equiv="refresh"
-          content="0; url=tokio_prompt_orchestrator/index.html" />
-  </head>
-  <body>
-    <a href="tokio_prompt_orchestrator/index.html">
-      tokio_prompt_orchestrator docs
-    </a>
-  </body>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tokio-prompt-orchestrator</title>
+<meta name="description" content="A bounded Tokio pipeline in front of your LLM: request deduplication, a circuit breaker and a dead-letter queue, in front of Anthropic, OpenAI, llama.cpp, vLLM or your own backend.">
+<meta property="og:title" content="tokio-prompt-orchestrator">
+<meta property="og:description" content="A bounded Tokio pipeline in front of your LLM: dedup, circuit breaker, dead-letter queue.">
+<meta property="og:image" content="https://mattbusel.github.io/tokio-prompt-orchestrator/assets/social-preview.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230f1113'/%3E%3Cpath d='M5 10h9M5 16h9M5 22h9' stroke='%23f0b429' stroke-width='2.5' stroke-linecap='round'/%3E%3Cpath d='M14 10c5 0 5 6 9 6M14 22c5 0 5-6 9-6M14 16h13' stroke='%232cc7a6' stroke-width='2.5' stroke-linecap='round' fill='none'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="assets/flow.css">
+<link rel="stylesheet" href="assets/site.css">
+<script>
+  try { var t = localStorage.getItem("tpo-theme"); if (t) document.documentElement.setAttribute("data-theme", t); } catch (e) {}
+</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top">
+  <div class="wrap topbar">
+    <a class="mark" href="./"><span>tokio-prompt-</span><span class="dim">orchestrator</span></a>
+    <nav aria-label="Project links">
+      <a href="#quick-start">Quick start</a>
+      <a href="api/tokio_prompt_orchestrator/">API docs</a>
+      <a href="https://crates.io/crates/tokio-prompt-orchestrator">crates.io</a>
+      <a href="https://github.com/Mattbusel/tokio-prompt-orchestrator">GitHub</a>
+      <button class="theme" id="theme" type="button" aria-label="Switch colour theme"><svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="7" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 3a7 7 0 0 1 0 14z" fill="currentColor"/></svg></button>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+<section class="hero wrap">
+ <div class="hero-l">
+  <p class="eyebrow">Rust crate &middot; Tokio &middot; MIT</p>
+  <h1>Put a bounded pipeline between your users and your LLM.</h1>
+  <p class="lede">Duplicate prompts share one model call. A failing provider trips a circuit breaker so requests fail fast instead of piling up. Every request the pipeline drops lands in a dead-letter queue you can inspect and replay. Works with Anthropic, OpenAI, llama.cpp, vLLM or your own backend.</p>
+  <div class="cta">
+    <div class="cmd"><code>cargo run --example llm_pipeline</code><button class="copy" data-copy="git clone https://github.com/Mattbusel/tokio-prompt-orchestrator &amp;&amp; cd tokio-prompt-orchestrator &amp;&amp; cargo run --example llm_pipeline" type="button">Copy</button></div>
+    <span class="hint">No API key. Runs the exact scenario drawn below.</span>
+  </div>
+ </div>
+ <div class="hero-r">
+    <div>
+      <h2 id="run-h">One real run, replayed</h2>
+      <p>12 requests from 4 users ask 3 questions, then 8 more arrive during a simulated provider outage. Every dot is a request; every timestamp is from the recorded run, played at one fifth speed.</p>
+    </div>
+    <div class="readout" aria-live="off">
+      <div><span class="k">clock</span><span class="v mono" id="r-clock">0.0 ms</span></div>
+      <div><span class="k">model calls</span><span class="v mono" id="r-calls">0</span></div>
+      <div><span class="k">answered</span><span class="v mono" id="r-ans">0</span></div>
+      <div><span class="k">breaker</span><span class="v mono st ok" id="r-br">closed</span></div>
+      <div><span class="k">in DLQ</span><span class="v mono" id="r-dlq">0</span></div>
+      <button type="button" id="r-play" class="btn">Play</button>
+    </div>
+ </div>
+</section>
+
+<section class="stage wrap" aria-label="Replay of one recorded run">
+  <div class="flow-card"><div id="flow" class="flow-host"><noscript><img src="assets/banner-dark.png" alt="Request flow of one run of the llm_pipeline example" style="width:100%"></noscript></div></div>
+  <p class="source mono">Source: <a href="data/llm_pipeline_trace.json">llm_pipeline_trace.json</a>, from <code>cargo run --example llm_pipeline</code> with the built-in mock model (300 ms per call), debug build, Windows x86_64.</p>
+</section>
+
+<section class="wrap feats" aria-label="What it does">
+  <article class="feat">
+    <h3><span class="sw q0"></span>Deduplication</h3>
+    <p>Identical prompts are keyed and coalesced. In the run, 12 requests became <b>3 model calls</b>; the 9 repeats were answered from the dedup cache in 0.3 ms total.</p>
+    <p class="api mono">enhanced::Deduplicator</p>
+  </article>
+  <article class="feat">
+    <h3><span class="sw bad"></span>Circuit breaker</h3>
+    <p>Wraps every worker call in stage 3. After <b>5 failures</b> it opens and the next requests are refused without touching the provider. It probes again after 60 s.</p>
+    <p class="api mono">enhanced::CircuitBreaker</p>
+  </article>
+  <article class="feat">
+    <h3><span class="sw ink"></span>Dead-letter queue</h3>
+    <p>Nothing is dropped silently. Full channels, timeouts, expired deadlines, failures and breaker refusals all land in a 1000-entry ring buffer with the reason.</p>
+    <p class="api mono">handles.dlq.drain()</p>
+  </article>
+  <article class="feat">
+    <h3><span class="sw q1"></span>Backpressure</h3>
+    <p>Five Tokio tasks joined by bounded channels (512, 512, 512, 1024, 512, 256). A slow model makes producers wait or shed, so memory stays flat under load.</p>
+    <p class="api mono">spawn_pipeline(worker)</p>
+  </article>
+</section>
+
+<section class="wrap split out" aria-labelledby="out-h">
+  <div>
+    <h2 id="out-h">What that run printed</h2>
+    <p>The example is about 200 lines and a good template for wiring your own backend. Set <code>PROVIDER=anthropic</code> or <code>PROVIDER=openai</code> with a key to make the same 3 calls against a real model; the outage is simulated in front of the provider, so it costs nothing.</p>
+    <p><a class="arrow" href="https://github.com/Mattbusel/tokio-prompt-orchestrator/blob/main/examples/llm_pipeline.rs">Read examples/llm_pipeline.rs</a></p>
+  </div>
+  <div class="term" role="region" aria-label="Terminal output of cargo run --example llm_pipeline">
+    <div class="tbar"><i></i><i></i><i></i><span>cargo run --example llm_pipeline</span></div>
+    <pre id="llm-out" class="mono"></pre>
+  </div>
+</section>
+
+<section class="wrap arch" aria-labelledby="arch-h">
+  <h2 id="arch-h">How a request moves</h2>
+  <p>Stage 3 is where resilience lives: a deadline check, the circuit breaker and a timeout around your <code>ModelWorker</code>. Dedup, retries, caching, rate limits and load balancing are building blocks you wrap around the worker, exactly as the example does with <code>Deduplicator</code>.</p>
+  <picture>
+    <source srcset="assets/architecture-dark.svg" media="(prefers-color-scheme: dark)">
+    <img id="arch-img" src="assets/architecture-light.svg" alt="Five stages joined by bounded channels: retrieve, assemble, inference, post-process, stream. Stage 3 runs a deadline check, circuit breaker and timeout around the model worker. Dropped requests go to the dead-letter queue with a reason." width="1200" height="560" loading="lazy">
+  </picture>
+</section>
+
+<section class="wrap" id="quick-start" aria-labelledby="qs-h">
+  <h2 id="qs-h">Quick start</h2>
+  <div class="qs">
+    <div class="step">
+      <h3><span class="n">1</span>See it work</h3>
+      <p>Clone and run the example. No key, no network.</p>
+      <div class="code"><button class="copy" type="button" data-target="c1">Copy</button><pre id="c1" class="mono">git clone https://github.com/Mattbusel/tokio-prompt-orchestrator
+cd tokio-prompt-orchestrator
+cargo run --example llm_pipeline</pre></div>
+    </div>
+    <div class="step">
+      <h3><span class="n">2</span>Run the server</h3>
+      <p>Interactive terminal plus an HTTP API on port 8080. <code>echo</code> needs no key.</p>
+      <div class="code"><button class="copy" type="button" data-target="c2">Copy</button><pre id="c2" class="mono">cargo run --features web-api -- --provider echo
+
+# then, from another terminal
+curl -s -X POST http://127.0.0.1:8080/api/v1/infer \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"What is backpressure?"}'</pre></div>
+    </div>
+    <div class="step">
+      <h3><span class="n">3</span>Use the library</h3>
+      <p>Swap <code>EchoWorker</code> for <code>AnthropicWorker</code>, <code>OpenAiWorker</code>, <code>LlamaCppWorker</code> or <code>VllmWorker</code>.</p>
+      <div class="code"><button class="copy" type="button" data-target="c3">Copy</button><pre id="c3" class="mono">[dependencies]
+tokio-prompt-orchestrator = "1.4"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }</pre></div>
+    </div>
+  </div>
+  <div class="code wide"><button class="copy" type="button" data-target="c4">Copy</button><pre id="c4" class="mono"><span class="kw">use</span> std::{collections::HashMap, sync::Arc};
+<span class="kw">use</span> tokio_prompt_orchestrator::{spawn_pipeline, EchoWorker, ModelWorker, PromptRequest, SessionId};
+
+<span class="at">#[tokio::main]</span>
+<span class="kw">async fn</span> main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
+    <span class="kw">let</span> worker: Arc&lt;dyn ModelWorker&gt; = Arc::new(EchoWorker::new());
+    <span class="kw">let</span> handles = spawn_pipeline(worker);
+    <span class="kw">let mut</span> output = handles.take_output_rx().<span class="kw">await</span>.ok_or(<span class="st">"output taken"</span>)?;
+
+    handles.input_tx.send(PromptRequest {
+        session: SessionId::new(<span class="st">"demo"</span>),
+        request_id: <span class="st">"req-1"</span>.into(),
+        input: <span class="st">"Hello, pipeline!"</span>.into(),
+        meta: HashMap::new(),
+        deadline: None,
+    }).<span class="kw">await</span>?;
+
+    <span class="kw">if let</span> Some(out) = output.recv().<span class="kw">await</span> { println!(<span class="st">"{}"</span>, out.text); }
+    <span class="kw">for</span> dropped <span class="kw">in</span> handles.dlq.drain() { println!(<span class="st">"dropped {}: {}"</span>, dropped.request_id, dropped.reason); }
+    Ok(())
+}</pre></div>
+</section>
+
+<section class="wrap split out" aria-labelledby="srv-h">
+  <div>
+    <h2 id="srv-h">The server, for agents and tools</h2>
+    <p>The <code>orchestrator</code> binary runs a terminal prompt and a REST, SSE and WebSocket API side by side. Post a prompt, get a request id, then fetch the result; <code>/health</code> reports the breaker state and queue depth.</p>
+    <p>Claude Desktop and Claude Code connect through the separate <code>mcp</code> binary over stdio: <a class="arrow" href="https://github.com/Mattbusel/tokio-prompt-orchestrator/blob/main/examples/mcp_claude_desktop.md">MCP setup</a></p>
+    <p class="note">Prebuilt 1.4.0 binaries exit right after printing the banner; the fix is on <code>main</code> and ships in the next release. Build from source until then.</p>
+  </div>
+  <img class="shot" src="assets/terminal-server.png" alt="The orchestrator started with --provider echo, answering one prompt typed in the terminal and one sent with curl to /api/v1/infer" width="1184" height="607" loading="lazy">
+</section>
+
+<section class="wrap" aria-labelledby="more-h">
+  <h2 id="more-h">Also in the box</h2>
+  <div class="grid">
+    <div class="cell">
+      <h3>Rate limiter</h3>
+      <p>Per-model sliding window plus token bucket. Real output for a 10 requests per minute limit:</p>
+      <pre class="mono small">req-01 ok
+...
+req-10 ok
+req-11 throttled: sliding window limit exceeded; window resets in 60001 ms
+req-12 throttled: sliding window limit exceeded; window resets in 60001 ms</pre>
+      <p class="api mono">rate_limiter::RateLimiterRegistry</p>
+    </div>
+    <div class="cell">
+      <h3>Backends</h3>
+      <p>Anthropic, OpenAI, llama.cpp and vLLM workers, an offline <code>EchoWorker</code>, and <code>LoadBalancedWorker</code> for round-robin or least-loaded pools. Implement one async trait for anything else.</p>
+      <p class="api mono">trait ModelWorker</p>
+    </div>
+    <div class="cell">
+      <h3>Terminal dashboard</h3>
+      <p>Queue depths, breaker states, dedup savings and a log panel in a Ratatui TUI. It ships with a mock-data mode for a look without a running pipeline.</p>
+      <p class="api mono">cargo run --bin tui --features tui</p>
+    </div>
+    <div class="cell">
+      <h3>Opt-in extras</h3>
+      <p>Feature flags add Prometheus metrics, OpenTelemetry tracing, Redis-backed distributed dedup, prompt templates, A/B tests and a self-tuning control loop. The default build has no optional dependencies.</p>
+      <p class="api mono">--features full</p>
+    </div>
+  </div>
+</section>
+
+<section class="wrap" aria-labelledby="bench-h">
+  <h2 id="bench-h">Overhead</h2>
+  <p>From the last recorded run in <a href="https://github.com/Mattbusel/tokio-prompt-orchestrator/blob/main/BENCHMARKS.md">BENCHMARKS.md</a> (Windows, x86_64, <code>EchoWorker</code>, so no network or model time). CI tracks the pipeline benchmarks on every push: <a class="arrow" href="dev/bench/">benchmark history</a></p>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th scope="col">Measurement</th><th scope="col" class="r">p50</th></tr></thead>
+    <tbody>
+      <tr><td>Rate limiter check</td><td class="r mono">110 ns</td></tr>
+      <tr><td><code>send_with_shed</code> (non-blocking send with shedding)</td><td class="r mono">204 ns</td></tr>
+      <tr><td>Circuit breaker check, closed</td><td class="r mono">~0.4 &micro;s</td></tr>
+      <tr><td>Dedup check, cached</td><td class="r mono">~1.5 &micro;s</td></tr>
+      <tr><td>100 identical concurrent prompts with dedup, one inference</td><td class="r mono">52.6 &micro;s total</td></tr>
+      <tr><td>1000 concurrent <code>EchoWorker</code> calls</td><td class="r mono">7.1 ms total</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+</main>
+
+<footer class="wrap foot">
+  <div>
+    <span class="mark small"><span>tokio-prompt-</span><span class="dim">orchestrator</span></span>
+    <p>MIT licensed. Known gaps are tracked in the open: the Dockerfile does not build a working image yet (<a href="https://github.com/Mattbusel/tokio-prompt-orchestrator/issues/5">#5</a>), and the RAG stage has no real retriever trait yet (<a href="https://github.com/Mattbusel/tokio-prompt-orchestrator/issues/6">#6</a>).</p>
+  </div>
+  <nav aria-label="Footer links">
+    <a href="https://github.com/Mattbusel/tokio-prompt-orchestrator">Source</a>
+    <a href="https://docs.rs/tokio-prompt-orchestrator">docs.rs</a>
+    <a href="api/tokio_prompt_orchestrator/">API docs (main)</a>
+    <a href="dev/bench/">Benchmarks</a>
+    <a href="https://github.com/Mattbusel/tokio-prompt-orchestrator/releases">Releases</a>
+    <a href="https://github.com/Mattbusel/tokio-prompt-orchestrator/issues">Issues</a>
+  </nav>
+</footer>
+
+<script src="assets/flow.js"></script>
+<script src="assets/replay.js"></script>
+<script src="assets/site.js"></script>
+</body>
 </html>

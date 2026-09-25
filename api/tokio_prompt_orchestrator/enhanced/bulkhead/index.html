@@ -1,0 +1,56 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Bulkhead pattern — isolates concurrent execution pools to prevent cascade failures."><title>tokio_prompt_orchestrator::enhanced::bulkhead - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="tokio_prompt_orchestrator" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module bulkhead</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../tokio_prompt_orchestrator/index.html">tokio_<wbr>prompt_<wbr>orchestrator</a><span class="version">1.4.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module bulkhead</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#what-is-the-bulkhead-pattern" title="What is the bulkhead pattern?">What is the bulkhead pattern?</a></li><li><a href="#when-to-use-it" title="When to use it">When to use it</a></li><li><a href="#how-to-size-the-semaphore" title="How to size the semaphore">How to size the semaphore</a></li><li><a href="#behaviour" title="Behaviour">Behaviour</a></li><li><a href="#example" title="Example">Example</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In tokio_<wbr>prompt_<wbr>orchestrator::<wbr>enhanced</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">tokio_prompt_orchestrator</a>::<wbr><a href="../index.html">enhanced</a></div><h1>Module <span>bulkhead</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/tokio_prompt_orchestrator/enhanced/bulkhead.rs.html#1-261">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Bulkhead pattern — isolates concurrent execution pools to prevent cascade failures.</p>
+<h3 id="what-is-the-bulkhead-pattern"><a class="doc-anchor" href="#what-is-the-bulkhead-pattern">§</a>What is the bulkhead pattern?</h3>
+<p>The bulkhead pattern (named after watertight compartments in a ship) isolates
+concurrent execution into separate, size-limited pools.  If one pool fills up —
+because a downstream service is slow or unavailable — only callers targeting
+that pool are rejected.  All other pools continue to operate normally,
+preventing a partial outage from cascading into a total system failure.</p>
+<p>Each <a href="struct.Bulkhead.html" title="struct tokio_prompt_orchestrator::enhanced::bulkhead::Bulkhead"><code>Bulkhead</code></a> wraps a <code>tokio</code> semaphore.  Callers acquire a permit before
+starting work; the permit is automatically released when it is dropped.</p>
+<h3 id="when-to-use-it"><a class="doc-anchor" href="#when-to-use-it">§</a>When to use it</h3>
+<p>Use a bulkhead when you need to:</p>
+<ul>
+<li><strong>Protect a critical resource</strong> — e.g. limit the number of concurrent
+calls to an expensive GPU inference backend so it is never overwhelmed.</li>
+<li><strong>Prevent cascade failures</strong> — if the inference pool fills up, callers
+receive an immediate error rather than queuing indefinitely; other subsystems
+(RAG, post-processing) are unaffected.</li>
+<li><strong>Enforce fairness</strong> — give each tenant or request class its own pool so a
+burst in one class cannot monopolise shared resources.</li>
+</ul>
+<h3 id="how-to-size-the-semaphore"><a class="doc-anchor" href="#how-to-size-the-semaphore">§</a>How to size the semaphore</h3>
+<p>A good starting point for <code>max_concurrent</code>:</p>
+<div><table><thead><tr><th>Subsystem</th><th>Suggested starting value</th><th>Rationale</th></tr></thead><tbody>
+<tr><td>Local model inference (GPU)</td><td><code>num_gpus × 2</code></td><td>Leave headroom for batching.</td></tr>
+<tr><td>Cloud API (e.g. OpenAI)</td><td><code>10–20</code></td><td>Typical per-key rate-limit allows ~20 concurrent requests.</td></tr>
+<tr><td>RAG / retrieval</td><td><code>50–100</code></td><td>I/O-bound, can be higher.</td></tr>
+<tr><td>Post-processing</td><td><code>100–200</code></td><td>CPU-light, tolerate high concurrency.</td></tr>
+</tbody></table>
+</div>
+<p>Start conservatively and increase based on observed queue depth and error rate.
+A <code>max_concurrent</code> that is too large degrades the backend; too small wastes
+throughput.</p>
+<h3 id="behaviour"><a class="doc-anchor" href="#behaviour">§</a>Behaviour</h3>
+<ul>
+<li><a href="struct.Bulkhead.html#method.acquire" title="method tokio_prompt_orchestrator::enhanced::bulkhead::Bulkhead::acquire"><code>acquire</code></a> is <strong>non-blocking</strong>: it uses <code>try_acquire</code> under the hood and
+immediately returns <code>Err</code> if no permits are available.</li>
+<li>The returned <a href="struct.BulkheadPermit.html" title="struct tokio_prompt_orchestrator::enhanced::bulkhead::BulkheadPermit"><code>BulkheadPermit</code></a> releases the semaphore slot on drop.</li>
+<li>Multiple independent bulkheads can coexist for different subsystems.</li>
+</ul>
+<h3 id="example"><a class="doc-anchor" href="#example">§</a>Example</h3>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>tokio_prompt_orchestrator::enhanced::Bulkhead;
+
+<span class="comment">// Allow at most 10 concurrent inference calls.
+</span><span class="kw">let </span>inference_bh = Bulkhead::new(<span class="string">"inference"</span>, <span class="number">10</span>);
+
+<span class="kw">match </span>inference_bh.acquire() {
+    <span class="prelude-val">Ok</span>(permit) =&gt; {
+        <span class="comment">// Call the inference backend here.
+        // The slot is released automatically when `permit` is dropped.
+        </span>drop(permit);
+    }
+    <span class="prelude-val">Err</span>(e) =&gt; {
+        <span class="comment">// All 10 slots are occupied; shed this request or return an error.
+        </span><span class="macro">eprintln!</span>(<span class="string">"Bulkhead full: {e}"</span>);
+    }
+}</code></pre></div></div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.Bulkhead.html" title="struct tokio_prompt_orchestrator::enhanced::bulkhead::Bulkhead">Bulkhead</a></dt><dd>Limits concurrent executions to <code>max_concurrent</code> using a semaphore.</dd><dt><a class="struct" href="struct.BulkheadPermit.html" title="struct tokio_prompt_orchestrator::enhanced::bulkhead::BulkheadPermit">Bulkhead<wbr>Permit</a></dt><dd>An RAII permit that releases one bulkhead slot on drop.</dd></dl></section></div></main></body></html>

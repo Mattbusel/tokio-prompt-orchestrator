@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["SessionAction","TurnRole"],"struct":["ConversationTurn","SessionConfig","SessionContext","SessionStats"]};

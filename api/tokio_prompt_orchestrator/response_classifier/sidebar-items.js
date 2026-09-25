@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["QualityDimension","ResponseCategory"],"struct":["ClassificationResult","QualityScore","ResponseClassifier"]};

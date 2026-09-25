@@ -1,0 +1,797 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `src/ab_test.rs`."><title>ab_test.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="tokio_prompt_orchestrator" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">tokio_prompt_orchestrator/</div>ab_test.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! # A/B Testing Framework
+<a href=#2 id=2 data-nosnippet>2</a>//!
+<a href=#3 id=3 data-nosnippet>3</a>//! Statistically rigorous A/B testing for LLM model and prompt experiments.
+<a href=#4 id=4 data-nosnippet>4</a>//! Supports weighted traffic splits, deterministic user assignment via FNV hash,
+<a href=#5 id=5 data-nosnippet>5</a>//! two-proportion z-test significance testing, and automatic experiment completion.
+<a href=#6 id=6 data-nosnippet>6</a>
+<a href=#7 id=7 data-nosnippet>7</a></span><span class="attr">#![allow(dead_code)]
+<a href=#8 id=8 data-nosnippet>8</a>
+<a href=#9 id=9 data-nosnippet>9</a></span><span class="kw">use </span>std::collections::HashMap;
+<a href=#10 id=10 data-nosnippet>10</a><span class="kw">use </span>std::sync::Arc;
+<a href=#11 id=11 data-nosnippet>11</a>
+<a href=#12 id=12 data-nosnippet>12</a><span class="kw">use </span>dashmap::DashMap;
+<a href=#13 id=13 data-nosnippet>13</a><span class="kw">use </span>tracing::{debug, info, warn};
+<a href=#14 id=14 data-nosnippet>14</a>
+<a href=#15 id=15 data-nosnippet>15</a><span class="kw">use </span><span class="kw">crate</span>::templates::PromptTemplate;
+<a href=#16 id=16 data-nosnippet>16</a>
+<a href=#17 id=17 data-nosnippet>17</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#18 id=18 data-nosnippet>18</a>// Re-export legacy types so existing lib.rs re-exports keep compiling
+<a href=#19 id=19 data-nosnippet>19</a>// ---------------------------------------------------------------------------
+<a href=#20 id=20 data-nosnippet>20</a>
+<a href=#21 id=21 data-nosnippet>21</a></span><span class="doccomment">/// Which A/B variant a request is assigned to (legacy two-variant API).
+<a href=#22 id=22 data-nosnippet>22</a></span><span class="attr">#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+<a href=#23 id=23 data-nosnippet>23</a></span><span class="kw">pub enum </span>Variant {
+<a href=#24 id=24 data-nosnippet>24</a>    <span class="doccomment">/// The control variant.
+<a href=#25 id=25 data-nosnippet>25</a>    </span>A,
+<a href=#26 id=26 data-nosnippet>26</a>    <span class="doccomment">/// The treatment variant.
+<a href=#27 id=27 data-nosnippet>27</a>    </span>B,
+<a href=#28 id=28 data-nosnippet>28</a>}
+<a href=#29 id=29 data-nosnippet>29</a>
+<a href=#30 id=30 data-nosnippet>30</a><span class="doccomment">/// The metric used to evaluate variant quality (legacy API).
+<a href=#31 id=31 data-nosnippet>31</a></span><span class="attr">#[derive(Clone)]
+<a href=#32 id=32 data-nosnippet>32</a></span><span class="kw">pub enum </span>SuccessMetric {
+<a href=#33 id=33 data-nosnippet>33</a>    <span class="doccomment">/// Higher output length is better.
+<a href=#34 id=34 data-nosnippet>34</a>    </span>OutputLength,
+<a href=#35 id=35 data-nosnippet>35</a>    <span class="doccomment">/// Lower latency is better.
+<a href=#36 id=36 data-nosnippet>36</a>    </span>Latency,
+<a href=#37 id=37 data-nosnippet>37</a>    <span class="doccomment">/// A caller-supplied scoring function.
+<a href=#38 id=38 data-nosnippet>38</a>    </span>CustomFn(Arc&lt;<span class="kw">dyn </span>Fn(<span class="kw-2">&amp;</span>str) -&gt; f64 + Send + Sync&gt;),
+<a href=#39 id=39 data-nosnippet>39</a>    <span class="doccomment">/// Explicit numeric rating supplied by the caller.
+<a href=#40 id=40 data-nosnippet>40</a>    </span>UserRating,
+<a href=#41 id=41 data-nosnippet>41</a>}
+<a href=#42 id=42 data-nosnippet>42</a>
+<a href=#43 id=43 data-nosnippet>43</a><span class="kw">impl </span>std::fmt::Debug <span class="kw">for </span>SuccessMetric {
+<a href=#44 id=44 data-nosnippet>44</a>    <span class="kw">fn </span>fmt(<span class="kw-2">&amp;</span><span class="self">self</span>, f: <span class="kw-2">&amp;mut </span>std::fmt::Formatter&lt;<span class="lifetime">'_</span>&gt;) -&gt; std::fmt::Result {
+<a href=#45 id=45 data-nosnippet>45</a>        <span class="kw">match </span><span class="self">self </span>{
+<a href=#46 id=46 data-nosnippet>46</a>            <span class="self">Self</span>::OutputLength =&gt; <span class="macro">write!</span>(f, <span class="string">"OutputLength"</span>),
+<a href=#47 id=47 data-nosnippet>47</a>            <span class="self">Self</span>::Latency =&gt; <span class="macro">write!</span>(f, <span class="string">"Latency"</span>),
+<a href=#48 id=48 data-nosnippet>48</a>            <span class="self">Self</span>::CustomFn(<span class="kw">_</span>) =&gt; <span class="macro">write!</span>(f, <span class="string">"CustomFn(...)"</span>),
+<a href=#49 id=49 data-nosnippet>49</a>            <span class="self">Self</span>::UserRating =&gt; <span class="macro">write!</span>(f, <span class="string">"UserRating"</span>),
+<a href=#50 id=50 data-nosnippet>50</a>        }
+<a href=#51 id=51 data-nosnippet>51</a>    }
+<a href=#52 id=52 data-nosnippet>52</a>}
+<a href=#53 id=53 data-nosnippet>53</a>
+<a href=#54 id=54 data-nosnippet>54</a><span class="doccomment">/// Configuration for a single legacy two-variant A/B experiment.
+<a href=#55 id=55 data-nosnippet>55</a></span><span class="attr">#[derive(Debug, Clone)]
+<a href=#56 id=56 data-nosnippet>56</a></span><span class="kw">pub struct </span>AbTestConfig {
+<a href=#57 id=57 data-nosnippet>57</a>    <span class="doccomment">/// Unique experiment name.
+<a href=#58 id=58 data-nosnippet>58</a>    </span><span class="kw">pub </span>name: String,
+<a href=#59 id=59 data-nosnippet>59</a>    <span class="doccomment">/// The control prompt template.
+<a href=#60 id=60 data-nosnippet>60</a>    </span><span class="kw">pub </span>variant_a: PromptTemplate,
+<a href=#61 id=61 data-nosnippet>61</a>    <span class="doccomment">/// The treatment prompt template.
+<a href=#62 id=62 data-nosnippet>62</a>    </span><span class="kw">pub </span>variant_b: PromptTemplate,
+<a href=#63 id=63 data-nosnippet>63</a>    <span class="doccomment">/// Fraction of traffic routed to variant A (0.0–1.0).
+<a href=#64 id=64 data-nosnippet>64</a>    </span><span class="kw">pub </span>traffic_split: f64,
+<a href=#65 id=65 data-nosnippet>65</a>    <span class="doccomment">/// Metric used to score each response.
+<a href=#66 id=66 data-nosnippet>66</a>    </span><span class="kw">pub </span>success_metric: SuccessMetric,
+<a href=#67 id=67 data-nosnippet>67</a>    <span class="doccomment">/// Minimum observations per variant before analysis.
+<a href=#68 id=68 data-nosnippet>68</a>    </span><span class="kw">pub </span>min_samples: usize,
+<a href=#69 id=69 data-nosnippet>69</a>}
+<a href=#70 id=70 data-nosnippet>70</a>
+<a href=#71 id=71 data-nosnippet>71</a><span class="doccomment">/// Statistical result of a legacy two-variant A/B experiment.
+<a href=#72 id=72 data-nosnippet>72</a></span><span class="attr">#[derive(Debug, Clone)]
+<a href=#73 id=73 data-nosnippet>73</a></span><span class="kw">pub struct </span>AbTestResult {
+<a href=#74 id=74 data-nosnippet>74</a>    <span class="doccomment">/// The winning variant, or `None` when not yet significant.
+<a href=#75 id=75 data-nosnippet>75</a>    </span><span class="kw">pub </span>winner: <span class="prelude-ty">Option</span>&lt;Variant&gt;,
+<a href=#76 id=76 data-nosnippet>76</a>    <span class="doccomment">/// Confidence level derived from the p-value.
+<a href=#77 id=77 data-nosnippet>77</a>    </span><span class="kw">pub </span>confidence: f64,
+<a href=#78 id=78 data-nosnippet>78</a>    <span class="doccomment">/// Two-tailed p-value.
+<a href=#79 id=79 data-nosnippet>79</a>    </span><span class="kw">pub </span>p_value: f64,
+<a href=#80 id=80 data-nosnippet>80</a>    <span class="doccomment">/// Effect size (Cohen's d).
+<a href=#81 id=81 data-nosnippet>81</a>    </span><span class="kw">pub </span>effect_size: f64,
+<a href=#82 id=82 data-nosnippet>82</a>    <span class="doccomment">/// Number of observations for variant A.
+<a href=#83 id=83 data-nosnippet>83</a>    </span><span class="kw">pub </span>samples_a: usize,
+<a href=#84 id=84 data-nosnippet>84</a>    <span class="doccomment">/// Number of observations for variant B.
+<a href=#85 id=85 data-nosnippet>85</a>    </span><span class="kw">pub </span>samples_b: usize,
+<a href=#86 id=86 data-nosnippet>86</a>    <span class="doccomment">/// Sample mean score for variant A.
+<a href=#87 id=87 data-nosnippet>87</a>    </span><span class="kw">pub </span>mean_a: f64,
+<a href=#88 id=88 data-nosnippet>88</a>    <span class="doccomment">/// Sample mean score for variant B.
+<a href=#89 id=89 data-nosnippet>89</a>    </span><span class="kw">pub </span>mean_b: f64,
+<a href=#90 id=90 data-nosnippet>90</a>}
+<a href=#91 id=91 data-nosnippet>91</a>
+<a href=#92 id=92 data-nosnippet>92</a><span class="doccomment">/// Per-variant running statistics.
+<a href=#93 id=93 data-nosnippet>93</a></span><span class="attr">#[derive(Debug, Default)]
+<a href=#94 id=94 data-nosnippet>94</a></span><span class="kw">struct </span>LegacyVariantStats {
+<a href=#95 id=95 data-nosnippet>95</a>    scores: Vec&lt;f64&gt;,
+<a href=#96 id=96 data-nosnippet>96</a>}
+<a href=#97 id=97 data-nosnippet>97</a>
+<a href=#98 id=98 data-nosnippet>98</a><span class="kw">impl </span>LegacyVariantStats {
+<a href=#99 id=99 data-nosnippet>99</a>    <span class="kw">fn </span>push(<span class="kw-2">&amp;mut </span><span class="self">self</span>, score: f64) { <span class="self">self</span>.scores.push(score); }
+<a href=#100 id=100 data-nosnippet>100</a>    <span class="kw">fn </span>n(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize { <span class="self">self</span>.scores.len() }
+<a href=#101 id=101 data-nosnippet>101</a>    <span class="kw">fn </span>mean(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; f64 {
+<a href=#102 id=102 data-nosnippet>102</a>        <span class="kw">if </span><span class="self">self</span>.scores.is_empty() { <span class="kw">return </span><span class="number">0.0</span>; }
+<a href=#103 id=103 data-nosnippet>103</a>        <span class="self">self</span>.scores.iter().sum::&lt;f64&gt;() / <span class="self">self</span>.scores.len() <span class="kw">as </span>f64
+<a href=#104 id=104 data-nosnippet>104</a>    }
+<a href=#105 id=105 data-nosnippet>105</a>    <span class="kw">fn </span>variance(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; f64 {
+<a href=#106 id=106 data-nosnippet>106</a>        <span class="kw">let </span>n = <span class="self">self</span>.scores.len();
+<a href=#107 id=107 data-nosnippet>107</a>        <span class="kw">if </span>n &lt; <span class="number">2 </span>{ <span class="kw">return </span><span class="number">0.0</span>; }
+<a href=#108 id=108 data-nosnippet>108</a>        <span class="kw">let </span>mean = <span class="self">self</span>.mean();
+<a href=#109 id=109 data-nosnippet>109</a>        <span class="kw">let </span>ss: f64 = <span class="self">self</span>.scores.iter().map(|x| (x - mean).powi(<span class="number">2</span>)).sum();
+<a href=#110 id=110 data-nosnippet>110</a>        ss / (n - <span class="number">1</span>) <span class="kw">as </span>f64
+<a href=#111 id=111 data-nosnippet>111</a>    }
+<a href=#112 id=112 data-nosnippet>112</a>}
+<a href=#113 id=113 data-nosnippet>113</a>
+<a href=#114 id=114 data-nosnippet>114</a><span class="kw">struct </span>LegacyExperiment {
+<a href=#115 id=115 data-nosnippet>115</a>    config: AbTestConfig,
+<a href=#116 id=116 data-nosnippet>116</a>    stats_a: LegacyVariantStats,
+<a href=#117 id=117 data-nosnippet>117</a>    stats_b: LegacyVariantStats,
+<a href=#118 id=118 data-nosnippet>118</a>}
+<a href=#119 id=119 data-nosnippet>119</a>
+<a href=#120 id=120 data-nosnippet>120</a><span class="doccomment">/// Thread-safe legacy two-variant A/B test runner.
+<a href=#121 id=121 data-nosnippet>121</a></span><span class="attr">#[derive(Clone, Default)]
+<a href=#122 id=122 data-nosnippet>122</a></span><span class="kw">pub struct </span>AbTestRunner {
+<a href=#123 id=123 data-nosnippet>123</a>    experiments: Arc&lt;DashMap&lt;String, parking_lot::Mutex&lt;LegacyExperiment&gt;&gt;&gt;,
+<a href=#124 id=124 data-nosnippet>124</a>}
+<a href=#125 id=125 data-nosnippet>125</a>
+<a href=#126 id=126 data-nosnippet>126</a><span class="kw">impl </span>AbTestRunner {
+<a href=#127 id=127 data-nosnippet>127</a>    <span class="doccomment">/// Create an empty runner.
+<a href=#128 id=128 data-nosnippet>128</a>    </span><span class="kw">pub fn </span>new() -&gt; <span class="self">Self </span>{ <span class="self">Self</span>::default() }
+<a href=#129 id=129 data-nosnippet>129</a>
+<a href=#130 id=130 data-nosnippet>130</a>    <span class="doccomment">/// Register a new experiment.
+<a href=#131 id=131 data-nosnippet>131</a>    </span><span class="kw">pub fn </span>register(<span class="kw-2">&amp;</span><span class="self">self</span>, config: AbTestConfig) {
+<a href=#132 id=132 data-nosnippet>132</a>        <span class="macro">info!</span>(name = %config.name, <span class="string">"ab_test: registering experiment"</span>);
+<a href=#133 id=133 data-nosnippet>133</a>        <span class="kw">let </span>name = config.name.clone();
+<a href=#134 id=134 data-nosnippet>134</a>        <span class="self">self</span>.experiments.insert(name, parking_lot::Mutex::new(LegacyExperiment {
+<a href=#135 id=135 data-nosnippet>135</a>            config,
+<a href=#136 id=136 data-nosnippet>136</a>            stats_a: LegacyVariantStats::default(),
+<a href=#137 id=137 data-nosnippet>137</a>            stats_b: LegacyVariantStats::default(),
+<a href=#138 id=138 data-nosnippet>138</a>        }));
+<a href=#139 id=139 data-nosnippet>139</a>    }
+<a href=#140 id=140 data-nosnippet>140</a>
+<a href=#141 id=141 data-nosnippet>141</a>    <span class="doccomment">/// Remove an experiment.
+<a href=#142 id=142 data-nosnippet>142</a>    </span><span class="kw">pub fn </span>delete(<span class="kw-2">&amp;</span><span class="self">self</span>, name: <span class="kw-2">&amp;</span>str) -&gt; bool {
+<a href=#143 id=143 data-nosnippet>143</a>        <span class="kw">let </span>removed = <span class="self">self</span>.experiments.remove(name).is_some();
+<a href=#144 id=144 data-nosnippet>144</a>        <span class="kw">if </span>removed { <span class="macro">info!</span>(name, <span class="string">"ab_test: experiment deleted"</span>); }
+<a href=#145 id=145 data-nosnippet>145</a>        <span class="kw">else </span>{ <span class="macro">warn!</span>(name, <span class="string">"ab_test: delete requested for unknown experiment"</span>); }
+<a href=#146 id=146 data-nosnippet>146</a>        removed
+<a href=#147 id=147 data-nosnippet>147</a>    }
+<a href=#148 id=148 data-nosnippet>148</a>
+<a href=#149 id=149 data-nosnippet>149</a>    <span class="doccomment">/// Assign a user deterministically to a variant.
+<a href=#150 id=150 data-nosnippet>150</a>    </span><span class="kw">pub fn </span>assign(<span class="kw-2">&amp;</span><span class="self">self</span>, name: <span class="kw-2">&amp;</span>str, user_id: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Option</span>&lt;Variant&gt; {
+<a href=#151 id=151 data-nosnippet>151</a>        <span class="kw">let </span>exp = <span class="self">self</span>.experiments.get(name)<span class="question-mark">?</span>;
+<a href=#152 id=152 data-nosnippet>152</a>        <span class="kw">let </span>guard = exp.lock();
+<a href=#153 id=153 data-nosnippet>153</a>        <span class="kw">let </span>split = guard.config.traffic_split.clamp(<span class="number">0.0</span>, <span class="number">1.0</span>);
+<a href=#154 id=154 data-nosnippet>154</a>        <span class="kw">let </span>hash = fnv1a_64_pair(name.as_bytes(), user_id.as_bytes());
+<a href=#155 id=155 data-nosnippet>155</a>        <span class="kw">let </span>bucket = (hash <span class="kw">as </span>f64) / (u64::MAX <span class="kw">as </span>f64);
+<a href=#156 id=156 data-nosnippet>156</a>        <span class="kw">let </span>variant = <span class="kw">if </span>bucket &lt; split { Variant::A } <span class="kw">else </span>{ Variant::B };
+<a href=#157 id=157 data-nosnippet>157</a>        <span class="macro">debug!</span>(experiment = name, user = user_id, bucket, split, <span class="question-mark">?</span>variant, <span class="string">"ab_test: assignment"</span>);
+<a href=#158 id=158 data-nosnippet>158</a>        <span class="prelude-val">Some</span>(variant)
+<a href=#159 id=159 data-nosnippet>159</a>    }
+<a href=#160 id=160 data-nosnippet>160</a>
+<a href=#161 id=161 data-nosnippet>161</a>    <span class="doccomment">/// Record a metric observation for the given variant.
+<a href=#162 id=162 data-nosnippet>162</a>    </span><span class="kw">pub fn </span>record_observation(<span class="kw-2">&amp;</span><span class="self">self</span>, name: <span class="kw-2">&amp;</span>str, variant: Variant, score: f64) {
+<a href=#163 id=163 data-nosnippet>163</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(exp) = <span class="self">self</span>.experiments.get(name) {
+<a href=#164 id=164 data-nosnippet>164</a>            <span class="kw">let </span><span class="kw-2">mut </span>guard = exp.lock();
+<a href=#165 id=165 data-nosnippet>165</a>            <span class="kw">match </span>variant {
+<a href=#166 id=166 data-nosnippet>166</a>                Variant::A =&gt; guard.stats_a.push(score),
+<a href=#167 id=167 data-nosnippet>167</a>                Variant::B =&gt; guard.stats_b.push(score),
+<a href=#168 id=168 data-nosnippet>168</a>            }
+<a href=#169 id=169 data-nosnippet>169</a>        }
+<a href=#170 id=170 data-nosnippet>170</a>    }
+<a href=#171 id=171 data-nosnippet>171</a>
+<a href=#172 id=172 data-nosnippet>172</a>    <span class="doccomment">/// Run Welch's t-test on the accumulated observations.
+<a href=#173 id=173 data-nosnippet>173</a>    </span><span class="kw">pub fn </span>analyse(<span class="kw-2">&amp;</span><span class="self">self</span>, name: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Option</span>&lt;AbTestResult&gt; {
+<a href=#174 id=174 data-nosnippet>174</a>        <span class="kw">let </span>exp = <span class="self">self</span>.experiments.get(name)<span class="question-mark">?</span>;
+<a href=#175 id=175 data-nosnippet>175</a>        <span class="kw">let </span>guard = exp.lock();
+<a href=#176 id=176 data-nosnippet>176</a>        <span class="kw">let </span>min = guard.config.min_samples;
+<a href=#177 id=177 data-nosnippet>177</a>        <span class="kw">if </span>guard.stats_a.n() &lt; min || guard.stats_b.n() &lt; min { <span class="kw">return </span><span class="prelude-val">None</span>; }
+<a href=#178 id=178 data-nosnippet>178</a>        <span class="kw">let </span>result = welch_t_test(<span class="kw-2">&amp;</span>guard.stats_a, <span class="kw-2">&amp;</span>guard.stats_b);
+<a href=#179 id=179 data-nosnippet>179</a>        <span class="macro">info!</span>(experiment = name, <span class="question-mark">?</span>result.winner, p_value = result.p_value, <span class="string">"ab_test: analysis complete"</span>);
+<a href=#180 id=180 data-nosnippet>180</a>        <span class="prelude-val">Some</span>(result)
+<a href=#181 id=181 data-nosnippet>181</a>    }
+<a href=#182 id=182 data-nosnippet>182</a>
+<a href=#183 id=183 data-nosnippet>183</a>    <span class="doccomment">/// Return sample counts for both variants.
+<a href=#184 id=184 data-nosnippet>184</a>    </span><span class="kw">pub fn </span>sample_counts(<span class="kw-2">&amp;</span><span class="self">self</span>, name: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Option</span>&lt;(usize, usize)&gt; {
+<a href=#185 id=185 data-nosnippet>185</a>        <span class="kw">let </span>exp = <span class="self">self</span>.experiments.get(name)<span class="question-mark">?</span>;
+<a href=#186 id=186 data-nosnippet>186</a>        <span class="kw">let </span>guard = exp.lock();
+<a href=#187 id=187 data-nosnippet>187</a>        <span class="prelude-val">Some</span>((guard.stats_a.n(), guard.stats_b.n()))
+<a href=#188 id=188 data-nosnippet>188</a>    }
+<a href=#189 id=189 data-nosnippet>189</a>
+<a href=#190 id=190 data-nosnippet>190</a>    <span class="doccomment">/// Return names of all registered experiments.
+<a href=#191 id=191 data-nosnippet>191</a>    </span><span class="kw">pub fn </span>experiment_names(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Vec&lt;String&gt; {
+<a href=#192 id=192 data-nosnippet>192</a>        <span class="self">self</span>.experiments.iter().map(|e| e.key().clone()).collect()
+<a href=#193 id=193 data-nosnippet>193</a>    }
+<a href=#194 id=194 data-nosnippet>194</a>
+<a href=#195 id=195 data-nosnippet>195</a>    <span class="doccomment">/// Return current means for both variants.
+<a href=#196 id=196 data-nosnippet>196</a>    </span><span class="kw">pub fn </span>current_means(<span class="kw-2">&amp;</span><span class="self">self</span>, name: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Option</span>&lt;(f64, f64)&gt; {
+<a href=#197 id=197 data-nosnippet>197</a>        <span class="kw">let </span>exp = <span class="self">self</span>.experiments.get(name)<span class="question-mark">?</span>;
+<a href=#198 id=198 data-nosnippet>198</a>        <span class="kw">let </span>guard = exp.lock();
+<a href=#199 id=199 data-nosnippet>199</a>        <span class="prelude-val">Some</span>((guard.stats_a.mean(), guard.stats_b.mean()))
+<a href=#200 id=200 data-nosnippet>200</a>    }
+<a href=#201 id=201 data-nosnippet>201</a>}
+<a href=#202 id=202 data-nosnippet>202</a>
+<a href=#203 id=203 data-nosnippet>203</a><span class="kw">fn </span>welch_t_test(a: <span class="kw-2">&amp;</span>LegacyVariantStats, b: <span class="kw-2">&amp;</span>LegacyVariantStats) -&gt; AbTestResult {
+<a href=#204 id=204 data-nosnippet>204</a>    <span class="kw">let </span>na = a.n() <span class="kw">as </span>f64;
+<a href=#205 id=205 data-nosnippet>205</a>    <span class="kw">let </span>nb = b.n() <span class="kw">as </span>f64;
+<a href=#206 id=206 data-nosnippet>206</a>    <span class="kw">let </span>mean_a = a.mean();
+<a href=#207 id=207 data-nosnippet>207</a>    <span class="kw">let </span>mean_b = b.mean();
+<a href=#208 id=208 data-nosnippet>208</a>    <span class="kw">let </span>var_a = a.variance();
+<a href=#209 id=209 data-nosnippet>209</a>    <span class="kw">let </span>var_b = b.variance();
+<a href=#210 id=210 data-nosnippet>210</a>    <span class="kw">let </span>se_sq_a = var_a / na;
+<a href=#211 id=211 data-nosnippet>211</a>    <span class="kw">let </span>se_sq_b = var_b / nb;
+<a href=#212 id=212 data-nosnippet>212</a>    <span class="kw">let </span>se = (se_sq_a + se_sq_b).sqrt();
+<a href=#213 id=213 data-nosnippet>213</a>    <span class="kw">let </span>(p_value, winner) = <span class="kw">if </span>se &lt; f64::EPSILON {
+<a href=#214 id=214 data-nosnippet>214</a>        (<span class="number">1.0_f64</span>, <span class="prelude-val">None</span>)
+<a href=#215 id=215 data-nosnippet>215</a>    } <span class="kw">else </span>{
+<a href=#216 id=216 data-nosnippet>216</a>        <span class="kw">let </span>t = (mean_a - mean_b) / se;
+<a href=#217 id=217 data-nosnippet>217</a>        <span class="kw">let </span>df_num = (se_sq_a + se_sq_b).powi(<span class="number">2</span>);
+<a href=#218 id=218 data-nosnippet>218</a>        <span class="kw">let </span>df_den = se_sq_a.powi(<span class="number">2</span>) / (na - <span class="number">1.0</span>) + se_sq_b.powi(<span class="number">2</span>) / (nb - <span class="number">1.0</span>);
+<a href=#219 id=219 data-nosnippet>219</a>        <span class="kw">let </span>df = <span class="kw">if </span>df_den &lt; f64::EPSILON { <span class="number">1.0 </span>} <span class="kw">else </span>{ df_num / df_den };
+<a href=#220 id=220 data-nosnippet>220</a>        <span class="kw">let </span>p = two_tailed_p_legacy(t, df);
+<a href=#221 id=221 data-nosnippet>221</a>        <span class="kw">let </span>w = <span class="kw">if </span>p &lt;= <span class="number">0.05 </span>{
+<a href=#222 id=222 data-nosnippet>222</a>            <span class="kw">if </span>mean_a &gt; mean_b { <span class="prelude-val">Some</span>(Variant::A) } <span class="kw">else </span>{ <span class="prelude-val">Some</span>(Variant::B) }
+<a href=#223 id=223 data-nosnippet>223</a>        } <span class="kw">else </span>{ <span class="prelude-val">None </span>};
+<a href=#224 id=224 data-nosnippet>224</a>        (p, w)
+<a href=#225 id=225 data-nosnippet>225</a>    };
+<a href=#226 id=226 data-nosnippet>226</a>    <span class="kw">let </span>pooled_var = ((na - <span class="number">1.0</span>) * var_a + (nb - <span class="number">1.0</span>) * var_b) / (na + nb - <span class="number">2.0</span>);
+<a href=#227 id=227 data-nosnippet>227</a>    <span class="kw">let </span>pooled_sd = pooled_var.sqrt();
+<a href=#228 id=228 data-nosnippet>228</a>    <span class="kw">let </span>effect_size = <span class="kw">if </span>pooled_sd &lt; f64::EPSILON { <span class="number">0.0 </span>} <span class="kw">else </span>{ (mean_a - mean_b) / pooled_sd };
+<a href=#229 id=229 data-nosnippet>229</a>    <span class="kw">let </span>confidence = (<span class="number">1.0 </span>- p_value).clamp(<span class="number">0.0</span>, <span class="number">1.0</span>);
+<a href=#230 id=230 data-nosnippet>230</a>    AbTestResult { winner, confidence, p_value, effect_size, samples_a: a.n(), samples_b: b.n(), mean_a, mean_b }
+<a href=#231 id=231 data-nosnippet>231</a>}
+<a href=#232 id=232 data-nosnippet>232</a>
+<a href=#233 id=233 data-nosnippet>233</a><span class="kw">fn </span>two_tailed_p_legacy(t: f64, df: f64) -&gt; f64 {
+<a href=#234 id=234 data-nosnippet>234</a>    <span class="kw">let </span>t2 = t * t;
+<a href=#235 id=235 data-nosnippet>235</a>    <span class="kw">let </span>x = df / (df + t2);
+<a href=#236 id=236 data-nosnippet>236</a>    <span class="kw">let </span>p_one_tail = regularised_incomplete_beta_legacy(x, df / <span class="number">2.0</span>, <span class="number">0.5</span>) / <span class="number">2.0</span>;
+<a href=#237 id=237 data-nosnippet>237</a>    (<span class="number">2.0 </span>* p_one_tail).clamp(<span class="number">0.0</span>, <span class="number">1.0</span>)
+<a href=#238 id=238 data-nosnippet>238</a>}
+<a href=#239 id=239 data-nosnippet>239</a>
+<a href=#240 id=240 data-nosnippet>240</a><span class="kw">fn </span>regularised_incomplete_beta_legacy(x: f64, a: f64, b: f64) -&gt; f64 {
+<a href=#241 id=241 data-nosnippet>241</a>    <span class="kw">if </span>x &lt;= <span class="number">0.0 </span>{ <span class="kw">return </span><span class="number">0.0</span>; }
+<a href=#242 id=242 data-nosnippet>242</a>    <span class="kw">if </span>x &gt;= <span class="number">1.0 </span>{ <span class="kw">return </span><span class="number">1.0</span>; }
+<a href=#243 id=243 data-nosnippet>243</a>    <span class="kw">if </span>x &gt; (a + <span class="number">1.0</span>) / (a + b + <span class="number">2.0</span>) {
+<a href=#244 id=244 data-nosnippet>244</a>        <span class="kw">return </span><span class="number">1.0 </span>- regularised_incomplete_beta_legacy(<span class="number">1.0 </span>- x, b, a);
+<a href=#245 id=245 data-nosnippet>245</a>    }
+<a href=#246 id=246 data-nosnippet>246</a>    <span class="kw">let </span>ln_beta_val = ln_gamma_legacy(a) + ln_gamma_legacy(b) - ln_gamma_legacy(a + b);
+<a href=#247 id=247 data-nosnippet>247</a>    <span class="kw">let </span>front = (x.ln() * a + (<span class="number">1.0 </span>- x).ln() * b - ln_beta_val).exp() / a;
+<a href=#248 id=248 data-nosnippet>248</a>    <span class="kw">let </span><span class="kw-2">mut </span>c = <span class="number">1.0_f64</span>;
+<a href=#249 id=249 data-nosnippet>249</a>    <span class="kw">let </span><span class="kw-2">mut </span>d = <span class="number">1.0 </span>- (a + b) * x / (a + <span class="number">1.0</span>);
+<a href=#250 id=250 data-nosnippet>250</a>    d = <span class="kw">if </span>d.abs() &lt; <span class="number">1e-30 </span>{ <span class="number">1e-30 </span>} <span class="kw">else </span>{ <span class="number">1.0 </span>/ d };
+<a href=#251 id=251 data-nosnippet>251</a>    <span class="kw">let </span><span class="kw-2">mut </span>f = d;
+<a href=#252 id=252 data-nosnippet>252</a>    <span class="kw">for </span>m <span class="kw">in </span><span class="number">1_u32</span>..=<span class="number">200 </span>{
+<a href=#253 id=253 data-nosnippet>253</a>        <span class="kw">let </span>mf = m <span class="kw">as </span>f64;
+<a href=#254 id=254 data-nosnippet>254</a>        <span class="kw">let </span>num_even = mf * (b - mf) * x / ((a + <span class="number">2.0 </span>* mf - <span class="number">1.0</span>) * (a + <span class="number">2.0 </span>* mf));
+<a href=#255 id=255 data-nosnippet>255</a>        d = <span class="number">1.0 </span>+ num_even * d;
+<a href=#256 id=256 data-nosnippet>256</a>        d = <span class="kw">if </span>d.abs() &lt; <span class="number">1e-30 </span>{ <span class="number">1e-30 </span>} <span class="kw">else </span>{ <span class="number">1.0 </span>/ d };
+<a href=#257 id=257 data-nosnippet>257</a>        c = <span class="number">1.0 </span>+ num_even / c;
+<a href=#258 id=258 data-nosnippet>258</a>        c = <span class="kw">if </span>c.abs() &lt; <span class="number">1e-30 </span>{ <span class="number">1e-30 </span>} <span class="kw">else </span>{ c };
+<a href=#259 id=259 data-nosnippet>259</a>        f <span class="kw-2">*</span>= c * d;
+<a href=#260 id=260 data-nosnippet>260</a>        <span class="kw">let </span>num_odd = -(a + mf) * (a + b + mf) * x / ((a + <span class="number">2.0 </span>* mf) * (a + <span class="number">2.0 </span>* mf + <span class="number">1.0</span>));
+<a href=#261 id=261 data-nosnippet>261</a>        d = <span class="number">1.0 </span>+ num_odd * d;
+<a href=#262 id=262 data-nosnippet>262</a>        d = <span class="kw">if </span>d.abs() &lt; <span class="number">1e-30 </span>{ <span class="number">1e-30 </span>} <span class="kw">else </span>{ <span class="number">1.0 </span>/ d };
+<a href=#263 id=263 data-nosnippet>263</a>        c = <span class="number">1.0 </span>+ num_odd / c;
+<a href=#264 id=264 data-nosnippet>264</a>        c = <span class="kw">if </span>c.abs() &lt; <span class="number">1e-30 </span>{ <span class="number">1e-30 </span>} <span class="kw">else </span>{ c };
+<a href=#265 id=265 data-nosnippet>265</a>        <span class="kw">let </span>delta = c * d;
+<a href=#266 id=266 data-nosnippet>266</a>        f <span class="kw-2">*</span>= delta;
+<a href=#267 id=267 data-nosnippet>267</a>        <span class="kw">if </span>(delta - <span class="number">1.0</span>).abs() &lt; <span class="number">1e-10 </span>{ <span class="kw">break</span>; }
+<a href=#268 id=268 data-nosnippet>268</a>    }
+<a href=#269 id=269 data-nosnippet>269</a>    front * f
+<a href=#270 id=270 data-nosnippet>270</a>}
+<a href=#271 id=271 data-nosnippet>271</a>
+<a href=#272 id=272 data-nosnippet>272</a><span class="kw">fn </span>ln_gamma_legacy(x: f64) -&gt; f64 {
+<a href=#273 id=273 data-nosnippet>273</a>    <span class="kw">const </span>G: f64 = <span class="number">7.0</span>;
+<a href=#274 id=274 data-nosnippet>274</a>    <span class="kw">const </span>C: [f64; <span class="number">9</span>] = [
+<a href=#275 id=275 data-nosnippet>275</a>        <span class="number">0.999_999_999_999_809_9</span>, <span class="number">676.520_368_121_885_1</span>, -<span class="number">1_259.139_216_722_402_8</span>,
+<a href=#276 id=276 data-nosnippet>276</a>        <span class="number">771.323_428_777_653_1</span>, -<span class="number">176.615_029_162_140_6</span>, <span class="number">12.507_343_278_686_905</span>,
+<a href=#277 id=277 data-nosnippet>277</a>        -<span class="number">0.138_571_095_265_720_1</span>, <span class="number">9.984_369_578_019_572e-6</span>, <span class="number">1.505_632_735_149_312_4e-7</span>,
+<a href=#278 id=278 data-nosnippet>278</a>    ];
+<a href=#279 id=279 data-nosnippet>279</a>    <span class="kw">if </span>x &lt; <span class="number">0.5 </span>{
+<a href=#280 id=280 data-nosnippet>280</a>        <span class="kw">return </span>std::f64::consts::PI.ln() - (std::f64::consts::PI * x).sin().ln() - ln_gamma_legacy(<span class="number">1.0 </span>- x);
+<a href=#281 id=281 data-nosnippet>281</a>    }
+<a href=#282 id=282 data-nosnippet>282</a>    <span class="kw">let </span>z = x - <span class="number">1.0</span>;
+<a href=#283 id=283 data-nosnippet>283</a>    <span class="kw">let </span><span class="kw-2">mut </span>sum = C[<span class="number">0</span>];
+<a href=#284 id=284 data-nosnippet>284</a>    <span class="kw">for </span>(i, <span class="kw-2">&amp;</span>ci) <span class="kw">in </span>C.iter().enumerate().skip(<span class="number">1</span>) { sum += ci / (z + i <span class="kw">as </span>f64); }
+<a href=#285 id=285 data-nosnippet>285</a>    <span class="kw">let </span>t = z + G + <span class="number">0.5</span>;
+<a href=#286 id=286 data-nosnippet>286</a>    <span class="number">0.5 </span>* std::f64::consts::TAU.ln() + (z + <span class="number">0.5</span>) * t.ln() - t + sum.ln()
+<a href=#287 id=287 data-nosnippet>287</a>}
+<a href=#288 id=288 data-nosnippet>288</a>
+<a href=#289 id=289 data-nosnippet>289</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#290 id=290 data-nosnippet>290</a>// NEW SPEC IMPLEMENTATION
+<a href=#291 id=291 data-nosnippet>291</a>// ---------------------------------------------------------------------------
+<a href=#292 id=292 data-nosnippet>292</a>
+<a href=#293 id=293 data-nosnippet>293</a></span><span class="doccomment">/// A single variant in an experiment.
+<a href=#294 id=294 data-nosnippet>294</a></span><span class="attr">#[derive(Debug, Clone)]
+<a href=#295 id=295 data-nosnippet>295</a></span><span class="kw">pub struct </span>ExperimentVariantSpec {
+<a href=#296 id=296 data-nosnippet>296</a>    <span class="doccomment">/// Unique variant identifier.
+<a href=#297 id=297 data-nosnippet>297</a>    </span><span class="kw">pub </span>id: String,
+<a href=#298 id=298 data-nosnippet>298</a>    <span class="doccomment">/// Human-readable name.
+<a href=#299 id=299 data-nosnippet>299</a>    </span><span class="kw">pub </span>name: String,
+<a href=#300 id=300 data-nosnippet>300</a>    <span class="doccomment">/// Relative weight for traffic split (e.g. 1.0 = equal share).
+<a href=#301 id=301 data-nosnippet>301</a>    </span><span class="kw">pub </span>weight: f64,
+<a href=#302 id=302 data-nosnippet>302</a>    <span class="doccomment">/// Optional model override for this variant.
+<a href=#303 id=303 data-nosnippet>303</a>    </span><span class="kw">pub </span>model_id: <span class="prelude-ty">Option</span>&lt;String&gt;,
+<a href=#304 id=304 data-nosnippet>304</a>    <span class="doccomment">/// Optional prompt template override.
+<a href=#305 id=305 data-nosnippet>305</a>    </span><span class="kw">pub </span>prompt_template: <span class="prelude-ty">Option</span>&lt;String&gt;,
+<a href=#306 id=306 data-nosnippet>306</a>    <span class="doccomment">/// Arbitrary config key-value pairs.
+<a href=#307 id=307 data-nosnippet>307</a>    </span><span class="kw">pub </span>config: HashMap&lt;String, String&gt;,
+<a href=#308 id=308 data-nosnippet>308</a>}
+<a href=#309 id=309 data-nosnippet>309</a>
+<a href=#310 id=310 data-nosnippet>310</a><span class="doccomment">/// Status of an experiment lifecycle.
+<a href=#311 id=311 data-nosnippet>311</a></span><span class="attr">#[derive(Debug, Clone, PartialEq, Eq)]
+<a href=#312 id=312 data-nosnippet>312</a></span><span class="kw">pub enum </span>ExperimentStatus {
+<a href=#313 id=313 data-nosnippet>313</a>    <span class="doccomment">/// Not yet started.
+<a href=#314 id=314 data-nosnippet>314</a>    </span>Draft,
+<a href=#315 id=315 data-nosnippet>315</a>    <span class="doccomment">/// Currently collecting samples.
+<a href=#316 id=316 data-nosnippet>316</a>    </span>Running,
+<a href=#317 id=317 data-nosnippet>317</a>    <span class="doccomment">/// Temporarily paused.
+<a href=#318 id=318 data-nosnippet>318</a>    </span>Paused,
+<a href=#319 id=319 data-nosnippet>319</a>    <span class="doccomment">/// Finished normally.
+<a href=#320 id=320 data-nosnippet>320</a>    </span>Completed,
+<a href=#321 id=321 data-nosnippet>321</a>    <span class="doccomment">/// Stopped early.
+<a href=#322 id=322 data-nosnippet>322</a>    </span>Aborted,
+<a href=#323 id=323 data-nosnippet>323</a>}
+<a href=#324 id=324 data-nosnippet>324</a>
+<a href=#325 id=325 data-nosnippet>325</a><span class="doccomment">/// Condition that triggers automatic experiment completion.
+<a href=#326 id=326 data-nosnippet>326</a></span><span class="attr">#[derive(Debug, Clone)]
+<a href=#327 id=327 data-nosnippet>327</a></span><span class="kw">pub enum </span>EndCondition {
+<a href=#328 id=328 data-nosnippet>328</a>    <span class="doccomment">/// Stop after a fixed number of total samples.
+<a href=#329 id=329 data-nosnippet>329</a>    </span>FixedSamples(u64),
+<a href=#330 id=330 data-nosnippet>330</a>    <span class="doccomment">/// Stop after a fixed duration in seconds.
+<a href=#331 id=331 data-nosnippet>331</a>    </span>FixedDuration(u64),
+<a href=#332 id=332 data-nosnippet>332</a>    <span class="doccomment">/// Never auto-stop — must be stopped manually.
+<a href=#333 id=333 data-nosnippet>333</a>    </span>ManualStop,
+<a href=#334 id=334 data-nosnippet>334</a>    <span class="doccomment">/// Stop when statistical significance is reached.
+<a href=#335 id=335 data-nosnippet>335</a>    </span>StatisticalSignificance {
+<a href=#336 id=336 data-nosnippet>336</a>        <span class="doccomment">/// Minimum samples per variant before checking.
+<a href=#337 id=337 data-nosnippet>337</a>        </span>min_samples: u64,
+<a href=#338 id=338 data-nosnippet>338</a>        <span class="doccomment">/// Required confidence level (e.g. 0.95).
+<a href=#339 id=339 data-nosnippet>339</a>        </span>confidence: f64,
+<a href=#340 id=340 data-nosnippet>340</a>    },
+<a href=#341 id=341 data-nosnippet>341</a>}
+<a href=#342 id=342 data-nosnippet>342</a>
+<a href=#343 id=343 data-nosnippet>343</a><span class="doccomment">/// A multi-variant experiment definition.
+<a href=#344 id=344 data-nosnippet>344</a></span><span class="attr">#[derive(Debug, Clone)]
+<a href=#345 id=345 data-nosnippet>345</a></span><span class="kw">pub struct </span>Experiment {
+<a href=#346 id=346 data-nosnippet>346</a>    <span class="doccomment">/// Unique experiment identifier.
+<a href=#347 id=347 data-nosnippet>347</a>    </span><span class="kw">pub </span>id: String,
+<a href=#348 id=348 data-nosnippet>348</a>    <span class="doccomment">/// Human-readable name.
+<a href=#349 id=349 data-nosnippet>349</a>    </span><span class="kw">pub </span>name: String,
+<a href=#350 id=350 data-nosnippet>350</a>    <span class="doccomment">/// The variants to test.
+<a href=#351 id=351 data-nosnippet>351</a>    </span><span class="kw">pub </span>variants: Vec&lt;ExperimentVariantSpec&gt;,
+<a href=#352 id=352 data-nosnippet>352</a>    <span class="doccomment">/// Current lifecycle status.
+<a href=#353 id=353 data-nosnippet>353</a>    </span><span class="kw">pub </span>status: ExperimentStatus,
+<a href=#354 id=354 data-nosnippet>354</a>    <span class="doccomment">/// Unix timestamp when the experiment was created.
+<a href=#355 id=355 data-nosnippet>355</a>    </span><span class="kw">pub </span>created_at: u64,
+<a href=#356 id=356 data-nosnippet>356</a>    <span class="doccomment">/// Condition that triggers automatic completion.
+<a href=#357 id=357 data-nosnippet>357</a>    </span><span class="kw">pub </span>end_condition: EndCondition,
+<a href=#358 id=358 data-nosnippet>358</a>}
+<a href=#359 id=359 data-nosnippet>359</a>
+<a href=#360 id=360 data-nosnippet>360</a><span class="doccomment">/// Records that a user was assigned to a specific variant.
+<a href=#361 id=361 data-nosnippet>361</a></span><span class="attr">#[derive(Debug, Clone)]
+<a href=#362 id=362 data-nosnippet>362</a></span><span class="kw">pub struct </span>Assignment {
+<a href=#363 id=363 data-nosnippet>363</a>    <span class="doccomment">/// Experiment this assignment belongs to.
+<a href=#364 id=364 data-nosnippet>364</a>    </span><span class="kw">pub </span>experiment_id: String,
+<a href=#365 id=365 data-nosnippet>365</a>    <span class="doccomment">/// Variant the user was assigned to.
+<a href=#366 id=366 data-nosnippet>366</a>    </span><span class="kw">pub </span>variant_id: String,
+<a href=#367 id=367 data-nosnippet>367</a>    <span class="doccomment">/// User identifier.
+<a href=#368 id=368 data-nosnippet>368</a>    </span><span class="kw">pub </span>user_id: String,
+<a href=#369 id=369 data-nosnippet>369</a>    <span class="doccomment">/// Unix timestamp of assignment.
+<a href=#370 id=370 data-nosnippet>370</a>    </span><span class="kw">pub </span>assigned_at: u64,
+<a href=#371 id=371 data-nosnippet>371</a>}
+<a href=#372 id=372 data-nosnippet>372</a>
+<a href=#373 id=373 data-nosnippet>373</a><span class="doccomment">/// Aggregated results for one variant.
+<a href=#374 id=374 data-nosnippet>374</a></span><span class="attr">#[derive(Debug, Clone)]
+<a href=#375 id=375 data-nosnippet>375</a></span><span class="kw">pub struct </span>ExperimentResult {
+<a href=#376 id=376 data-nosnippet>376</a>    <span class="doccomment">/// Variant this result belongs to.
+<a href=#377 id=377 data-nosnippet>377</a>    </span><span class="kw">pub </span>variant_id: String,
+<a href=#378 id=378 data-nosnippet>378</a>    <span class="doccomment">/// Total number of observations.
+<a href=#379 id=379 data-nosnippet>379</a>    </span><span class="kw">pub </span>samples: u64,
+<a href=#380 id=380 data-nosnippet>380</a>    <span class="doccomment">/// Number of successful outcomes.
+<a href=#381 id=381 data-nosnippet>381</a>    </span><span class="kw">pub </span>successes: u64,
+<a href=#382 id=382 data-nosnippet>382</a>    <span class="doccomment">/// Total cost accumulated.
+<a href=#383 id=383 data-nosnippet>383</a>    </span><span class="kw">pub </span>total_cost: f64,
+<a href=#384 id=384 data-nosnippet>384</a>    <span class="doccomment">/// Average latency in milliseconds.
+<a href=#385 id=385 data-nosnippet>385</a>    </span><span class="kw">pub </span>avg_latency_ms: f64,
+<a href=#386 id=386 data-nosnippet>386</a>    <span class="doccomment">/// Fraction of samples that were successful.
+<a href=#387 id=387 data-nosnippet>387</a>    </span><span class="kw">pub </span>conversion_rate: f64,
+<a href=#388 id=388 data-nosnippet>388</a>}
+<a href=#389 id=389 data-nosnippet>389</a>
+<a href=#390 id=390 data-nosnippet>390</a><span class="doccomment">/// Per-variant mutable state stored inside `AbTestManager`.
+<a href=#391 id=391 data-nosnippet>391</a></span><span class="attr">#[derive(Debug, Default, Clone)]
+<a href=#392 id=392 data-nosnippet>392</a></span><span class="kw">struct </span>VariantState {
+<a href=#393 id=393 data-nosnippet>393</a>    samples: u64,
+<a href=#394 id=394 data-nosnippet>394</a>    successes: u64,
+<a href=#395 id=395 data-nosnippet>395</a>    total_cost: f64,
+<a href=#396 id=396 data-nosnippet>396</a>    total_latency_ms: u64,
+<a href=#397 id=397 data-nosnippet>397</a>}
+<a href=#398 id=398 data-nosnippet>398</a>
+<a href=#399 id=399 data-nosnippet>399</a><span class="kw">struct </span>ExperimentState {
+<a href=#400 id=400 data-nosnippet>400</a>    experiment: Experiment,
+<a href=#401 id=401 data-nosnippet>401</a>    variants: HashMap&lt;String, VariantState&gt;,
+<a href=#402 id=402 data-nosnippet>402</a>    <span class="doccomment">/// Total samples across all variants (for FixedSamples end condition).
+<a href=#403 id=403 data-nosnippet>403</a>    </span>total_samples: u64,
+<a href=#404 id=404 data-nosnippet>404</a>}
+<a href=#405 id=405 data-nosnippet>405</a>
+<a href=#406 id=406 data-nosnippet>406</a><span class="doccomment">/// Manages multi-variant A/B experiments.
+<a href=#407 id=407 data-nosnippet>407</a></span><span class="kw">pub struct </span>AbTestManager {
+<a href=#408 id=408 data-nosnippet>408</a>    experiments: HashMap&lt;String, ExperimentState&gt;,
+<a href=#409 id=409 data-nosnippet>409</a>}
+<a href=#410 id=410 data-nosnippet>410</a>
+<a href=#411 id=411 data-nosnippet>411</a><span class="kw">impl </span>AbTestManager {
+<a href=#412 id=412 data-nosnippet>412</a>    <span class="doccomment">/// Create an empty manager.
+<a href=#413 id=413 data-nosnippet>413</a>    </span><span class="kw">pub fn </span>new() -&gt; <span class="self">Self </span>{
+<a href=#414 id=414 data-nosnippet>414</a>        <span class="self">Self </span>{ experiments: HashMap::new() }
+<a href=#415 id=415 data-nosnippet>415</a>    }
+<a href=#416 id=416 data-nosnippet>416</a>
+<a href=#417 id=417 data-nosnippet>417</a>    <span class="doccomment">/// Register a new experiment.
+<a href=#418 id=418 data-nosnippet>418</a>    </span><span class="kw">pub fn </span>create_experiment(<span class="kw-2">&amp;mut </span><span class="self">self</span>, experiment: Experiment) {
+<a href=#419 id=419 data-nosnippet>419</a>        <span class="kw">let </span><span class="kw-2">mut </span>variants: HashMap&lt;String, VariantState&gt; = HashMap::new();
+<a href=#420 id=420 data-nosnippet>420</a>        <span class="kw">for </span>v <span class="kw">in </span><span class="kw-2">&amp;</span>experiment.variants {
+<a href=#421 id=421 data-nosnippet>421</a>            variants.insert(v.id.clone(), VariantState::default());
+<a href=#422 id=422 data-nosnippet>422</a>        }
+<a href=#423 id=423 data-nosnippet>423</a>        <span class="self">self</span>.experiments.insert(experiment.id.clone(), ExperimentState {
+<a href=#424 id=424 data-nosnippet>424</a>            experiment,
+<a href=#425 id=425 data-nosnippet>425</a>            variants,
+<a href=#426 id=426 data-nosnippet>426</a>            total_samples: <span class="number">0</span>,
+<a href=#427 id=427 data-nosnippet>427</a>        });
+<a href=#428 id=428 data-nosnippet>428</a>    }
+<a href=#429 id=429 data-nosnippet>429</a>
+<a href=#430 id=430 data-nosnippet>430</a>    <span class="doccomment">/// Deterministically assign a user to a variant using weighted FNV hash.
+<a href=#431 id=431 data-nosnippet>431</a>    ///
+<a href=#432 id=432 data-nosnippet>432</a>    /// Returns `None` if the experiment doesn't exist or is not Running.
+<a href=#433 id=433 data-nosnippet>433</a>    </span><span class="kw">pub fn </span>assign(<span class="kw-2">&amp;</span><span class="self">self</span>, experiment_id: <span class="kw-2">&amp;</span>str, user_id: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Option</span>&lt;Assignment&gt; {
+<a href=#434 id=434 data-nosnippet>434</a>        <span class="kw">let </span>state = <span class="self">self</span>.experiments.get(experiment_id)<span class="question-mark">?</span>;
+<a href=#435 id=435 data-nosnippet>435</a>        <span class="kw">if </span>state.experiment.status != ExperimentStatus::Running {
+<a href=#436 id=436 data-nosnippet>436</a>            <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#437 id=437 data-nosnippet>437</a>        }
+<a href=#438 id=438 data-nosnippet>438</a>        <span class="kw">let </span>variants = <span class="kw-2">&amp;</span>state.experiment.variants;
+<a href=#439 id=439 data-nosnippet>439</a>        <span class="kw">if </span>variants.is_empty() {
+<a href=#440 id=440 data-nosnippet>440</a>            <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#441 id=441 data-nosnippet>441</a>        }
+<a href=#442 id=442 data-nosnippet>442</a>        <span class="kw">let </span>total_weight: f64 = variants.iter().map(|v| v.weight.max(<span class="number">0.0</span>)).sum();
+<a href=#443 id=443 data-nosnippet>443</a>        <span class="kw">if </span>total_weight &lt;= <span class="number">0.0 </span>{
+<a href=#444 id=444 data-nosnippet>444</a>            <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#445 id=445 data-nosnippet>445</a>        }
+<a href=#446 id=446 data-nosnippet>446</a>
+<a href=#447 id=447 data-nosnippet>447</a>        <span class="comment">// FNV-1a hash of user_id + experiment_id
+<a href=#448 id=448 data-nosnippet>448</a>        </span><span class="kw">let </span>hash = fnv1a_64_pair(user_id.as_bytes(), experiment_id.as_bytes());
+<a href=#449 id=449 data-nosnippet>449</a>        <span class="comment">// Map to [0.0, total_weight)
+<a href=#450 id=450 data-nosnippet>450</a>        </span><span class="kw">let </span>bucket = (hash <span class="kw">as </span>f64 / u64::MAX <span class="kw">as </span>f64) * total_weight;
+<a href=#451 id=451 data-nosnippet>451</a>
+<a href=#452 id=452 data-nosnippet>452</a>        <span class="kw">let </span><span class="kw-2">mut </span>cumulative = <span class="number">0.0</span>;
+<a href=#453 id=453 data-nosnippet>453</a>        <span class="kw">let </span><span class="kw-2">mut </span>selected_variant_id = <span class="kw-2">&amp;</span>variants[<span class="number">0</span>].id;
+<a href=#454 id=454 data-nosnippet>454</a>        <span class="kw">for </span>v <span class="kw">in </span>variants {
+<a href=#455 id=455 data-nosnippet>455</a>            cumulative += v.weight.max(<span class="number">0.0</span>);
+<a href=#456 id=456 data-nosnippet>456</a>            <span class="kw">if </span>bucket &lt; cumulative {
+<a href=#457 id=457 data-nosnippet>457</a>                selected_variant_id = <span class="kw-2">&amp;</span>v.id;
+<a href=#458 id=458 data-nosnippet>458</a>                <span class="kw">break</span>;
+<a href=#459 id=459 data-nosnippet>459</a>            }
+<a href=#460 id=460 data-nosnippet>460</a>        }
+<a href=#461 id=461 data-nosnippet>461</a>
+<a href=#462 id=462 data-nosnippet>462</a>        <span class="prelude-val">Some</span>(Assignment {
+<a href=#463 id=463 data-nosnippet>463</a>            experiment_id: experiment_id.to_string(),
+<a href=#464 id=464 data-nosnippet>464</a>            variant_id: selected_variant_id.clone(),
+<a href=#465 id=465 data-nosnippet>465</a>            user_id: user_id.to_string(),
+<a href=#466 id=466 data-nosnippet>466</a>            assigned_at: <span class="number">0</span>, <span class="comment">// caller fills in timestamp
+<a href=#467 id=467 data-nosnippet>467</a>        </span>})
+<a href=#468 id=468 data-nosnippet>468</a>    }
+<a href=#469 id=469 data-nosnippet>469</a>
+<a href=#470 id=470 data-nosnippet>470</a>    <span class="doccomment">/// Record an outcome for a previously made assignment.
+<a href=#471 id=471 data-nosnippet>471</a>    </span><span class="kw">pub fn </span>record_outcome(<span class="kw-2">&amp;mut </span><span class="self">self</span>, assignment: <span class="kw-2">&amp;</span>Assignment, success: bool, cost: f64, latency_ms: u64) {
+<a href=#472 id=472 data-nosnippet>472</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(state) = <span class="self">self</span>.experiments.get_mut(<span class="kw-2">&amp;</span>assignment.experiment_id) {
+<a href=#473 id=473 data-nosnippet>473</a>            <span class="kw">if let </span><span class="prelude-val">Some</span>(vs) = state.variants.get_mut(<span class="kw-2">&amp;</span>assignment.variant_id) {
+<a href=#474 id=474 data-nosnippet>474</a>                vs.samples += <span class="number">1</span>;
+<a href=#475 id=475 data-nosnippet>475</a>                <span class="kw">if </span>success { vs.successes += <span class="number">1</span>; }
+<a href=#476 id=476 data-nosnippet>476</a>                vs.total_cost += cost;
+<a href=#477 id=477 data-nosnippet>477</a>                vs.total_latency_ms += latency_ms;
+<a href=#478 id=478 data-nosnippet>478</a>                state.total_samples += <span class="number">1</span>;
+<a href=#479 id=479 data-nosnippet>479</a>            }
+<a href=#480 id=480 data-nosnippet>480</a>        }
+<a href=#481 id=481 data-nosnippet>481</a>    }
+<a href=#482 id=482 data-nosnippet>482</a>
+<a href=#483 id=483 data-nosnippet>483</a>    <span class="doccomment">/// Return aggregated results for all variants in an experiment.
+<a href=#484 id=484 data-nosnippet>484</a>    </span><span class="kw">pub fn </span>results(<span class="kw-2">&amp;</span><span class="self">self</span>, experiment_id: <span class="kw-2">&amp;</span>str) -&gt; Vec&lt;ExperimentResult&gt; {
+<a href=#485 id=485 data-nosnippet>485</a>        <span class="kw">let </span><span class="prelude-val">Some</span>(state) = <span class="self">self</span>.experiments.get(experiment_id) <span class="kw">else </span>{ <span class="kw">return </span><span class="macro">vec!</span>[]; };
+<a href=#486 id=486 data-nosnippet>486</a>        state.experiment.variants.iter().map(|v| {
+<a href=#487 id=487 data-nosnippet>487</a>            <span class="kw">let </span>vs = state.variants.get(<span class="kw-2">&amp;</span>v.id).cloned().unwrap_or_default();
+<a href=#488 id=488 data-nosnippet>488</a>            <span class="kw">let </span>conversion_rate = <span class="kw">if </span>vs.samples &gt; <span class="number">0 </span>{ vs.successes <span class="kw">as </span>f64 / vs.samples <span class="kw">as </span>f64 } <span class="kw">else </span>{ <span class="number">0.0 </span>};
+<a href=#489 id=489 data-nosnippet>489</a>            <span class="kw">let </span>avg_latency_ms = <span class="kw">if </span>vs.samples &gt; <span class="number">0 </span>{ vs.total_latency_ms <span class="kw">as </span>f64 / vs.samples <span class="kw">as </span>f64 } <span class="kw">else </span>{ <span class="number">0.0 </span>};
+<a href=#490 id=490 data-nosnippet>490</a>            ExperimentResult {
+<a href=#491 id=491 data-nosnippet>491</a>                variant_id: v.id.clone(),
+<a href=#492 id=492 data-nosnippet>492</a>                samples: vs.samples,
+<a href=#493 id=493 data-nosnippet>493</a>                successes: vs.successes,
+<a href=#494 id=494 data-nosnippet>494</a>                total_cost: vs.total_cost,
+<a href=#495 id=495 data-nosnippet>495</a>                avg_latency_ms,
+<a href=#496 id=496 data-nosnippet>496</a>                conversion_rate,
+<a href=#497 id=497 data-nosnippet>497</a>            }
+<a href=#498 id=498 data-nosnippet>498</a>        }).collect()
+<a href=#499 id=499 data-nosnippet>499</a>    }
+<a href=#500 id=500 data-nosnippet>500</a>
+<a href=#501 id=501 data-nosnippet>501</a>    <span class="doccomment">/// Two-proportion z-test significance.
+<a href=#502 id=502 data-nosnippet>502</a>    ///
+<a href=#503 id=503 data-nosnippet>503</a>    /// Returns p-value approximation using erfc: p = erfc(|z| / sqrt(2)).
+<a href=#504 id=504 data-nosnippet>504</a>    </span><span class="kw">pub fn </span>statistical_significance(r_a: <span class="kw-2">&amp;</span>ExperimentResult, r_b: <span class="kw-2">&amp;</span>ExperimentResult) -&gt; f64 {
+<a href=#505 id=505 data-nosnippet>505</a>        <span class="kw">let </span>n_a = r_a.samples <span class="kw">as </span>f64;
+<a href=#506 id=506 data-nosnippet>506</a>        <span class="kw">let </span>n_b = r_b.samples <span class="kw">as </span>f64;
+<a href=#507 id=507 data-nosnippet>507</a>        <span class="kw">if </span>n_a &lt; <span class="number">1.0 </span>|| n_b &lt; <span class="number">1.0 </span>{ <span class="kw">return </span><span class="number">1.0</span>; }
+<a href=#508 id=508 data-nosnippet>508</a>        <span class="kw">let </span>s_a = r_a.successes <span class="kw">as </span>f64;
+<a href=#509 id=509 data-nosnippet>509</a>        <span class="kw">let </span>s_b = r_b.successes <span class="kw">as </span>f64;
+<a href=#510 id=510 data-nosnippet>510</a>        <span class="kw">let </span>p_a = s_a / n_a;
+<a href=#511 id=511 data-nosnippet>511</a>        <span class="kw">let </span>p_b = s_b / n_b;
+<a href=#512 id=512 data-nosnippet>512</a>        <span class="kw">let </span>p_pool = (s_a + s_b) / (n_a + n_b);
+<a href=#513 id=513 data-nosnippet>513</a>        <span class="kw">let </span>denom = (p_pool * (<span class="number">1.0 </span>- p_pool) * (<span class="number">1.0 </span>/ n_a + <span class="number">1.0 </span>/ n_b)).sqrt();
+<a href=#514 id=514 data-nosnippet>514</a>        <span class="kw">if </span>denom &lt; f64::EPSILON { <span class="kw">return </span><span class="number">1.0</span>; }
+<a href=#515 id=515 data-nosnippet>515</a>        <span class="kw">let </span>z = (p_a - p_b) / denom;
+<a href=#516 id=516 data-nosnippet>516</a>        erfc_approx(z.abs() / std::f64::consts::SQRT_2)
+<a href=#517 id=517 data-nosnippet>517</a>    }
+<a href=#518 id=518 data-nosnippet>518</a>
+<a href=#519 id=519 data-nosnippet>519</a>    <span class="doccomment">/// Return the variant ID with the highest conversion rate if statistically
+<a href=#520 id=520 data-nosnippet>520</a>    /// significant (z &gt; 1.96 for p &lt; 0.05), or None.
+<a href=#521 id=521 data-nosnippet>521</a>    </span><span class="kw">pub fn </span>winner(<span class="kw-2">&amp;</span><span class="self">self</span>, experiment_id: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Option</span>&lt;String&gt; {
+<a href=#522 id=522 data-nosnippet>522</a>        <span class="kw">let </span>results = <span class="self">self</span>.results(experiment_id);
+<a href=#523 id=523 data-nosnippet>523</a>        <span class="kw">if </span>results.len() &lt; <span class="number">2 </span>{ <span class="kw">return </span><span class="prelude-val">None</span>; }
+<a href=#524 id=524 data-nosnippet>524</a>
+<a href=#525 id=525 data-nosnippet>525</a>        <span class="comment">// Find variant with highest conversion rate.
+<a href=#526 id=526 data-nosnippet>526</a>        </span><span class="kw">let </span>best = results.iter()
+<a href=#527 id=527 data-nosnippet>527</a>            .max_by(|a, b| a.conversion_rate.partial_cmp(<span class="kw-2">&amp;</span>b.conversion_rate).unwrap_or(std::cmp::Ordering::Equal))<span class="question-mark">?</span>;
+<a href=#528 id=528 data-nosnippet>528</a>
+<a href=#529 id=529 data-nosnippet>529</a>        <span class="comment">// Check significance vs second-best.
+<a href=#530 id=530 data-nosnippet>530</a>        </span><span class="kw">let </span>second = results.iter()
+<a href=#531 id=531 data-nosnippet>531</a>            .filter(|r| r.variant_id != best.variant_id)
+<a href=#532 id=532 data-nosnippet>532</a>            .max_by(|a, b| a.conversion_rate.partial_cmp(<span class="kw-2">&amp;</span>b.conversion_rate).unwrap_or(std::cmp::Ordering::Equal))<span class="question-mark">?</span>;
+<a href=#533 id=533 data-nosnippet>533</a>
+<a href=#534 id=534 data-nosnippet>534</a>        <span class="kw">let </span>p = <span class="self">Self</span>::statistical_significance(best, second);
+<a href=#535 id=535 data-nosnippet>535</a>        <span class="kw">if </span>p &lt; <span class="number">0.05 </span>{
+<a href=#536 id=536 data-nosnippet>536</a>            <span class="prelude-val">Some</span>(best.variant_id.clone())
+<a href=#537 id=537 data-nosnippet>537</a>        } <span class="kw">else </span>{
+<a href=#538 id=538 data-nosnippet>538</a>            <span class="prelude-val">None
+<a href=#539 id=539 data-nosnippet>539</a>        </span>}
+<a href=#540 id=540 data-nosnippet>540</a>    }
+<a href=#541 id=541 data-nosnippet>541</a>
+<a href=#542 id=542 data-nosnippet>542</a>    <span class="doccomment">/// Check end condition and mark experiment completed if met. Returns true if completed.
+<a href=#543 id=543 data-nosnippet>543</a>    </span><span class="kw">pub fn </span>auto_complete(<span class="kw-2">&amp;mut </span><span class="self">self</span>, experiment_id: <span class="kw-2">&amp;</span>str, now: u64) -&gt; bool {
+<a href=#544 id=544 data-nosnippet>544</a>        <span class="kw">let </span>state = <span class="kw">match </span><span class="self">self</span>.experiments.get_mut(experiment_id) {
+<a href=#545 id=545 data-nosnippet>545</a>            <span class="prelude-val">Some</span>(s) =&gt; s,
+<a href=#546 id=546 data-nosnippet>546</a>            <span class="prelude-val">None </span>=&gt; <span class="kw">return </span><span class="bool-val">false</span>,
+<a href=#547 id=547 data-nosnippet>547</a>        };
+<a href=#548 id=548 data-nosnippet>548</a>        <span class="kw">if </span>state.experiment.status != ExperimentStatus::Running {
+<a href=#549 id=549 data-nosnippet>549</a>            <span class="kw">return </span><span class="bool-val">false</span>;
+<a href=#550 id=550 data-nosnippet>550</a>        }
+<a href=#551 id=551 data-nosnippet>551</a>        <span class="kw">let </span>should_complete = <span class="kw">match </span><span class="kw-2">&amp;</span>state.experiment.end_condition {
+<a href=#552 id=552 data-nosnippet>552</a>            EndCondition::FixedSamples(n) =&gt; state.total_samples &gt;= <span class="kw-2">*</span>n,
+<a href=#553 id=553 data-nosnippet>553</a>            EndCondition::FixedDuration(secs) =&gt; now &gt;= state.experiment.created_at + secs,
+<a href=#554 id=554 data-nosnippet>554</a>            EndCondition::ManualStop =&gt; <span class="bool-val">false</span>,
+<a href=#555 id=555 data-nosnippet>555</a>            EndCondition::StatisticalSignificance { min_samples, confidence } =&gt; {
+<a href=#556 id=556 data-nosnippet>556</a>                <span class="kw">let </span>min = <span class="kw-2">*</span>min_samples;
+<a href=#557 id=557 data-nosnippet>557</a>                <span class="kw">let </span>required_confidence = <span class="kw-2">*</span>confidence;
+<a href=#558 id=558 data-nosnippet>558</a>                <span class="comment">// Check if all variants have min samples and any pair is significant.
+<a href=#559 id=559 data-nosnippet>559</a>                </span><span class="kw">let </span>all_have_min = state.variants.values().all(|v| v.samples &gt;= min);
+<a href=#560 id=560 data-nosnippet>560</a>                <span class="kw">if </span>!all_have_min { <span class="kw">return </span><span class="bool-val">false</span>; }
+<a href=#561 id=561 data-nosnippet>561</a>                <span class="comment">// Build results inline to avoid borrow issues.
+<a href=#562 id=562 data-nosnippet>562</a>                </span><span class="kw">let </span>results: Vec&lt;ExperimentResult&gt; = state.experiment.variants.iter().map(|v| {
+<a href=#563 id=563 data-nosnippet>563</a>                    <span class="kw">let </span>vs = state.variants.get(<span class="kw-2">&amp;</span>v.id).cloned().unwrap_or_default();
+<a href=#564 id=564 data-nosnippet>564</a>                    <span class="kw">let </span>conversion_rate = <span class="kw">if </span>vs.samples &gt; <span class="number">0 </span>{ vs.successes <span class="kw">as </span>f64 / vs.samples <span class="kw">as </span>f64 } <span class="kw">else </span>{ <span class="number">0.0 </span>};
+<a href=#565 id=565 data-nosnippet>565</a>                    <span class="kw">let </span>avg_latency_ms = <span class="kw">if </span>vs.samples &gt; <span class="number">0 </span>{ vs.total_latency_ms <span class="kw">as </span>f64 / vs.samples <span class="kw">as </span>f64 } <span class="kw">else </span>{ <span class="number">0.0 </span>};
+<a href=#566 id=566 data-nosnippet>566</a>                    ExperimentResult {
+<a href=#567 id=567 data-nosnippet>567</a>                        variant_id: v.id.clone(),
+<a href=#568 id=568 data-nosnippet>568</a>                        samples: vs.samples,
+<a href=#569 id=569 data-nosnippet>569</a>                        successes: vs.successes,
+<a href=#570 id=570 data-nosnippet>570</a>                        total_cost: vs.total_cost,
+<a href=#571 id=571 data-nosnippet>571</a>                        avg_latency_ms,
+<a href=#572 id=572 data-nosnippet>572</a>                        conversion_rate,
+<a href=#573 id=573 data-nosnippet>573</a>                    }
+<a href=#574 id=574 data-nosnippet>574</a>                }).collect();
+<a href=#575 id=575 data-nosnippet>575</a>                <span class="comment">// Check any pair for significance.
+<a href=#576 id=576 data-nosnippet>576</a>                </span><span class="kw">let </span><span class="kw-2">mut </span>found = <span class="bool-val">false</span>;
+<a href=#577 id=577 data-nosnippet>577</a>                <span class="lifetime">'outer</span>: <span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..results.len() {
+<a href=#578 id=578 data-nosnippet>578</a>                    <span class="kw">for </span>j <span class="kw">in </span>(i + <span class="number">1</span>)..results.len() {
+<a href=#579 id=579 data-nosnippet>579</a>                        <span class="kw">let </span>p = <span class="self">Self</span>::statistical_significance(<span class="kw-2">&amp;</span>results[i], <span class="kw-2">&amp;</span>results[j]);
+<a href=#580 id=580 data-nosnippet>580</a>                        <span class="kw">if </span><span class="number">1.0 </span>- p &gt;= required_confidence {
+<a href=#581 id=581 data-nosnippet>581</a>                            found = <span class="bool-val">true</span>;
+<a href=#582 id=582 data-nosnippet>582</a>                            <span class="kw">break </span><span class="lifetime">'outer</span>;
+<a href=#583 id=583 data-nosnippet>583</a>                        }
+<a href=#584 id=584 data-nosnippet>584</a>                    }
+<a href=#585 id=585 data-nosnippet>585</a>                }
+<a href=#586 id=586 data-nosnippet>586</a>                found
+<a href=#587 id=587 data-nosnippet>587</a>            }
+<a href=#588 id=588 data-nosnippet>588</a>        };
+<a href=#589 id=589 data-nosnippet>589</a>        <span class="kw">if </span>should_complete {
+<a href=#590 id=590 data-nosnippet>590</a>            state.experiment.status = ExperimentStatus::Completed;
+<a href=#591 id=591 data-nosnippet>591</a>            <span class="macro">info!</span>(experiment_id, <span class="string">"ab_test: experiment auto-completed"</span>);
+<a href=#592 id=592 data-nosnippet>592</a>        }
+<a href=#593 id=593 data-nosnippet>593</a>        should_complete
+<a href=#594 id=594 data-nosnippet>594</a>    }
+<a href=#595 id=595 data-nosnippet>595</a>}
+<a href=#596 id=596 data-nosnippet>596</a>
+<a href=#597 id=597 data-nosnippet>597</a><span class="kw">impl </span>Default <span class="kw">for </span>AbTestManager {
+<a href=#598 id=598 data-nosnippet>598</a>    <span class="kw">fn </span>default() -&gt; <span class="self">Self </span>{ <span class="self">Self</span>::new() }
+<a href=#599 id=599 data-nosnippet>599</a>}
+<a href=#600 id=600 data-nosnippet>600</a>
+<a href=#601 id=601 data-nosnippet>601</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#602 id=602 data-nosnippet>602</a>// Math helpers
+<a href=#603 id=603 data-nosnippet>603</a>// ---------------------------------------------------------------------------
+<a href=#604 id=604 data-nosnippet>604</a>
+<a href=#605 id=605 data-nosnippet>605</a></span><span class="doccomment">/// erfc approximation using Horner's method (Abramowitz &amp; Stegun 7.1.26).
+<a href=#606 id=606 data-nosnippet>606</a>/// Accurate to ~1.5e-7.
+<a href=#607 id=607 data-nosnippet>607</a></span><span class="kw">fn </span>erfc_approx(x: f64) -&gt; f64 {
+<a href=#608 id=608 data-nosnippet>608</a>    <span class="kw">if </span>x &lt; <span class="number">0.0 </span>{ <span class="kw">return </span><span class="number">2.0 </span>- erfc_approx(-x); }
+<a href=#609 id=609 data-nosnippet>609</a>    <span class="kw">let </span>t = <span class="number">1.0 </span>/ (<span class="number">1.0 </span>+ <span class="number">0.3275911 </span>* x);
+<a href=#610 id=610 data-nosnippet>610</a>    <span class="kw">let </span>poly = t * (<span class="number">0.254_829_592
+<a href=#611 id=611 data-nosnippet>611</a>        </span>+ t * (-<span class="number">0.284_496_736
+<a href=#612 id=612 data-nosnippet>612</a>        </span>+ t * (<span class="number">1.421_413_741
+<a href=#613 id=613 data-nosnippet>613</a>        </span>+ t * (-<span class="number">1.453_152_027
+<a href=#614 id=614 data-nosnippet>614</a>        </span>+ t * <span class="number">1.061_405_429</span>))));
+<a href=#615 id=615 data-nosnippet>615</a>    poly * (-x * x).exp()
+<a href=#616 id=616 data-nosnippet>616</a>}
+<a href=#617 id=617 data-nosnippet>617</a>
+<a href=#618 id=618 data-nosnippet>618</a><span class="doccomment">/// FNV-1a 64-bit hash of two byte slices separated by a null byte.
+<a href=#619 id=619 data-nosnippet>619</a></span><span class="kw">fn </span>fnv1a_64_pair(a: <span class="kw-2">&amp;</span>[u8], b: <span class="kw-2">&amp;</span>[u8]) -&gt; u64 {
+<a href=#620 id=620 data-nosnippet>620</a>    <span class="kw">const </span>OFFSET_BASIS: u64 = <span class="number">14_695_981_039_346_656_037</span>;
+<a href=#621 id=621 data-nosnippet>621</a>    <span class="kw">const </span>PRIME: u64 = <span class="number">1_099_511_628_211</span>;
+<a href=#622 id=622 data-nosnippet>622</a>    <span class="kw">let </span><span class="kw-2">mut </span>hash = OFFSET_BASIS;
+<a href=#623 id=623 data-nosnippet>623</a>    <span class="kw">for </span><span class="kw-2">&amp;</span>byte <span class="kw">in </span>a.iter().chain(<span class="kw-2">&amp;</span>[<span class="number">0u8</span>]).chain(b.iter()) {
+<a href=#624 id=624 data-nosnippet>624</a>        hash ^= u64::from(byte);
+<a href=#625 id=625 data-nosnippet>625</a>        hash = hash.wrapping_mul(PRIME);
+<a href=#626 id=626 data-nosnippet>626</a>    }
+<a href=#627 id=627 data-nosnippet>627</a>    hash
+<a href=#628 id=628 data-nosnippet>628</a>}
+<a href=#629 id=629 data-nosnippet>629</a>
+<a href=#630 id=630 data-nosnippet>630</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#631 id=631 data-nosnippet>631</a>// Tests
+<a href=#632 id=632 data-nosnippet>632</a>// ---------------------------------------------------------------------------
+<a href=#633 id=633 data-nosnippet>633</a>
+<a href=#634 id=634 data-nosnippet>634</a></span><span class="attr">#[cfg(test)]
+<a href=#635 id=635 data-nosnippet>635</a>#[allow(clippy::unwrap_used, clippy::expect_used)]
+<a href=#636 id=636 data-nosnippet>636</a></span><span class="kw">mod </span>tests {
+<a href=#637 id=637 data-nosnippet>637</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#638 id=638 data-nosnippet>638</a>
+<a href=#639 id=639 data-nosnippet>639</a>    <span class="kw">fn </span>make_running_experiment(variants_weights: <span class="kw-2">&amp;</span>[(<span class="kw-2">&amp;</span>str, f64)]) -&gt; Experiment {
+<a href=#640 id=640 data-nosnippet>640</a>        <span class="kw">let </span>variants = variants_weights.iter().map(|(id, w)| ExperimentVariantSpec {
+<a href=#641 id=641 data-nosnippet>641</a>            id: id.to_string(),
+<a href=#642 id=642 data-nosnippet>642</a>            name: id.to_string(),
+<a href=#643 id=643 data-nosnippet>643</a>            weight: <span class="kw-2">*</span>w,
+<a href=#644 id=644 data-nosnippet>644</a>            model_id: <span class="prelude-val">None</span>,
+<a href=#645 id=645 data-nosnippet>645</a>            prompt_template: <span class="prelude-val">None</span>,
+<a href=#646 id=646 data-nosnippet>646</a>            config: HashMap::new(),
+<a href=#647 id=647 data-nosnippet>647</a>        }).collect();
+<a href=#648 id=648 data-nosnippet>648</a>        Experiment {
+<a href=#649 id=649 data-nosnippet>649</a>            id: <span class="string">"exp-1"</span>.to_string(),
+<a href=#650 id=650 data-nosnippet>650</a>            name: <span class="string">"Test Experiment"</span>.to_string(),
+<a href=#651 id=651 data-nosnippet>651</a>            variants,
+<a href=#652 id=652 data-nosnippet>652</a>            status: ExperimentStatus::Running,
+<a href=#653 id=653 data-nosnippet>653</a>            created_at: <span class="number">1000</span>,
+<a href=#654 id=654 data-nosnippet>654</a>            end_condition: EndCondition::ManualStop,
+<a href=#655 id=655 data-nosnippet>655</a>        }
+<a href=#656 id=656 data-nosnippet>656</a>    }
+<a href=#657 id=657 data-nosnippet>657</a>
+<a href=#658 id=658 data-nosnippet>658</a>    <span class="attr">#[test]
+<a href=#659 id=659 data-nosnippet>659</a>    </span><span class="kw">fn </span>deterministic_assignment() {
+<a href=#660 id=660 data-nosnippet>660</a>        <span class="kw">let </span><span class="kw-2">mut </span>manager = AbTestManager::new();
+<a href=#661 id=661 data-nosnippet>661</a>        <span class="kw">let </span>exp = make_running_experiment(<span class="kw-2">&amp;</span>[(<span class="string">"a"</span>, <span class="number">1.0</span>), (<span class="string">"b"</span>, <span class="number">1.0</span>)]);
+<a href=#662 id=662 data-nosnippet>662</a>        manager.create_experiment(exp);
+<a href=#663 id=663 data-nosnippet>663</a>
+<a href=#664 id=664 data-nosnippet>664</a>        <span class="kw">let </span>a1 = manager.assign(<span class="string">"exp-1"</span>, <span class="string">"user-42"</span>).unwrap();
+<a href=#665 id=665 data-nosnippet>665</a>        <span class="kw">let </span>a2 = manager.assign(<span class="string">"exp-1"</span>, <span class="string">"user-42"</span>).unwrap();
+<a href=#666 id=666 data-nosnippet>666</a>        <span class="macro">assert_eq!</span>(a1.variant_id, a2.variant_id, <span class="string">"assignment must be deterministic"</span>);
+<a href=#667 id=667 data-nosnippet>667</a>    }
+<a href=#668 id=668 data-nosnippet>668</a>
+<a href=#669 id=669 data-nosnippet>669</a>    <span class="attr">#[test]
+<a href=#670 id=670 data-nosnippet>670</a>    </span><span class="kw">fn </span>weighted_split_proportional() {
+<a href=#671 id=671 data-nosnippet>671</a>        <span class="kw">let </span><span class="kw-2">mut </span>manager = AbTestManager::new();
+<a href=#672 id=672 data-nosnippet>672</a>        <span class="comment">// 3:1 weight ratio — expect ~75% assigned to "heavy", ~25% to "light".
+<a href=#673 id=673 data-nosnippet>673</a>        </span><span class="kw">let </span>exp = make_running_experiment(<span class="kw-2">&amp;</span>[(<span class="string">"heavy"</span>, <span class="number">3.0</span>), (<span class="string">"light"</span>, <span class="number">1.0</span>)]);
+<a href=#674 id=674 data-nosnippet>674</a>        manager.create_experiment(exp);
+<a href=#675 id=675 data-nosnippet>675</a>
+<a href=#676 id=676 data-nosnippet>676</a>        <span class="kw">let </span><span class="kw-2">mut </span>counts: HashMap&lt;String, u64&gt; = HashMap::new();
+<a href=#677 id=677 data-nosnippet>677</a>        <span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..<span class="number">1000 </span>{
+<a href=#678 id=678 data-nosnippet>678</a>            <span class="kw">let </span>a = manager.assign(<span class="string">"exp-1"</span>, <span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"user-{i}"</span>)).unwrap();
+<a href=#679 id=679 data-nosnippet>679</a>            <span class="kw-2">*</span>counts.entry(a.variant_id).or_default() += <span class="number">1</span>;
+<a href=#680 id=680 data-nosnippet>680</a>        }
+<a href=#681 id=681 data-nosnippet>681</a>        <span class="kw">let </span>heavy = <span class="kw-2">*</span>counts.get(<span class="string">"heavy"</span>).unwrap_or(<span class="kw-2">&amp;</span><span class="number">0</span>) <span class="kw">as </span>f64;
+<a href=#682 id=682 data-nosnippet>682</a>        <span class="comment">// Allow ±10% tolerance around 750.
+<a href=#683 id=683 data-nosnippet>683</a>        </span><span class="macro">assert!</span>(heavy &gt; <span class="number">650.0 </span>&amp;&amp; heavy &lt; <span class="number">850.0</span>,
+<a href=#684 id=684 data-nosnippet>684</a>            <span class="string">"expected ~750 heavy assignments, got {heavy}"</span>);
+<a href=#685 id=685 data-nosnippet>685</a>    }
+<a href=#686 id=686 data-nosnippet>686</a>
+<a href=#687 id=687 data-nosnippet>687</a>    <span class="attr">#[test]
+<a href=#688 id=688 data-nosnippet>688</a>    </span><span class="kw">fn </span>z_test_significance_large_difference() {
+<a href=#689 id=689 data-nosnippet>689</a>        <span class="kw">let </span>r_a = ExperimentResult {
+<a href=#690 id=690 data-nosnippet>690</a>            variant_id: <span class="string">"a"</span>.into(), samples: <span class="number">500</span>, successes: <span class="number">400</span>,
+<a href=#691 id=691 data-nosnippet>691</a>            total_cost: <span class="number">0.0</span>, avg_latency_ms: <span class="number">0.0</span>, conversion_rate: <span class="number">0.8</span>,
+<a href=#692 id=692 data-nosnippet>692</a>        };
+<a href=#693 id=693 data-nosnippet>693</a>        <span class="kw">let </span>r_b = ExperimentResult {
+<a href=#694 id=694 data-nosnippet>694</a>            variant_id: <span class="string">"b"</span>.into(), samples: <span class="number">500</span>, successes: <span class="number">200</span>,
+<a href=#695 id=695 data-nosnippet>695</a>            total_cost: <span class="number">0.0</span>, avg_latency_ms: <span class="number">0.0</span>, conversion_rate: <span class="number">0.4</span>,
+<a href=#696 id=696 data-nosnippet>696</a>        };
+<a href=#697 id=697 data-nosnippet>697</a>        <span class="kw">let </span>p = AbTestManager::statistical_significance(<span class="kw-2">&amp;</span>r_a, <span class="kw-2">&amp;</span>r_b);
+<a href=#698 id=698 data-nosnippet>698</a>        <span class="macro">assert!</span>(p &lt; <span class="number">0.001</span>, <span class="string">"large difference should be highly significant, got p={p}"</span>);
+<a href=#699 id=699 data-nosnippet>699</a>    }
+<a href=#700 id=700 data-nosnippet>700</a>
+<a href=#701 id=701 data-nosnippet>701</a>    <span class="attr">#[test]
+<a href=#702 id=702 data-nosnippet>702</a>    </span><span class="kw">fn </span>z_test_no_significance_equal_rates() {
+<a href=#703 id=703 data-nosnippet>703</a>        <span class="kw">let </span>r_a = ExperimentResult {
+<a href=#704 id=704 data-nosnippet>704</a>            variant_id: <span class="string">"a"</span>.into(), samples: <span class="number">100</span>, successes: <span class="number">50</span>,
+<a href=#705 id=705 data-nosnippet>705</a>            total_cost: <span class="number">0.0</span>, avg_latency_ms: <span class="number">0.0</span>, conversion_rate: <span class="number">0.5</span>,
+<a href=#706 id=706 data-nosnippet>706</a>        };
+<a href=#707 id=707 data-nosnippet>707</a>        <span class="kw">let </span>r_b = ExperimentResult {
+<a href=#708 id=708 data-nosnippet>708</a>            variant_id: <span class="string">"b"</span>.into(), samples: <span class="number">100</span>, successes: <span class="number">50</span>,
+<a href=#709 id=709 data-nosnippet>709</a>            total_cost: <span class="number">0.0</span>, avg_latency_ms: <span class="number">0.0</span>, conversion_rate: <span class="number">0.5</span>,
+<a href=#710 id=710 data-nosnippet>710</a>        };
+<a href=#711 id=711 data-nosnippet>711</a>        <span class="kw">let </span>p = AbTestManager::statistical_significance(<span class="kw-2">&amp;</span>r_a, <span class="kw-2">&amp;</span>r_b);
+<a href=#712 id=712 data-nosnippet>712</a>        <span class="macro">assert!</span>(p &gt; <span class="number">0.9</span>, <span class="string">"equal rates should not be significant, got p={p}"</span>);
+<a href=#713 id=713 data-nosnippet>713</a>    }
+<a href=#714 id=714 data-nosnippet>714</a>
+<a href=#715 id=715 data-nosnippet>715</a>    <span class="attr">#[test]
+<a href=#716 id=716 data-nosnippet>716</a>    </span><span class="kw">fn </span>winner_detection() {
+<a href=#717 id=717 data-nosnippet>717</a>        <span class="kw">let </span><span class="kw-2">mut </span>manager = AbTestManager::new();
+<a href=#718 id=718 data-nosnippet>718</a>        <span class="kw">let </span>exp = make_running_experiment(<span class="kw-2">&amp;</span>[(<span class="string">"a"</span>, <span class="number">1.0</span>), (<span class="string">"b"</span>, <span class="number">1.0</span>)]);
+<a href=#719 id=719 data-nosnippet>719</a>        manager.create_experiment(exp);
+<a href=#720 id=720 data-nosnippet>720</a>
+<a href=#721 id=721 data-nosnippet>721</a>        <span class="comment">// Record 500 outcomes per variant: a=80% success, b=40% success.
+<a href=#722 id=722 data-nosnippet>722</a>        </span><span class="kw">let </span>assign_a = Assignment { experiment_id: <span class="string">"exp-1"</span>.into(), variant_id: <span class="string">"a"</span>.into(), user_id: <span class="string">"u"</span>.into(), assigned_at: <span class="number">0 </span>};
+<a href=#723 id=723 data-nosnippet>723</a>        <span class="kw">let </span>assign_b = Assignment { experiment_id: <span class="string">"exp-1"</span>.into(), variant_id: <span class="string">"b"</span>.into(), user_id: <span class="string">"u"</span>.into(), assigned_at: <span class="number">0 </span>};
+<a href=#724 id=724 data-nosnippet>724</a>        <span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..<span class="number">500u64 </span>{
+<a href=#725 id=725 data-nosnippet>725</a>            manager.record_outcome(<span class="kw-2">&amp;</span>assign_a, i &lt; <span class="number">400</span>, <span class="number">0.01</span>, <span class="number">50</span>);
+<a href=#726 id=726 data-nosnippet>726</a>            manager.record_outcome(<span class="kw-2">&amp;</span>assign_b, i &lt; <span class="number">200</span>, <span class="number">0.01</span>, <span class="number">50</span>);
+<a href=#727 id=727 data-nosnippet>727</a>        }
+<a href=#728 id=728 data-nosnippet>728</a>        <span class="kw">let </span>winner = manager.winner(<span class="string">"exp-1"</span>);
+<a href=#729 id=729 data-nosnippet>729</a>        <span class="macro">assert_eq!</span>(winner.as_deref(), <span class="prelude-val">Some</span>(<span class="string">"a"</span>), <span class="string">"variant a should win with 80% vs 40%"</span>);
+<a href=#730 id=730 data-nosnippet>730</a>    }
+<a href=#731 id=731 data-nosnippet>731</a>
+<a href=#732 id=732 data-nosnippet>732</a>    <span class="attr">#[test]
+<a href=#733 id=733 data-nosnippet>733</a>    </span><span class="kw">fn </span>auto_complete_on_fixed_samples() {
+<a href=#734 id=734 data-nosnippet>734</a>        <span class="kw">let </span><span class="kw-2">mut </span>manager = AbTestManager::new();
+<a href=#735 id=735 data-nosnippet>735</a>        <span class="kw">let </span><span class="kw-2">mut </span>exp = make_running_experiment(<span class="kw-2">&amp;</span>[(<span class="string">"a"</span>, <span class="number">1.0</span>), (<span class="string">"b"</span>, <span class="number">1.0</span>)]);
+<a href=#736 id=736 data-nosnippet>736</a>        exp.end_condition = EndCondition::FixedSamples(<span class="number">10</span>);
+<a href=#737 id=737 data-nosnippet>737</a>        manager.create_experiment(exp);
+<a href=#738 id=738 data-nosnippet>738</a>
+<a href=#739 id=739 data-nosnippet>739</a>        <span class="kw">let </span>assign_a = Assignment { experiment_id: <span class="string">"exp-1"</span>.into(), variant_id: <span class="string">"a"</span>.into(), user_id: <span class="string">"u"</span>.into(), assigned_at: <span class="number">0 </span>};
+<a href=#740 id=740 data-nosnippet>740</a>        <span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..<span class="number">9u64 </span>{
+<a href=#741 id=741 data-nosnippet>741</a>            manager.record_outcome(<span class="kw-2">&amp;</span>assign_a, i % <span class="number">2 </span>== <span class="number">0</span>, <span class="number">0.01</span>, <span class="number">50</span>);
+<a href=#742 id=742 data-nosnippet>742</a>        }
+<a href=#743 id=743 data-nosnippet>743</a>        <span class="comment">// 9 samples — not yet complete.
+<a href=#744 id=744 data-nosnippet>744</a>        </span><span class="macro">assert!</span>(!manager.auto_complete(<span class="string">"exp-1"</span>, <span class="number">2000</span>));
+<a href=#745 id=745 data-nosnippet>745</a>
+<a href=#746 id=746 data-nosnippet>746</a>        manager.record_outcome(<span class="kw-2">&amp;</span>assign_a, <span class="bool-val">true</span>, <span class="number">0.01</span>, <span class="number">50</span>);
+<a href=#747 id=747 data-nosnippet>747</a>        <span class="comment">// 10 samples — should complete.
+<a href=#748 id=748 data-nosnippet>748</a>        </span><span class="macro">assert!</span>(manager.auto_complete(<span class="string">"exp-1"</span>, <span class="number">2000</span>));
+<a href=#749 id=749 data-nosnippet>749</a>        <span class="macro">assert_eq!</span>(manager.experiments[<span class="string">"exp-1"</span>].experiment.status, ExperimentStatus::Completed);
+<a href=#750 id=750 data-nosnippet>750</a>    }
+<a href=#751 id=751 data-nosnippet>751</a>
+<a href=#752 id=752 data-nosnippet>752</a>    <span class="comment">// --- Legacy AbTestRunner tests kept for regression ---
+<a href=#753 id=753 data-nosnippet>753</a>
+<a href=#754 id=754 data-nosnippet>754</a>    </span><span class="kw">fn </span>make_runner_with_experiment(split: f64, min_samples: usize) -&gt; AbTestRunner {
+<a href=#755 id=755 data-nosnippet>755</a>        <span class="kw">let </span>runner = AbTestRunner::new();
+<a href=#756 id=756 data-nosnippet>756</a>        runner.register(AbTestConfig {
+<a href=#757 id=757 data-nosnippet>757</a>            name: <span class="string">"test-exp"</span>.into(),
+<a href=#758 id=758 data-nosnippet>758</a>            variant_a: PromptTemplate::builder(<span class="string">"a"</span>).body(<span class="string">"A"</span>).build(),
+<a href=#759 id=759 data-nosnippet>759</a>            variant_b: PromptTemplate::builder(<span class="string">"b"</span>).body(<span class="string">"B"</span>).build(),
+<a href=#760 id=760 data-nosnippet>760</a>            traffic_split: split,
+<a href=#761 id=761 data-nosnippet>761</a>            success_metric: SuccessMetric::OutputLength,
+<a href=#762 id=762 data-nosnippet>762</a>            min_samples,
+<a href=#763 id=763 data-nosnippet>763</a>        });
+<a href=#764 id=764 data-nosnippet>764</a>        runner
+<a href=#765 id=765 data-nosnippet>765</a>    }
+<a href=#766 id=766 data-nosnippet>766</a>
+<a href=#767 id=767 data-nosnippet>767</a>    <span class="attr">#[test]
+<a href=#768 id=768 data-nosnippet>768</a>    </span><span class="kw">fn </span>legacy_assignment_is_deterministic() {
+<a href=#769 id=769 data-nosnippet>769</a>        <span class="kw">let </span>runner = make_runner_with_experiment(<span class="number">0.5</span>, <span class="number">1</span>);
+<a href=#770 id=770 data-nosnippet>770</a>        <span class="kw">let </span>v1 = runner.assign(<span class="string">"test-exp"</span>, <span class="string">"user-123"</span>).unwrap();
+<a href=#771 id=771 data-nosnippet>771</a>        <span class="kw">let </span>v2 = runner.assign(<span class="string">"test-exp"</span>, <span class="string">"user-123"</span>).unwrap();
+<a href=#772 id=772 data-nosnippet>772</a>        <span class="macro">assert_eq!</span>(v1, v2);
+<a href=#773 id=773 data-nosnippet>773</a>    }
+<a href=#774 id=774 data-nosnippet>774</a>
+<a href=#775 id=775 data-nosnippet>775</a>    <span class="attr">#[test]
+<a href=#776 id=776 data-nosnippet>776</a>    </span><span class="kw">fn </span>legacy_split_zero_always_gives_b() {
+<a href=#777 id=777 data-nosnippet>777</a>        <span class="kw">let </span>runner = make_runner_with_experiment(<span class="number">0.0</span>, <span class="number">1</span>);
+<a href=#778 id=778 data-nosnippet>778</a>        <span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..<span class="number">20 </span>{
+<a href=#779 id=779 data-nosnippet>779</a>            <span class="kw">let </span>v = runner.assign(<span class="string">"test-exp"</span>, <span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"u{i}"</span>)).unwrap();
+<a href=#780 id=780 data-nosnippet>780</a>            <span class="macro">assert_eq!</span>(v, Variant::B);
+<a href=#781 id=781 data-nosnippet>781</a>        }
+<a href=#782 id=782 data-nosnippet>782</a>    }
+<a href=#783 id=783 data-nosnippet>783</a>
+<a href=#784 id=784 data-nosnippet>784</a>    <span class="attr">#[test]
+<a href=#785 id=785 data-nosnippet>785</a>    </span><span class="kw">fn </span>legacy_analyse_detects_significant_difference() {
+<a href=#786 id=786 data-nosnippet>786</a>        <span class="kw">let </span>runner = make_runner_with_experiment(<span class="number">0.5</span>, <span class="number">20</span>);
+<a href=#787 id=787 data-nosnippet>787</a>        <span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..<span class="number">50 </span>{
+<a href=#788 id=788 data-nosnippet>788</a>            <span class="kw">let </span>jitter = (i <span class="kw">as </span>f64) * <span class="number">0.001</span>;
+<a href=#789 id=789 data-nosnippet>789</a>            runner.record_observation(<span class="string">"test-exp"</span>, Variant::A, <span class="number">10.0 </span>+ jitter);
+<a href=#790 id=790 data-nosnippet>790</a>            runner.record_observation(<span class="string">"test-exp"</span>, Variant::B, <span class="number">1.0 </span>+ jitter);
+<a href=#791 id=791 data-nosnippet>791</a>        }
+<a href=#792 id=792 data-nosnippet>792</a>        <span class="kw">let </span>result = runner.analyse(<span class="string">"test-exp"</span>).unwrap();
+<a href=#793 id=793 data-nosnippet>793</a>        <span class="macro">assert_eq!</span>(result.winner, <span class="prelude-val">Some</span>(Variant::A));
+<a href=#794 id=794 data-nosnippet>794</a>        <span class="macro">assert!</span>(result.p_value &lt; <span class="number">0.05</span>);
+<a href=#795 id=795 data-nosnippet>795</a>    }
+<a href=#796 id=796 data-nosnippet>796</a>}
+</code></pre></div></section></main></body></html>

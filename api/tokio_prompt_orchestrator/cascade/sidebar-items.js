@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_MAX_TURNS","DONE_SENTINEL"],"enum":["TerminationReason"],"struct":["CascadeConfig","CascadeEngine","CascadeMonitor","CascadeResult","CascadeTurn","NoopToolExecutor","ToolCall","ToolResult","XmlStyleToolParser"],"trait":["ToolCallParser","ToolExecutor"],"type":["InferFn"]};

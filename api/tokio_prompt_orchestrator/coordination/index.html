@@ -1,0 +1,50 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Coordination — programmatic agent fleet management"><title>tokio_prompt_orchestrator::coordination - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="tokio_prompt_orchestrator" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module coordination</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../tokio_prompt_orchestrator/index.html">tokio_<wbr>prompt_<wbr>orchestrator</a><span class="version">1.4.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module coordination</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#coordination--programmatic-agent-fleet-management" title="Coordination — programmatic agent fleet management">Coordination — programmatic agent fleet management</a><ul><li><a href="#responsibility" title="Responsibility">Responsibility</a></li><li><a href="#architecture" title="Architecture">Architecture</a></li><li><a href="#modules" title="Modules">Modules</a></li><li><a href="#guarantees" title="Guarantees">Guarantees</a></li><li><a href="#not-responsible-for" title="NOT Responsible For">NOT Responsible For</a></li><li><a href="#example" title="Example">Example</a></li></ul></li></ul><h3><a href="#modules-1">Module Items</a></h3><ul class="block"><li><a href="#modules-1" title="Modules">Modules</a></li><li><a href="#enums" title="Enums">Enums</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate tokio_<wbr>prompt_<wbr>orchestrator</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">tokio_prompt_orchestrator</a></div><h1>Module <span>coordination</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/tokio_prompt_orchestrator/coordination/mod.rs.html#1-228">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><h2 id="coordination--programmatic-agent-fleet-management"><a class="doc-anchor" href="#coordination--programmatic-agent-fleet-management">§</a>Coordination — programmatic agent fleet management</h2><h3 id="responsibility"><a class="doc-anchor" href="#responsibility">§</a>Responsibility</h3>
+<p>Provide a complete agent coordination layer: define tasks in TOML,
+spawn agent processes, let them claim work atomically via filesystem
+locks, and monitor fleet health — all without manual terminal pane
+management.</p>
+<h3 id="architecture"><a class="doc-anchor" href="#architecture">§</a>Architecture</h3><div class="example-wrap"><pre class="language-text"><code>tasks.toml ──► TaskQueue (file-locked claiming)
+                   │
+                   ├──► AgentWorker 0 ──► claude process
+                   ├──► AgentWorker 1 ──► claude process
+                   ├──► AgentWorker N ──► claude process
+                   │
+              AgentMonitor (health checks, status)</code></pre></div><h3 id="modules"><a class="doc-anchor" href="#modules">§</a>Modules</h3>
+<ul>
+<li><a href="task/index.html" title="mod tokio_prompt_orchestrator::coordination::task"><code>task</code></a> — Task struct, TaskStatus, priority ordering</li>
+<li><a href="config/index.html" title="mod tokio_prompt_orchestrator::coordination::config"><code>config</code></a> — CoordinationConfig with defaults and validation</li>
+<li><a href="queue/index.html" title="mod tokio_prompt_orchestrator::coordination::queue"><code>queue</code></a> — TaskQueue with file-locked concurrent claiming</li>
+<li><a href="worker/index.html" title="mod tokio_prompt_orchestrator::coordination::worker"><code>worker</code></a> — AgentWorker: spawn claude process, capture output</li>
+<li><a href="spawner/index.html" title="mod tokio_prompt_orchestrator::coordination::spawner"><code>spawner</code></a> — AgentSpawner: spawn N agents, manage fleet lifecycle</li>
+<li><a href="monitor/index.html" title="mod tokio_prompt_orchestrator::coordination::monitor"><code>monitor</code></a> — AgentMonitor: health checks, fleet status snapshots</li>
+</ul>
+<h3 id="guarantees"><a class="doc-anchor" href="#guarantees">§</a>Guarantees</h3>
+<ul>
+<li><strong>Atomic claiming</strong>: no task is ever executed twice (filesystem locks)</li>
+<li><strong>Crash recovery</strong>: stale locks from dead agents are reclaimable</li>
+<li><strong>Priority ordering</strong>: highest-priority tasks are claimed first</li>
+<li><strong>Observable</strong>: fleet status available at any time via monitor snapshots</li>
+<li><strong>Zero panics</strong>: all operations return <code>Result</code>, never panic</li>
+</ul>
+<h3 id="not-responsible-for"><a class="doc-anchor" href="#not-responsible-for">§</a>NOT Responsible For</h3>
+<ul>
+<li>LLM inference (see: <code>worker</code> module at crate root)</li>
+<li>Pipeline stages (see: <code>stages</code> module)</li>
+<li>Web API (see: <code>web_api</code> module)</li>
+</ul>
+<h3 id="example"><a class="doc-anchor" href="#example">§</a>Example</h3>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>tokio_prompt_orchestrator::coordination::{
+    config::CoordinationConfig,
+    queue::TaskQueue,
+    spawner::{AgentSpawner, await_fleet},
+};
+<span class="kw">use </span>std::sync::Arc;
+
+<span class="kw">let </span>config = Arc::new(CoordinationConfig::default());
+<span class="kw">let </span>queue = Arc::new(TaskQueue::new(config.clone()).<span class="kw">await</span><span class="question-mark">?</span>);
+<span class="kw">let </span>spawner = AgentSpawner::new(config);
+<span class="kw">let </span>handles = spawner.spawn_fleet(queue).<span class="kw">await</span><span class="question-mark">?</span>;
+<span class="kw">let </span>stats = await_fleet(handles).<span class="kw">await</span>;
+<span class="kw">for </span>s <span class="kw">in </span><span class="kw-2">&amp;</span>stats {
+    <span class="macro">println!</span>(<span class="string">"{}: {} completed, {} failed"</span>, s.agent_id, s.tasks_completed, s.tasks_failed);
+}</code></pre></div></div></details><h2 id="modules-1" class="section-header">Modules<a href="#modules-1" class="anchor">§</a></h2><dl class="item-table"><dt><a class="mod" href="config/index.html" title="mod tokio_prompt_orchestrator::coordination::config">config</a></dt><dd>CoordinationConfig — agent fleet configuration</dd><dt><a class="mod" href="monitor/index.html" title="mod tokio_prompt_orchestrator::coordination::monitor">monitor</a></dt><dd>AgentMonitor  -  fleet health monitoring</dd><dt><a class="mod" href="queue/index.html" title="mod tokio_prompt_orchestrator::coordination::queue">queue</a></dt><dd>TaskQueue — file-locked concurrent task claiming</dd><dt><a class="mod" href="spawner/index.html" title="mod tokio_prompt_orchestrator::coordination::spawner">spawner</a></dt><dd>AgentSpawner — fleet spawning and coordination</dd><dt><a class="mod" href="task/index.html" title="mod tokio_prompt_orchestrator::coordination::task">task</a></dt><dd>Task — coordination work unit</dd><dt><a class="mod" href="worker/index.html" title="mod tokio_prompt_orchestrator::coordination::worker">worker</a></dt><dd>AgentWorker — single agent process manager</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.CoordinationError.html" title="enum tokio_prompt_orchestrator::coordination::CoordinationError">Coordination<wbr>Error</a></dt><dd>Errors specific to the agent coordination layer.</dd></dl></section></div></main></body></html>

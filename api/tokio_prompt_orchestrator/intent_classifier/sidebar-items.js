@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["IntentCategory"],"struct":["IntentClassifier","IntentFeatures"]};

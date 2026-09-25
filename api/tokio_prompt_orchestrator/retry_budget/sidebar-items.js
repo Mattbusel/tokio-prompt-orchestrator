@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["BackoffStrategy","RetryError"],"struct":["AttemptRecord","BudgetReport","RetryBudget","RetryPolicy"]};

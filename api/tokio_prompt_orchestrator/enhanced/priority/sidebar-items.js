@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Priority","QueueError"],"struct":["PriorityQueue","QueueStats"]};

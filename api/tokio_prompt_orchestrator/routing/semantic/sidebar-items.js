@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["RoutingCategory"],"struct":["ClassificationResult","SemanticRouter","SemanticRouterConfig"]};

@@ -1,0 +1,43 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Per-session token spend budgeting with hard/soft limits and daily reset."><title>tokio_prompt_orchestrator::session::budget - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="tokio_prompt_orchestrator" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module budget</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../tokio_prompt_orchestrator/index.html">tokio_<wbr>prompt_<wbr>orchestrator</a><span class="version">1.4.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module budget</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#overview" title="Overview">Overview</a></li><li><a href="#rest-api-surface" title="REST API surface">REST API surface</a></li><li><a href="#units" title="Units">Units</a></li><li><a href="#example" title="Example">Example</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In tokio_<wbr>prompt_<wbr>orchestrator::<wbr>session</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">tokio_prompt_orchestrator</a>::<wbr><a href="../index.html">session</a></div><h1>Module <span>budget</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/tokio_prompt_orchestrator/session/budget.rs.html#1-545">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Per-session token spend budgeting with hard/soft limits and daily reset.</p>
+<h3 id="overview"><a class="doc-anchor" href="#overview">§</a>Overview</h3>
+<p><a href="struct.SessionBudget.html" title="struct tokio_prompt_orchestrator::session::budget::SessionBudget"><code>SessionBudget</code></a> tracks cumulative token usage per <code>SessionId</code> and
+enforces configurable spending limits:</p>
+<ul>
+<li><strong>Hard limit</strong> — requests are rejected with <a href="enum.BudgetError.html#variant.HardLimitExceeded" title="variant tokio_prompt_orchestrator::session::budget::BudgetError::HardLimitExceeded"><code>BudgetError::HardLimitExceeded</code></a>
+before inference when spend would exceed this cap.</li>
+<li><strong>Soft limit</strong> — requests are allowed but a <code>BudgetWarning</code> signal is
+returned so callers can notify users or throttle gracefully.</li>
+<li><strong>Daily reset</strong> — accumulated spend is zeroed at UTC midnight (or on
+explicit call to <a href="struct.SessionBudget.html#method.reset_session" title="method tokio_prompt_orchestrator::session::budget::SessionBudget::reset_session"><code>SessionBudget::reset_session</code></a>).</li>
+</ul>
+<h3 id="rest-api-surface"><a class="doc-anchor" href="#rest-api-surface">§</a>REST API surface</h3>
+<p>The budget store is intended to back two REST endpoints wired in <code>web_api.rs</code>:</p>
+<ul>
+<li><code>GET  /v1/sessions/{id}/budget</code>       → <a href="struct.SessionBudgetSnapshot.html" title="struct tokio_prompt_orchestrator::session::budget::SessionBudgetSnapshot"><code>SessionBudgetSnapshot</code></a></li>
+<li><code>POST /v1/sessions/{id}/budget/reset</code> → resets spend to zero</li>
+</ul>
+<h3 id="units"><a class="doc-anchor" href="#units">§</a>Units</h3>
+<p>All limits and accumulated spend are in <strong>tokens</strong> (not USD), because token
+counts are provider-agnostic and directly observable.  Callers that want
+cost-based limits should convert via a token-to-cost rate before recording.</p>
+<h3 id="example"><a class="doc-anchor" href="#example">§</a>Example</h3>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>tokio_prompt_orchestrator::session::budget::{
+    SessionBudget, SessionLimits, BudgetOutcome,
+};
+
+<span class="kw">let </span>budget = SessionBudget::new();
+budget.set_limits(<span class="string">"alice"</span>, SessionLimits {
+    soft_limit_tokens: <span class="number">8_000</span>,
+    hard_limit_tokens: <span class="number">10_000</span>,
+});
+
+<span class="comment">// First request: well within budget
+</span><span class="kw">let </span>outcome = budget.record_tokens(<span class="string">"alice"</span>, <span class="number">500</span>).unwrap();
+<span class="macro">assert!</span>(<span class="macro">matches!</span>(outcome, BudgetOutcome::Ok));
+
+<span class="comment">// Another request pushing past soft limit
+</span><span class="kw">let </span>outcome = budget.record_tokens(<span class="string">"alice"</span>, <span class="number">8_000</span>).unwrap();
+<span class="macro">assert!</span>(<span class="macro">matches!</span>(outcome, BudgetOutcome::SoftLimitWarning { .. }));
+
+<span class="comment">// Reset daily spend
+</span>budget.reset_session(<span class="string">"alice"</span>);</code></pre></div></div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.SessionBudget.html" title="struct tokio_prompt_orchestrator::session::budget::SessionBudget">Session<wbr>Budget</a></dt><dd>Thread-safe per-session token budget tracker.</dd><dt><a class="struct" href="struct.SessionBudgetSnapshot.html" title="struct tokio_prompt_orchestrator::session::budget::SessionBudgetSnapshot">Session<wbr>Budget<wbr>Snapshot</a></dt><dd>A point-in-time snapshot of a session’s budget state.</dd><dt><a class="struct" href="struct.SessionLimits.html" title="struct tokio_prompt_orchestrator::session::budget::SessionLimits">Session<wbr>Limits</a></dt><dd>Per-session budget limits.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.BudgetError.html" title="enum tokio_prompt_orchestrator::session::budget::BudgetError">Budget<wbr>Error</a></dt><dd>Errors returned by <a href="struct.SessionBudget.html" title="struct tokio_prompt_orchestrator::session::budget::SessionBudget"><code>SessionBudget</code></a> operations.</dd><dt><a class="enum" href="enum.BudgetOutcome.html" title="enum tokio_prompt_orchestrator::session::budget::BudgetOutcome">Budget<wbr>Outcome</a></dt><dd>Outcome of a <a href="struct.SessionBudget.html#method.record_tokens" title="method tokio_prompt_orchestrator::session::budget::SessionBudget::record_tokens"><code>SessionBudget::record_tokens</code></a> call.</dd></dl></section></div></main></body></html>

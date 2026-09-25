@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["BudgetError","BudgetOutcome"],"struct":["SessionBudget","SessionBudgetSnapshot","SessionLimits"]};

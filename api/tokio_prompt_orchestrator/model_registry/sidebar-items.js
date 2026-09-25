@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ModelCapability","ModelTier"],"struct":["ModelMetadata","ModelRegistry","RoutingHint"]};

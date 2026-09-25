@@ -1,0 +1,44 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Adaptive request timeout based on a rolling P95 of recent durations."><title>tokio_prompt_orchestrator::enhanced::adaptive_timeout - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="tokio_prompt_orchestrator" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module adaptive_timeout</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../tokio_prompt_orchestrator/index.html">tokio_<wbr>prompt_<wbr>orchestrator</a><span class="version">1.4.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module adaptive_<wbr>timeout</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#what-is-adaptive-timeout" title="What is adaptive timeout?">What is adaptive timeout?</a></li><li><a href="#algorithm" title="Algorithm">Algorithm</a></li><li><a href="#when-to-use-adaptive-timeout-vs-fixed-timeout" title="When to use adaptive timeout vs fixed timeout">When to use adaptive timeout vs fixed timeout</a></li><li><a href="#example" title="Example">Example</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In tokio_<wbr>prompt_<wbr>orchestrator::<wbr>enhanced</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">tokio_prompt_orchestrator</a>::<wbr><a href="../index.html">enhanced</a></div><h1>Module <span>adaptive_<wbr>timeout</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/tokio_prompt_orchestrator/enhanced/adaptive_timeout.rs.html#1-282">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Adaptive request timeout based on a rolling P95 of recent durations.</p>
+<h3 id="what-is-adaptive-timeout"><a class="doc-anchor" href="#what-is-adaptive-timeout">§</a>What is adaptive timeout?</h3>
+<p>A fixed timeout works well when latency is stable, but real inference
+backends have variable latency that shifts over time (model load, batch
+size, GPU contention, network jitter).  <a href="struct.AdaptiveTimeout.html" title="struct tokio_prompt_orchestrator::enhanced::adaptive_timeout::AdaptiveTimeout"><code>AdaptiveTimeout</code></a> tracks the
+empirical latency distribution and adjusts the timeout budget to match,
+preventing both spurious timeouts during high-load periods and
+unnecessarily long waits during periods of low latency.</p>
+<h3 id="algorithm"><a class="doc-anchor" href="#algorithm">§</a>Algorithm</h3>
+<p><a href="struct.AdaptiveTimeout.html" title="struct tokio_prompt_orchestrator::enhanced::adaptive_timeout::AdaptiveTimeout"><code>AdaptiveTimeout</code></a> maintains a <strong>circular buffer of the last 100 request
+durations</strong> (nanosecond resolution).  On each call to <a href="struct.AdaptiveTimeout.html#method.current_timeout" title="method tokio_prompt_orchestrator::enhanced::adaptive_timeout::AdaptiveTimeout::current_timeout"><code>current_timeout</code></a>:</p>
+<ol>
+<li>The active window is copied and sorted in O(n log n).</li>
+<li>The <strong>P95</strong> value is extracted (index <code>floor(0.95 * n)</code>, clamped to <code>n-1</code>).</li>
+<li>The final timeout is <code>max(min_timeout_floor, p95 * 2.0)</code>.</li>
+</ol>
+<p>The <code>× 2.0</code> multiplier gives a comfortable margin above the observed tail
+latency.  Once the buffer contains 100 samples the oldest sample is
+overwritten (circular), so the estimate tracks recent behaviour rather than
+accumulating a lifetime average.</p>
+<p>When fewer than 2 samples are present the configured <code>min_timeout</code> floor is
+returned, ensuring the system starts conservatively.</p>
+<h3 id="when-to-use-adaptive-timeout-vs-fixed-timeout"><a class="doc-anchor" href="#when-to-use-adaptive-timeout-vs-fixed-timeout">§</a>When to use adaptive timeout vs fixed timeout</h3><div><table><thead><tr><th>Situation</th><th>Recommendation</th></tr></thead><tbody>
+<tr><td>Stable, well-characterised latency (e.g. fast in-process worker)</td><td>Fixed timeout — simpler and predictable.</td></tr>
+<tr><td>Variable latency (e.g. cloud LLM API, GPU model serving)</td><td>Adaptive — self-tunes without manual tuning.</td></tr>
+<tr><td>SLA with a hard deadline constraint</td><td>Adaptive with a generous <code>min_timeout</code> floor.</td></tr>
+<tr><td>Very bursty traffic with occasional cold-start outliers</td><td>Adaptive — P95 ignores the top-5% outliers.</td></tr>
+</tbody></table>
+</div><h3 id="example"><a class="doc-anchor" href="#example">§</a>Example</h3>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>std::time::Duration;
+<span class="kw">use </span>tokio_prompt_orchestrator::enhanced::AdaptiveTimeout;
+
+<span class="kw">let </span><span class="kw-2">mut </span>at = AdaptiveTimeout::new(Duration::from_secs(<span class="number">5</span>));
+
+<span class="comment">// Seed the buffer with observed durations from real requests.
+</span><span class="kw">for _ in </span><span class="number">0</span>..<span class="number">50 </span>{
+    at.record_duration(Duration::from_millis(<span class="number">120</span>));
+}
+at.record_duration(Duration::from_millis(<span class="number">800</span>)); <span class="comment">// one outlier
+
+// Timeout adjusts upward to accommodate the tail latency while
+// never going below the 5 s floor.
+</span><span class="kw">let </span>timeout = at.current_timeout();
+<span class="macro">assert!</span>(timeout &gt;= Duration::from_secs(<span class="number">5</span>));</code></pre></div></div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.AdaptiveTimeout.html" title="struct tokio_prompt_orchestrator::enhanced::adaptive_timeout::AdaptiveTimeout">Adaptive<wbr>Timeout</a></dt><dd>Adaptive timeout calculator backed by a circular buffer of recent durations.</dd></dl></section></div></main></body></html>

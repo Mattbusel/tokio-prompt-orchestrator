@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["diff_prompts"],"struct":["PromptDiff","PromptRepository","PromptVersion"]};

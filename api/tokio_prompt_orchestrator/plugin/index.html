@@ -1,0 +1,64 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Custom plugin stage system for the LLM inference pipeline."><title>tokio_prompt_orchestrator::plugin - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="tokio_prompt_orchestrator" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module plugin</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../tokio_prompt_orchestrator/index.html">tokio_<wbr>prompt_<wbr>orchestrator</a><span class="version">1.4.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module plugin</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#architecture" title="Architecture">Architecture</a></li><li><a href="#quick-start" title="Quick Start">Quick Start</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#traits" title="Traits">Traits</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate tokio_<wbr>prompt_<wbr>orchestrator</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">tokio_prompt_orchestrator</a></div><h1>Module <span>plugin</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/tokio_prompt_orchestrator/plugin.rs.html#1-1691">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Custom plugin stage system for the LLM inference pipeline.</p>
+<p>This module provides a first-class extension point so user code can inject
+arbitrary async processing logic into the pipeline without forking the
+library.  Plugins are composable, ordered, and fully type-safe.</p>
+<h3 id="architecture"><a class="doc-anchor" href="#architecture">§</a>Architecture</h3><div class="example-wrap"><pre class="language-text"><code>PromptRequest
+    |
+    v
+[BeforeRag plugins]  -&gt; RAG stage -&gt; [AfterRag plugins]
+    |
+    v
+[BeforeAssemble plugins] -&gt; Assemble stage -&gt; [AfterAssemble plugins]
+    |
+    v
+[BeforeInference plugins] -&gt; Inference stage -&gt; [AfterInference plugins]
+    |
+    v
+[BeforePost plugins] -&gt; Post stage -&gt; [AfterPost plugins]
+    |
+    v
+[BeforeStream plugins] -&gt; Stream stage -&gt; [AfterStream plugins]</code></pre></div><h3 id="quick-start"><a class="doc-anchor" href="#quick-start">§</a>Quick Start</h3>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>tokio_prompt_orchestrator::plugin::{
+    StagePlugin, PluginInput, PluginOutput, PluginPosition, PluginRegistry,
+};
+<span class="kw">use </span>tokio_prompt_orchestrator::PipelineStage;
+<span class="kw">use </span>async_trait::async_trait;
+<span class="kw">use </span>std::sync::Arc;
+
+<span class="doccomment">/// A simple logging plugin that records when the inference stage is entered.
+</span><span class="kw">struct </span>InferenceLogPlugin;
+
+<span class="attr">#[async_trait]
+</span><span class="kw">impl </span>StagePlugin <span class="kw">for </span>InferenceLogPlugin {
+    <span class="kw">fn </span>name(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str { <span class="string">"inference-logger" </span>}
+
+    <span class="kw">async fn </span>process(<span class="kw-2">&amp;</span><span class="self">self</span>, input: PluginInput) -&gt; PluginOutput {
+        <span class="macro">tracing::info!</span>(request_id = %input.request_id, <span class="string">"entering inference stage"</span>);
+        PluginOutput::passthrough(input)
+    }
+}
+
+<span class="attr">#[tokio::main]
+</span><span class="kw">async fn </span>main() {
+    <span class="kw">let </span><span class="kw-2">mut </span>registry = PluginRegistry::new();
+    registry.register(
+        PluginPosition::Before(PipelineStage::Inference),
+        Arc::new(InferenceLogPlugin),
+    );
+
+    <span class="kw">let </span>chain = registry.chain_for(PluginPosition::Before(PipelineStage::Inference));
+    <span class="kw">let </span>input = PluginInput {
+        request_id: <span class="string">"req-1"</span>.to_string(),
+        session_id: <span class="string">"session-1"</span>.to_string(),
+        payload: <span class="macro">serde_json::json!</span>({<span class="string">"prompt"</span>: <span class="string">"hello"</span>}),
+        metadata: std::collections::HashMap::new(),
+    };
+
+    <span class="kw">let </span>output = chain.run(input).<span class="kw">await</span>;
+    <span class="macro">println!</span>(<span class="string">"Plugin chain produced: {:?}"</span>, output.status);
+}</code></pre></div></div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.HookMetrics.html" title="struct tokio_prompt_orchestrator::plugin::HookMetrics">Hook<wbr>Metrics</a></dt><dd>Metrics snapshot passed to pre- and post-inference hooks.</dd><dt><a class="struct" href="struct.LatencyLoggerPlugin.html" title="struct tokio_prompt_orchestrator::plugin::LatencyLoggerPlugin">Latency<wbr>Logger<wbr>Plugin</a></dt><dd>A plugin that records per-request start/end timestamps (milliseconds since
+Unix epoch) into a shared latency log.</dd><dt><a class="struct" href="struct.PluginChain.html" title="struct tokio_prompt_orchestrator::plugin::PluginChain">Plugin<wbr>Chain</a></dt><dd>An ordered sequence of <a href="trait.StagePlugin.html" title="trait tokio_prompt_orchestrator::plugin::StagePlugin"><code>StagePlugin</code></a>s that run at a single
+<a href="enum.PluginPosition.html" title="enum tokio_prompt_orchestrator::plugin::PluginPosition"><code>PluginPosition</code></a>.</dd><dt><a class="struct" href="struct.PluginContext.html" title="struct tokio_prompt_orchestrator::plugin::PluginContext">Plugin<wbr>Context</a></dt><dd>Rich context passed to every pre- and post-inference hook.</dd><dt><a class="struct" href="struct.PluginInfo.html" title="struct tokio_prompt_orchestrator::plugin::PluginInfo">Plugin<wbr>Info</a></dt><dd>Snapshot of per-plugin call statistics.</dd><dt><a class="struct" href="struct.PluginInput.html" title="struct tokio_prompt_orchestrator::plugin::PluginInput">Plugin<wbr>Input</a></dt><dd>Input passed to every plugin in a <a href="struct.PluginChain.html" title="struct tokio_prompt_orchestrator::plugin::PluginChain"><code>PluginChain</code></a>.</dd><dt><a class="struct" href="struct.PluginOutput.html" title="struct tokio_prompt_orchestrator::plugin::PluginOutput">Plugin<wbr>Output</a></dt><dd>Output returned by a <a href="trait.StagePlugin.html#tymethod.process" title="method tokio_prompt_orchestrator::plugin::StagePlugin::process"><code>StagePlugin::process</code></a> call.</dd><dt><a class="struct" href="struct.PluginRegistry.html" title="struct tokio_prompt_orchestrator::plugin::PluginRegistry">Plugin<wbr>Registry</a></dt><dd>Global runtime registry for <a href="trait.StagePlugin.html" title="trait tokio_prompt_orchestrator::plugin::StagePlugin"><code>StagePlugin</code></a> instances.</dd><dt><a class="struct" href="struct.PluginV2Chain.html" title="struct tokio_prompt_orchestrator::plugin::PluginV2Chain">Plugin<wbr>V2Chain</a></dt><dd>Ordered list of <a href="trait.Plugin.html" title="trait tokio_prompt_orchestrator::plugin::Plugin"><code>Plugin</code></a>s executed sequentially on each request/response.</dd><dt><a class="struct" href="struct.PluginV2Registry.html" title="struct tokio_prompt_orchestrator::plugin::PluginV2Registry">Plugin<wbr>V2Registry</a></dt><dd>Runtime registry of <a href="trait.Plugin.html" title="trait tokio_prompt_orchestrator::plugin::Plugin"><code>Plugin</code></a> instances with enable/disable support and
+per-plugin call statistics.</dd><dt><a class="struct" href="struct.ProfanityFilterPlugin.html" title="struct tokio_prompt_orchestrator::plugin::ProfanityFilterPlugin">Profanity<wbr>Filter<wbr>Plugin</a></dt><dd>A plugin that blocks requests containing any word from a configurable list.</dd><dt><a class="struct" href="struct.ResponseLengthCapPlugin.html" title="struct tokio_prompt_orchestrator::plugin::ResponseLengthCapPlugin">Response<wbr>Length<wbr>CapPlugin</a></dt><dd>A plugin that truncates response token lists to at most <code>max_tokens</code> items.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.PluginError.html" title="enum tokio_prompt_orchestrator::plugin::PluginError">Plugin<wbr>Error</a></dt><dd>Error returned by <a href="trait.Plugin.html" title="trait tokio_prompt_orchestrator::plugin::Plugin"><code>Plugin</code></a> hooks.</dd><dt><a class="enum" href="enum.PluginPosition.html" title="enum tokio_prompt_orchestrator::plugin::PluginPosition">Plugin<wbr>Position</a></dt><dd>Specifies where in the pipeline a plugin should be inserted.</dd><dt><a class="enum" href="enum.PluginStatus.html" title="enum tokio_prompt_orchestrator::plugin::PluginStatus">Plugin<wbr>Status</a></dt><dd>The outcome status of a plugin’s <code>process</code> call.</dd></dl><h2 id="traits" class="section-header">Traits<a href="#traits" class="anchor">§</a></h2><dl class="item-table"><dt><a class="trait" href="trait.InferenceHook.html" title="trait tokio_prompt_orchestrator::plugin::InferenceHook">Inference<wbr>Hook</a></dt><dd>A focused hook trait for code that only needs to intercept inference
+before or after it happens, without needing the full <a href="trait.StagePlugin.html" title="trait tokio_prompt_orchestrator::plugin::StagePlugin"><code>StagePlugin</code></a>
+position system.</dd><dt><a class="trait" href="trait.Plugin.html" title="trait tokio_prompt_orchestrator::plugin::Plugin">Plugin</a></dt><dd>Core trait for request/response plugins.</dd><dt><a class="trait" href="trait.StagePlugin.html" title="trait tokio_prompt_orchestrator::plugin::StagePlugin">Stage<wbr>Plugin</a></dt><dd>Core trait for custom pipeline stage plugins.</dd></dl></section></div></main></body></html>

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CostOptimizerError","ModelTier","SuggestionKind"],"struct":["AutoApplyAction","CostObservation","CostOptimizer","CostOptimizerConfig","ModelTierEntry","OptimizationSuggestion"]};

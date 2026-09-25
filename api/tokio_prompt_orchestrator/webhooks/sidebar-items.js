@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CircuitBreakerState","WebhookError","WebhookEvent"],"fn":["budget_exceeded_event","circuit_breaker_event","throughput_drop_event"],"struct":["WebhookConfig","WebhookDispatcher","WebhookPayload"]};

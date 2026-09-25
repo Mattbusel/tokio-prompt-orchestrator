@@ -1,0 +1,9 @@
+(function() {
+    const implementors = Object.fromEntries([["tokio_prompt_orchestrator",[["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.98.1/core/cmp/trait.Ord.html\" title=\"trait core::cmp::Ord\">Ord</a> for <a class=\"enum\" href=\"tokio_prompt_orchestrator/prompt_validator/enum.IssueSeverity.html\" title=\"enum tokio_prompt_orchestrator::prompt_validator::IssueSeverity\">IssueSeverity</a>",0],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.98.1/core/cmp/trait.Ord.html\" title=\"trait core::cmp::Ord\">Ord</a> for <a class=\"enum\" href=\"tokio_prompt_orchestrator/model_registry/enum.ModelTier.html\" title=\"enum tokio_prompt_orchestrator::model_registry::ModelTier\">ModelTier</a>",0],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.98.1/core/cmp/trait.Ord.html\" title=\"trait core::cmp::Ord\">Ord</a> for <a class=\"enum\" href=\"tokio_prompt_orchestrator/enhanced/priority/enum.Priority.html\" title=\"enum tokio_prompt_orchestrator::enhanced::priority::Priority\">Priority</a>",0],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.98.1/core/cmp/trait.Ord.html\" title=\"trait core::cmp::Ord\">Ord</a> for <a class=\"enum\" href=\"tokio_prompt_orchestrator/priority_queue/enum.Priority.html\" title=\"enum tokio_prompt_orchestrator::priority_queue::Priority\">Priority</a>",0]]]]);
+    if (window.register_implementors) {
+        window.register_implementors(implementors);
+    } else {
+        window.pending_implementors = implementors;
+    }
+})()
+//{"start":59,"fragment_lengths":[1284]}

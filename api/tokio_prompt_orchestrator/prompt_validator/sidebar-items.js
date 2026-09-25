@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["InjectionPattern","IssueSeverity","ValidationRule"],"struct":["PromptIssue","PromptValidator","ValidationReport"]};

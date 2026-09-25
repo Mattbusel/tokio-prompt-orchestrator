@@ -1,0 +1,38 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Dead-Letter Queue Replay Scheduler"><title>tokio_prompt_orchestrator::enhanced::dlq_replay - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="tokio_prompt_orchestrator" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module dlq_replay</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../tokio_prompt_orchestrator/index.html">tokio_<wbr>prompt_<wbr>orchestrator</a><span class="version">1.4.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module dlq_<wbr>replay</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#design" title="Design">Design</a></li><li><a href="#prometheus-counters" title="Prometheus Counters">Prometheus Counters</a></li><li><a href="#example" title="Example">Example</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In tokio_<wbr>prompt_<wbr>orchestrator::<wbr>enhanced</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">tokio_prompt_orchestrator</a>::<wbr><a href="../index.html">enhanced</a></div><h1>Module <span>dlq_<wbr>replay</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/tokio_prompt_orchestrator/enhanced/dlq_replay.rs.html#1-549">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Dead-Letter Queue Replay Scheduler</p>
+<p><a href="struct.DlqReplayScheduler.html" title="struct tokio_prompt_orchestrator::enhanced::dlq_replay::DlqReplayScheduler"><code>DlqReplayScheduler</code></a> wraps the pipeline’s <code>DeadLetterQueue</code> and adds
+controlled re-injection of shed requests back into the pipeline with
+exponential backoff between each replay, optional per-session filtering,
+and age-based eviction.</p>
+<h3 id="design"><a class="doc-anchor" href="#design">§</a>Design</h3>
+<p>The scheduler holds its own internal queue of <a href="struct.ReplayEntry.html" title="struct tokio_prompt_orchestrator::enhanced::dlq_replay::ReplayEntry"><code>ReplayEntry</code></a> items.
+A “dropped” request from the <code>DeadLetterQueue</code> can be converted into a
+<code>ReplayEntry</code> and pushed here. The scheduler does <strong>not</strong> automatically
+drain the main <code>DeadLetterQueue</code> — callers feed it explicitly, which keeps
+the concern separation clean and lets callers control replay policy.</p>
+<h3 id="prometheus-counters"><a class="doc-anchor" href="#prometheus-counters">§</a>Prometheus Counters</h3><div><table><thead><tr><th>Metric</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>dlq_replayed_total</code></td><td>Requests successfully re-injected into the pipeline</td></tr>
+<tr><td><code>dlq_aged_out_total</code></td><td>Requests evicted by <a href="struct.DlqReplayScheduler.html#method.age_out" title="method tokio_prompt_orchestrator::enhanced::dlq_replay::DlqReplayScheduler::age_out"><code>DlqReplayScheduler::age_out</code></a></td></tr>
+</tbody></table>
+</div><h3 id="example"><a class="doc-anchor" href="#example">§</a>Example</h3>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>std::collections::HashMap;
+<span class="kw">use </span>std::time::Duration;
+<span class="kw">use </span>tokio::sync::mpsc;
+<span class="kw">use </span>tokio_prompt_orchestrator::{PromptRequest, SessionId};
+<span class="kw">use </span>tokio_prompt_orchestrator::enhanced::dlq_replay::{DlqReplayScheduler, ReplayEntry};
+
+<span class="kw">let </span>(tx, <span class="kw-2">mut </span>rx) = mpsc::channel::&lt;PromptRequest&gt;(<span class="number">16</span>);
+<span class="kw">let </span>scheduler = DlqReplayScheduler::new();
+
+<span class="kw">let </span>req = PromptRequest {
+    session: SessionId::new(<span class="string">"session-1"</span>),
+    request_id: <span class="string">"req-42"</span>.to_string(),
+    input: <span class="string">"retry me"</span>.to_string(),
+    meta: HashMap::new(),
+    deadline: <span class="prelude-val">None</span>,
+};
+
+scheduler.push(ReplayEntry::new(req));
+scheduler.replay_all(<span class="kw-2">&amp;</span>tx).<span class="kw">await</span>;
+
+<span class="kw">let </span>replayed = rx.recv().<span class="kw">await</span>.expect(<span class="string">"replayed request"</span>);
+<span class="macro">assert_eq!</span>(replayed.request_id, <span class="string">"req-42"</span>);</code></pre></div></div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.DlqReplayScheduler.html" title="struct tokio_prompt_orchestrator::enhanced::dlq_replay::DlqReplayScheduler">DlqReplay<wbr>Scheduler</a></dt><dd>Dead-letter queue replay scheduler.</dd><dt><a class="struct" href="struct.ReplayEntry.html" title="struct tokio_prompt_orchestrator::enhanced::dlq_replay::ReplayEntry">Replay<wbr>Entry</a></dt><dd>A single entry in the <a href="struct.DlqReplayScheduler.html" title="struct tokio_prompt_orchestrator::enhanced::dlq_replay::DlqReplayScheduler"><code>DlqReplayScheduler</code></a> internal queue.</dd></dl></section></div></main></body></html>

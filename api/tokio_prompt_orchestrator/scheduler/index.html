@@ -1,0 +1,49 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Cron-style scheduler for periodic LLM prompt submissions."><title>tokio_prompt_orchestrator::scheduler - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="tokio_prompt_orchestrator" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module scheduler</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../tokio_prompt_orchestrator/index.html">tokio_<wbr>prompt_<wbr>orchestrator</a><span class="version">1.4.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module scheduler</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#supported-cron-expressions" title="Supported cron expressions">Supported cron expressions</a><ul><li><a href="#expression-examples" title="Expression examples">Expression examples</a></li></ul></li><li><a href="#quick-start" title="Quick start">Quick start</a></li><li><a href="#web-api-integration" title="Web API integration">Web API integration</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate tokio_<wbr>prompt_<wbr>orchestrator</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">tokio_prompt_orchestrator</a></div><h1>Module <span>scheduler</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/tokio_prompt_orchestrator/scheduler.rs.html#1-878">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Cron-style scheduler for periodic LLM prompt submissions.</p>
+<p>This module lets you register named prompt templates paired with a
+cron-like schedule expression.  A background Tokio task wakes up at the
+right wall-clock times and submits the prompt through the pipeline’s
+standard input channel.</p>
+<h3 id="supported-cron-expressions"><a class="doc-anchor" href="#supported-cron-expressions">§</a>Supported cron expressions</h3>
+<p>The parser supports a <strong>simplified</strong> subset of cron:</p>
+<div><table><thead><tr><th>Field</th><th>Positions</th><th>Accepted values</th></tr></thead><tbody>
+<tr><td>minute</td><td>0</td><td><code>*</code>, <code>*/N</code>, <code>0</code>–<code>59</code></td></tr>
+<tr><td>hour</td><td>1</td><td><code>*</code>, <code>*/N</code>, <code>0</code>–<code>23</code></td></tr>
+</tbody></table>
+</div>
+<p>Only <code>minute</code> and <code>hour</code> fields are parsed (a two-field mini-cron).
+Second-level precision is not supported.</p>
+<h4 id="expression-examples"><a class="doc-anchor" href="#expression-examples">§</a>Expression examples</h4><div><table><thead><tr><th>Expression</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>* *</code></td><td>Every minute</td></tr>
+<tr><td><code>*/5 *</code></td><td>Every 5 minutes</td></tr>
+<tr><td><code>0 *</code></td><td>At the top of every hour</td></tr>
+<tr><td><code>0 9</code></td><td>Every day at 09:00</td></tr>
+<tr><td><code>30 6</code></td><td>Every day at 06:30</td></tr>
+<tr><td><code>*/15 8</code></td><td>Every 15 minutes during the 8 o’clock hour</td></tr>
+</tbody></table>
+</div><h3 id="quick-start"><a class="doc-anchor" href="#quick-start">§</a>Quick start</h3>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>std::sync::Arc;
+<span class="kw">use </span>tokio::sync::mpsc;
+<span class="kw">use </span>tokio_prompt_orchestrator::{PromptRequest, SessionId};
+<span class="kw">use </span>tokio_prompt_orchestrator::scheduler::{Scheduler, ScheduledPrompt};
+
+<span class="attr">#[tokio::main]
+</span><span class="kw">async fn </span>main() {
+    <span class="kw">let </span>(tx, <span class="kw-2">mut </span>rx) = mpsc::channel::&lt;PromptRequest&gt;(<span class="number">256</span>);
+
+    <span class="kw">let </span>scheduler = Arc::new(Scheduler::new(tx));
+
+    <span class="kw">let </span>prompt = ScheduledPrompt::new(<span class="string">"health-check"</span>, <span class="string">"*/5 *"</span>, <span class="string">"Are you operational?"</span>)
+        .expect(<span class="string">"valid cron expression"</span>);
+    scheduler.add(prompt).<span class="kw">await</span>.expect(<span class="string">"prompt registered"</span>);
+
+    <span class="kw">let </span>handle = scheduler.spawn();
+
+    <span class="comment">// The scheduler runs until the handle is dropped or abort() is called.
+    </span>handle.abort();
+}</code></pre></div><h3 id="web-api-integration"><a class="doc-anchor" href="#web-api-integration">§</a>Web API integration</h3>
+<p>When the <code>web-api</code> feature is enabled, the <a href="struct.SchedulerState.html" title="struct tokio_prompt_orchestrator::scheduler::SchedulerState"><code>SchedulerState</code></a> type provides
+a thread-safe wrapper suitable for use as Axum <code>State</code>.
+Register routes with [<code>scheduler_routes</code>] to expose
+<code>POST /api/v1/schedule</code>, <code>GET /api/v1/schedule</code>, and
+<code>DELETE /api/v1/schedule/:id</code>.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.CronExpression.html" title="struct tokio_prompt_orchestrator::scheduler::CronExpression">Cron<wbr>Expression</a></dt><dd>A parsed two-field mini-cron expression <code>"MINUTE HOUR"</code>.</dd><dt><a class="struct" href="struct.ScheduledPrompt.html" title="struct tokio_prompt_orchestrator::scheduler::ScheduledPrompt">Scheduled<wbr>Prompt</a></dt><dd>A prompt template paired with a cron schedule and target pipeline.</dd><dt><a class="struct" href="struct.Scheduler.html" title="struct tokio_prompt_orchestrator::scheduler::Scheduler">Scheduler</a></dt><dd>Tokio-based scheduler that fires prompt submissions on a cron-like interval.</dd><dt><a class="struct" href="struct.SchedulerState.html" title="struct tokio_prompt_orchestrator::scheduler::SchedulerState">Scheduler<wbr>State</a></dt><dd>Thread-safe wrapper around a <a href="struct.Scheduler.html" title="struct tokio_prompt_orchestrator::scheduler::Scheduler"><code>Scheduler</code></a> for use as Axum <code>State</code>.</dd></dl></section></div></main></body></html>

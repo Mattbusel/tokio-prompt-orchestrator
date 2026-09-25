@@ -1,0 +1,60 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Pipeline stage implementations with structured tracing."><title>tokio_prompt_orchestrator::stages - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="tokio_prompt_orchestrator" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module stages</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../tokio_prompt_orchestrator/index.html">tokio_<wbr>prompt_<wbr>orchestrator</a><span class="version">1.4.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module stages</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#span-fields-every-stage" title="Span Fields (every stage)">Span Fields (every stage)</a></li><li><a href="#sensitive-fields-----never-logged" title="Sensitive Fields  -  NEVER Logged">Sensitive Fields  -  NEVER Logged</a></li><li><a href="#channel-sizes" title="Channel sizes">Channel sizes</a></li><li><a href="#timeout-semantics" title="Timeout Semantics">Timeout Semantics</a><ul><li><a href="#1-default_inference_timeout_secs-per-worker-call" title="1. `DEFAULT_INFERENCE_TIMEOUT_SECS` (per-worker call)">1. <code>DEFAULT_INFERENCE_TIMEOUT_SECS</code> (per-worker call)</a></li><li><a href="#2-per-request-deadline-promptrequestdeadline" title="2. Per-request deadline (`PromptRequest.deadline`)">2. Per-request deadline (<code>PromptRequest.deadline</code>)</a></li><li><a href="#3-circuit-breaker-timeout-resiliencecircuit_breaker_timeout_s" title="3. Circuit-breaker timeout (`resilience.circuit_breaker_timeout_s`)">3. Circuit-breaker timeout (<code>resilience.circuit_breaker_timeout_s</code>)</a></li><li><a href="#4-stage-level-timeouts" title="4. Stage-level timeouts">4. Stage-level timeouts</a></li><li><a href="#interaction-between-per-request-deadline-and-stage-timeout" title="Interaction between per-request deadline and stage timeout">Interaction between per-request deadline and stage timeout</a></li></ul></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#traits" title="Traits">Traits</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate tokio_<wbr>prompt_<wbr>orchestrator</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">tokio_prompt_orchestrator</a></div><h1>Module <span>stages</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/tokio_prompt_orchestrator/stages.rs.html#1-1873">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Pipeline stage implementations with structured tracing.</p>
+<p>Each stage is an async task that:</p>
+<ol>
+<li>Pulls from its input channel</li>
+<li>Processes the message inside a structured tracing span</li>
+<li>Records outcome, duration, and error fields before exiting the span</li>
+<li>Sends to the next stage with backpressure handling</li>
+</ol>
+<h3 id="span-fields-every-stage"><a class="doc-anchor" href="#span-fields-every-stage">§</a>Span Fields (every stage)</h3><div><table><thead><tr><th>Field</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>session_id</code></td><td>Session this request belongs to</td></tr>
+<tr><td><code>request_id</code></td><td>Unique ID for trace correlation</td></tr>
+<tr><td><code>stage</code></td><td>Stage name string</td></tr>
+<tr><td><code>duration_ms</code></td><td>Recorded after processing completes</td></tr>
+<tr><td><code>outcome</code></td><td><code>"ok"</code> or <code>"err"</code></td></tr>
+<tr><td><code>error_kind</code></td><td>Recorded only on error  -  the variant name</td></tr>
+</tbody></table>
+</div><h3 id="sensitive-fields-----never-logged"><a class="doc-anchor" href="#sensitive-fields-----never-logged">§</a>Sensitive Fields  -  NEVER Logged</h3>
+<ul>
+<li>Prompt content (<code>request.input</code>, assembled prompts)</li>
+<li>Model responses (inference tokens, final text)</li>
+<li>API keys</li>
+</ul>
+<h3 id="channel-sizes"><a class="doc-anchor" href="#channel-sizes">§</a>Channel sizes</h3>
+<ul>
+<li>RAG → Assemble: 512</li>
+<li>Assemble → Inference: 512</li>
+<li>Inference → Post: 1024</li>
+<li>Post → Stream: 512</li>
+<li>Stream output: 256</li>
+</ul>
+<h3 id="timeout-semantics"><a class="doc-anchor" href="#timeout-semantics">§</a>Timeout Semantics</h3>
+<p>There are four distinct timeout scopes in the pipeline; they are
+independent and interact as described below.</p>
+<h4 id="1-default_inference_timeout_secs-per-worker-call"><a class="doc-anchor" href="#1-default_inference_timeout_secs-per-worker-call">§</a>1. <code>DEFAULT_INFERENCE_TIMEOUT_SECS</code> (per-worker call)</h4>
+<p>The constant <code>DEFAULT_INFERENCE_TIMEOUT_SECS</code> (120 s) caps each
+individual call to <a href="../worker/trait.ModelWorker.html#tymethod.infer" title="method tokio_prompt_orchestrator::worker::ModelWorker::infer"><code>ModelWorker::infer</code></a>. If the model backend does not
+respond within this window the inference future is cancelled and an error
+is returned to the stage. This default is overridden by
+<code>stages.inference.timeout_ms</code> in the TOML config.</p>
+<h4 id="2-per-request-deadline-promptrequestdeadline"><a class="doc-anchor" href="#2-per-request-deadline-promptrequestdeadline">§</a>2. Per-request deadline (<code>PromptRequest.deadline</code>)</h4>
+<p>Each <a href="../struct.PromptRequest.html" title="struct tokio_prompt_orchestrator::PromptRequest"><code>PromptRequest</code></a> may carry an absolute deadline set via
+<a href="../struct.PromptRequest.html#method.with_deadline" title="method tokio_prompt_orchestrator::PromptRequest::with_deadline"><code>PromptRequest::with_deadline</code></a>. The inference stage checks this field
+before dispatching to the worker. If the deadline has already elapsed the
+request is dropped immediately and routed to the dead-letter queue without
+consuming any worker capacity.</p>
+<h4 id="3-circuit-breaker-timeout-resiliencecircuit_breaker_timeout_s"><a class="doc-anchor" href="#3-circuit-breaker-timeout-resiliencecircuit_breaker_timeout_s">§</a>3. Circuit-breaker timeout (<code>resilience.circuit_breaker_timeout_s</code>)</h4>
+<p>This timeout is <strong>entirely independent</strong> of inference latency. It controls
+the minimum time the circuit breaker remains in the OPEN state before
+transitioning to HALF-OPEN for a probe attempt. It does not affect how
+long a single inference call may run.</p>
+<h4 id="4-stage-level-timeouts"><a class="doc-anchor" href="#4-stage-level-timeouts">§</a>4. Stage-level timeouts</h4>
+<p>Stage-level timeouts (e.g. <code>stages.rag.timeout_ms</code>) apply to the entire
+processing time of one pass through that stage — including any I/O, channel
+waits, and downstream sends — not only to the underlying inference call.</p>
+<h4 id="interaction-between-per-request-deadline-and-stage-timeout"><a class="doc-anchor" href="#interaction-between-per-request-deadline-and-stage-timeout">§</a>Interaction between per-request deadline and stage timeout</h4>
+<p>If a per-request deadline expires <strong>before</strong> the stage-level timeout fires,
+the request is dropped from the pipeline and written to the dead-letter
+queue. The stage itself continues processing subsequent requests normally;
+a deadline expiry does not abort or restart the stage task.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.LogSink.html" title="struct tokio_prompt_orchestrator::stages::LogSink">LogSink</a></dt><dd>Default <a href="trait.OutputSink.html" title="trait tokio_prompt_orchestrator::stages::OutputSink"><code>OutputSink</code></a> that logs the output length without logging content.</dd><dt><a class="struct" href="struct.PipelineHandles.html" title="struct tokio_prompt_orchestrator::stages::PipelineHandles">Pipeline<wbr>Handles</a></dt><dd>Handles for all spawned pipeline tasks</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.SinkError.html" title="enum tokio_prompt_orchestrator::stages::SinkError">Sink<wbr>Error</a></dt><dd>Error type returned by <a href="trait.OutputSink.html#tymethod.emit" title="method tokio_prompt_orchestrator::stages::OutputSink::emit"><code>OutputSink::emit</code></a>.</dd></dl><h2 id="traits" class="section-header">Traits<a href="#traits" class="anchor">§</a></h2><dl class="item-table"><dt><a class="trait" href="trait.OutputSink.html" title="trait tokio_prompt_orchestrator::stages::OutputSink">Output<wbr>Sink</a></dt><dd>Pluggable output sink for the stream stage.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.spawn_pipeline.html" title="fn tokio_prompt_orchestrator::stages::spawn_pipeline">spawn_<wbr>pipeline</a></dt><dd>Spawn the complete 5-stage pipeline</dd><dt><a class="fn" href="fn.spawn_pipeline_with_config.html" title="fn tokio_prompt_orchestrator::stages::spawn_pipeline_with_config">spawn_<wbr>pipeline_<wbr>with_<wbr>config</a></dt><dd>Spawn the complete 5-stage pipeline using a <a href="../config/struct.PipelineConfig.html" title="struct tokio_prompt_orchestrator::config::PipelineConfig"><code>PipelineConfig</code></a>.</dd></dl></section></div></main></body></html>

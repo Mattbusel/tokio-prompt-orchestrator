@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["FastestResponseScorer","KeywordDensityScorer","LongestResponseScorer","TournamentConfig","TournamentResult","TournamentRunner","TournamentStats"],"trait":["ResponseScorer"]};

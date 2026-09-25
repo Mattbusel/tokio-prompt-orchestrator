@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CascadeError"],"fn":["cascade_registry"],"struct":["CascadeEntry","CascadeFailover","CascadeResult","CircuitBreakerConfig","FailoverExhausted","FailoverResult","FailoverTier","ProviderCascade"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ScaleAction"],"struct":["PoolSizer","PoolSizerConfig","ScaleRecommendation"]};

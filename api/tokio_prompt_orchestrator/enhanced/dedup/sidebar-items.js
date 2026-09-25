@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEDUP_CANCELLED_SENTINEL"],"enum":["DeduplicationResult"],"fn":["cosine_similarity","dedup_key","is_cancelled_result"],"struct":["DeduplicationStats","DeduplicationToken","Deduplicator"]};

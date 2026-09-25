@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["cosine_similarity","embed_prompt"],"struct":["CacheEntry","CacheStats","SemanticCache"]};

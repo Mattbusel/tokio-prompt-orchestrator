@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ConversationPhase","TransitionTrigger"],"struct":["ConversationStateMachine","PhaseTransition"]};

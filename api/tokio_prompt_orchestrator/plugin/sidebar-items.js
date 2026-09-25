@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["PluginError","PluginPosition","PluginStatus"],"struct":["HookMetrics","LatencyLoggerPlugin","PluginChain","PluginContext","PluginInfo","PluginInput","PluginOutput","PluginRegistry","PluginV2Chain","PluginV2Registry","ProfanityFilterPlugin","ResponseLengthCapPlugin"],"trait":["InferenceHook","Plugin","StagePlugin"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["CompressionPipeline","CompressionResult","RepetitionRemover","SentenceRanker","StopWordFilter","TruncationStrategy","WhitespaceCompressor"],"trait":["Compressor"]};

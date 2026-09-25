@@ -1,0 +1,49 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Provider Arbitrage Engine"><title>tokio_prompt_orchestrator::routing::arbitrage - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="tokio_prompt_orchestrator" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module arbitrage</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../tokio_prompt_orchestrator/index.html">tokio_<wbr>prompt_<wbr>orchestrator</a><span class="version">1.4.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module arbitrage</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#provider-arbitrage-engine" title="Provider Arbitrage Engine">Provider Arbitrage Engine</a><ul><li><a href="#problem" title="Problem">Problem</a></li><li><a href="#guarantees" title="Guarantees">Guarantees</a></li><li><a href="#example" title="Example">Example</a></li></ul></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In tokio_<wbr>prompt_<wbr>orchestrator::<wbr>routing</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">tokio_prompt_orchestrator</a>::<wbr><a href="../index.html">routing</a></div><h1>Module <span>arbitrage</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/tokio_prompt_orchestrator/routing/arbitrage.rs.html#1-553">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><h2 id="provider-arbitrage-engine"><a class="doc-anchor" href="#provider-arbitrage-engine">§</a>Provider Arbitrage Engine</h2>
+<p>Routes inference requests to the <strong>cheapest provider that historically meets
+a caller-specified latency SLA</strong>.</p>
+<h3 id="problem"><a class="doc-anchor" href="#problem">§</a>Problem</h3>
+<p>Multiple providers (Anthropic, OpenAI, vLLM, llama.cpp) have different
+per-token prices and different latency characteristics.  A naïve router
+always uses the cheapest provider, but that provider may be slower or less
+reliable.  A naïve latency router always uses the fastest provider, but
+wastes money.</p>
+<p>The arbitrage engine tracks a rolling P95 latency window for each registered
+provider and, given a latency budget, selects whichever eligible provider
+(i.e., whose P95 is below the budget) has the lowest per-token cost.</p>
+<h3 id="guarantees"><a class="doc-anchor" href="#guarantees">§</a>Guarantees</h3>
+<ul>
+<li>Thread-safe: all hot-path state uses atomics; the latency ring buffer uses
+a <code>Mutex</code> but the lock is held for microseconds.</li>
+<li>Non-blocking: <code>select_provider</code> never performs I/O.</li>
+<li>Graceful degradation: if no provider meets the SLA, the one with the
+lowest P95 latency is returned (best-effort).</li>
+</ul>
+<h3 id="example"><a class="doc-anchor" href="#example">§</a>Example</h3>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>tokio_prompt_orchestrator::routing::arbitrage::{ArbitrageEngine, ProviderProfile};
+<span class="kw">use </span>std::time::Duration;
+
+<span class="kw">let </span>engine = ArbitrageEngine::new();
+
+engine.register(ProviderProfile {
+    name: <span class="string">"anthropic"</span>.to_string(),
+    cost_per_1k_input_tokens: <span class="number">0.003</span>,
+    cost_per_1k_output_tokens: <span class="number">0.015</span>,
+    priority: <span class="number">0</span>,
+});
+engine.register(ProviderProfile {
+    name: <span class="string">"openai"</span>.to_string(),
+    cost_per_1k_input_tokens: <span class="number">0.005</span>,
+    cost_per_1k_output_tokens: <span class="number">0.015</span>,
+    priority: <span class="number">0</span>,
+});
+
+<span class="comment">// Record observed latencies
+</span>engine.record_latency(<span class="string">"anthropic"</span>, Duration::from_millis(<span class="number">320</span>));
+engine.record_latency(<span class="string">"openai"</span>, Duration::from_millis(<span class="number">180</span>));
+
+<span class="comment">// With a 500ms SLA budget, pick the cheapest provider that historically
+// completes within 500ms.
+</span><span class="kw">let </span>sla = Duration::from_millis(<span class="number">500</span>);
+<span class="kw">let </span>winner = engine.select_provider(<span class="prelude-val">Some</span>(sla));
+<span class="comment">// anthropic is cheaper AND within the 500ms SLA → selected
+</span><span class="macro">assert_eq!</span>(winner.as_ref().map(|p| p.name.as_str()), <span class="prelude-val">Some</span>(<span class="string">"anthropic"</span>));</code></pre></div></div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.ArbitrageEngine.html" title="struct tokio_prompt_orchestrator::routing::arbitrage::ArbitrageEngine">Arbitrage<wbr>Engine</a></dt><dd>The provider arbitrage engine.</dd><dt><a class="struct" href="struct.ProviderProfile.html" title="struct tokio_prompt_orchestrator::routing::arbitrage::ProviderProfile">Provider<wbr>Profile</a></dt><dd>Static profile for a single inference provider.</dd><dt><a class="struct" href="struct.ProviderSnapshot.html" title="struct tokio_prompt_orchestrator::routing::arbitrage::ProviderSnapshot">Provider<wbr>Snapshot</a></dt><dd>Point-in-time snapshot of a single provider’s state.</dd></dl></section></div></main></body></html>

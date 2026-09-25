@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["SinkError"],"fn":["spawn_pipeline","spawn_pipeline_with_config"],"struct":["LogSink","PipelineHandles"],"trait":["OutputSink"]};

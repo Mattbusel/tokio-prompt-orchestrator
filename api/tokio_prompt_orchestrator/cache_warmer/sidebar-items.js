@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["WarmingStatus","WarmingStrategy"],"struct":["CacheWarmer","WarmingJob","WarmingPattern","WarmingStats"]};

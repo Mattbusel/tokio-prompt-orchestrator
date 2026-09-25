@@ -1,0 +1,39 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Multi-pipeline routing with prompt classification."><title>tokio_prompt_orchestrator::multi_pipeline - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-1ed95124.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="tokio_prompt_orchestrator" data-themes="" data-resource-suffix="" data-rustdoc-version="1.98.1 (48a229cea 2026-09-01)" data-channel="1.98.1" data-search-js="search-9944d736.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module multi_pipeline</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../tokio_prompt_orchestrator/index.html">tokio_<wbr>prompt_<wbr>orchestrator</a><span class="version">1.4.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module multi_<wbr>pipeline</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#concept" title="Concept">Concept</a></li><li><a href="#example" title="Example">Example</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate tokio_<wbr>prompt_<wbr>orchestrator</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">tokio_prompt_orchestrator</a></div><h1>Module <span>multi_<wbr>pipeline</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/tokio_prompt_orchestrator/multi_pipeline.rs.html#1-589">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Multi-pipeline routing with prompt classification.</p>
+<p>Manages a fleet of named pipeline instances and routes each incoming
+<a href="../struct.PromptRequest.html" title="struct tokio_prompt_orchestrator::PromptRequest"><code>PromptRequest</code></a> to the best-fit pipeline based on prompt characteristics:
+length, complexity signals, explicit priority hints, and learned latency.</p>
+<h3 id="concept"><a class="doc-anchor" href="#concept">§</a>Concept</h3>
+<p>A single LLM orchestrator often needs to handle very different workloads
+simultaneously:</p>
+<ul>
+<li><strong>Fast path</strong> — short FAQ-style questions, single-turn, low latency required</li>
+<li><strong>Reasoning path</strong> — multi-step problems, chain-of-thought, higher quality</li>
+<li><strong>Code path</strong> — specialised coding model, longer context window</li>
+<li><strong>Batch path</strong> — offline background jobs, throughput over latency</li>
+</ul>
+<p>Rather than forcing all traffic through one pipeline, <code>MultiPipelineRouter</code>
+dispatches to the right pipeline and falls back gracefully when a pipeline
+is at capacity.</p>
+<h3 id="example"><a class="doc-anchor" href="#example">§</a>Example</h3>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>std::sync::Arc;
+<span class="kw">use </span>tokio_prompt_orchestrator::{EchoWorker, PromptRequest, SessionId};
+<span class="kw">use </span>tokio_prompt_orchestrator::multi_pipeline::{
+    MultiPipelineRouter, PipelineDescriptor, PromptClass,
+};
+<span class="kw">use </span>std::collections::HashMap;
+
+<span class="kw">let </span>router = MultiPipelineRouter::builder()
+    .add_pipeline(PipelineDescriptor::new(<span class="string">"fast"</span>, PromptClass::Faq, Arc::new(EchoWorker::new())))
+    .add_pipeline(PipelineDescriptor::new(<span class="string">"reasoning"</span>, PromptClass::Reasoning, Arc::new(EchoWorker::new())))
+    .build();
+
+<span class="kw">let </span>request = PromptRequest {
+    session: SessionId::new(<span class="string">"s1"</span>),
+    request_id: <span class="string">"r1"</span>.to_string(),
+    input: <span class="string">"What is 2+2?"</span>.to_string(),
+    meta: HashMap::new(),
+    deadline: <span class="prelude-val">None</span>,
+};
+
+<span class="kw">let </span>class = router.classify(<span class="kw-2">&amp;</span>request);
+router.route(request).<span class="kw">await</span>.unwrap();</code></pre></div></div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.HeuristicClassifier.html" title="struct tokio_prompt_orchestrator::multi_pipeline::HeuristicClassifier">Heuristic<wbr>Classifier</a></dt><dd>Heuristic prompt classifier.</dd><dt><a class="struct" href="struct.MultiPipelineRouter.html" title="struct tokio_prompt_orchestrator::multi_pipeline::MultiPipelineRouter">Multi<wbr>Pipeline<wbr>Router</a></dt><dd>Routes incoming prompts across multiple named pipeline instances.</dd><dt><a class="struct" href="struct.MultiPipelineRouterBuilder.html" title="struct tokio_prompt_orchestrator::multi_pipeline::MultiPipelineRouterBuilder">Multi<wbr>Pipeline<wbr>Router<wbr>Builder</a></dt><dd>Builder for <a href="struct.MultiPipelineRouter.html" title="struct tokio_prompt_orchestrator::multi_pipeline::MultiPipelineRouter"><code>MultiPipelineRouter</code></a>.</dd><dt><a class="struct" href="struct.PipelineDescriptor.html" title="struct tokio_prompt_orchestrator::multi_pipeline::PipelineDescriptor">Pipeline<wbr>Descriptor</a></dt><dd>Descriptor for a single named pipeline instance.</dd><dt><a class="struct" href="struct.PipelineRoutingStats.html" title="struct tokio_prompt_orchestrator::multi_pipeline::PipelineRoutingStats">Pipeline<wbr>Routing<wbr>Stats</a></dt><dd>Snapshot of routing stats for one pipeline.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.PromptClass.html" title="enum tokio_prompt_orchestrator::multi_pipeline::PromptClass">Prompt<wbr>Class</a></dt><dd>Broad classification of a prompt’s intent and resource requirements.</dd></dl></section></div></main></body></html>
