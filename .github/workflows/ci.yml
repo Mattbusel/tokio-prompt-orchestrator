@@ -160,4 +160,7 @@ jobs:
           auto-push: true
           alert-threshold: "120%"
           comment-on-alert: true
-          fail-on-alert: true
+          # Shared runners vary by 20-35% run to run (two reruns of the same
+          # commit flagged different benchmarks), so an alert comments on the
+          # commit instead of failing main.
+          fail-on-alert: false
