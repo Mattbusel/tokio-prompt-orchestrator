@@ -1,0 +1,15 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+PackageIdentifier: Mattbusel.TokioPromptOrchestrator
+PackageVersion: 1.4.2
+InstallerType: zip
+NestedInstallerType: portable
+NestedInstallerFiles:
+  - RelativeFilePath: orchestrator-v1.4.2-x86_64-pc-windows-msvc\orchestrator.exe
+    PortableCommandAlias: orchestrator
+ReleaseDate: 2026-09-25
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/Mattbusel/tokio-prompt-orchestrator/releases/download/v1.4.2/orchestrator-v1.4.2-x86_64-pc-windows-msvc.zip
+    InstallerSha256: 85406CC8751D44AB61C0DB02DECFB6BEEF6902D25D34EEAB2770B38130B43968
+ManifestType: installer
+ManifestVersion: 1.6.0

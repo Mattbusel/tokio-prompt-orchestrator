@@ -74,7 +74,8 @@ for b in $BINS; do
   cp "$src" "$INSTALL_DIR/$b"
   chmod +x "$INSTALL_DIR/$b"
 done
-say "Installed $("$INSTALL_DIR/orchestrator" --version) to $INSTALL_DIR"
+ver="$("$INSTALL_DIR/orchestrator" --version 2>/dev/null || echo "orchestrator $tag")"
+say "Installed $ver to $INSTALL_DIR"
 
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
