@@ -1,0 +1,22 @@
+# Off-screen capture of the `tui` dashboard for assets/tui-demo.gif.
+# It calls the crate's own ui::draw with MockMetrics (what `tui` shows without
+# --live) on a ratatui TestBackend, one frame per 1 s data tick, so no window
+# opens. From this folder:
+#   cargo run --release -- 120 42 26 100 1000 > frames.jsonl
+#   python render.py frames.jsonl png
+#   ffmpeg -framerate 3 -i png/f%03d.png -vf "split[a][b];[a]palettegen=max_colors=48:stats_mode=full[p];[b][p]paletteuse=dither=none" -loop 0 ../../tui-demo.gif
+[package]
+name = "tuicap"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "tuicap"
+path = "main.rs"
+
+[dependencies]
+tokio-prompt-orchestrator = { path = "../../..", default-features = false, features = ["tui"] }
+ratatui = "0.30"
+
+[workspace]

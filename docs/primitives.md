@@ -3,7 +3,7 @@
 The `enhanced` module provides six resilience and flow-control primitives that
 can be used independently or composed together in a pipeline.
 
-All primitives are `Clone + Send + Sync` — clone freely and share across Tokio
+All primitives are `Clone + Send + Sync`, clone freely and share across Tokio
 tasks.
 
 ---

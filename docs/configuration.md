@@ -22,7 +22,7 @@ Pipeline identity metadata.
 [pipeline]
 name        = "production"
 version     = "1.0"
-description = "Production pipeline — GPT-4o"
+description = "Production pipeline, GPT-4o"
 ```
 
 ---
@@ -53,7 +53,7 @@ Prompt assembly stage.
 
 ## `[stages.inference]`
 
-Inference stage — the only required stage fields.
+Inference stage, the only required stage fields.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -102,12 +102,12 @@ Retry and circuit-breaker settings.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `retry_attempts` | `u32` | — | Total attempts (includes first try) |
+| `retry_attempts` | `u32` | none | Total attempts (includes first try) |
 | `retry_base_ms` | `u64` | `100` | Initial exponential back-off delay (ms) |
 | `retry_max_ms` | `u64` | `5000` | Max back-off delay cap (ms) |
-| `circuit_breaker_threshold` | `u32` | — | Failures before circuit opens |
-| `circuit_breaker_timeout_s` | `u64` | — | Seconds open before probing |
-| `circuit_breaker_success_rate` | `f64` | — | Success rate to close circuit (0.0–1.0) |
+| `circuit_breaker_threshold` | `u32` | none | Failures before circuit opens |
+| `circuit_breaker_timeout_s` | `u64` | none | Seconds open before probing |
+| `circuit_breaker_success_rate` | `f64` | none | Success rate to close circuit (0.0 to 1.0) |
 
 ```toml
 [resilience]
@@ -144,7 +144,7 @@ burst_capacity       = 10
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | `bool` | — | Enable/disable |
+| `enabled` | `bool` | none | Enable/disable |
 | `window_s` | `u64` | `300` | Seconds to cache completed results |
 | `max_entries` | `usize` | `10000` | Max in-memory dedup entries |
 
@@ -154,7 +154,7 @@ burst_capacity       = 10
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `log_format` | `"pretty"` or `"json"` | — | Log output format |
+| `log_format` | `"pretty"` or `"json"` | none | Log output format |
 | `metrics_port` | `u16?` | `None` | Prometheus scrape port; `None` = disabled |
 | `tracing_endpoint` | `String?` | `None` | OTel collector URL; `None` = disabled |
 
@@ -169,7 +169,7 @@ tracing_endpoint = "http://jaeger:4318"
 
 ## `[channel_sizes]`
 
-**Optional section** — override inter-stage channel capacities.
+**Optional section**: override inter-stage channel capacities.
 
 | Field | Type | Compiled default | Description |
 |-------|------|-----------------|-------------|

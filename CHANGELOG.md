@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.3] - 2026-09-28
+
+### Changed
+
+- README cut from 76 KB to about 10 KB: what it does, a direct Windows download,
+  an animated "how it works" diagram drawn from `src/stages.rs`, three real
+  examples, then links. Everything else moved, unchanged, to `docs/GUIDE.md`,
+  `docs/REFERENCE.md` and `docs/MODULES.md`.
+- `orchestrator --help` and the first-run welcome describe what the binary
+  really does (bounded queue, circuit breaker, timeouts, dead-letter queue);
+  they no longer claim deduplication and retries, which the server does not add.
+- Terminal logs respect `NO_COLOR`; the log file never gets colour codes.
+- Releases also carry `orchestrator-windows-x64.exe`, a stable name for the
+  README's download link.
+- Removed the stale `releases/orchestrator.exe` from the source tree.
+
+### Added
+
+- `examples/quickstart.rs`: the README's library example, runnable.
+
 ## [1.4.2] - 2026-09-25
 
 ### Added

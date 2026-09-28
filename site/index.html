@@ -3,12 +3,48 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>tokio-prompt-orchestrator</title>
-<meta name="description" content="A bounded Tokio pipeline in front of your LLM: request deduplication, a circuit breaker and a dead-letter queue, in front of Anthropic, OpenAI, llama.cpp, vLLM or your own backend.">
-<meta property="og:title" content="tokio-prompt-orchestrator">
-<meta property="og:description" content="A bounded Tokio pipeline in front of your LLM: dedup, circuit breaker, dead-letter queue.">
+<title>Rust LLM Request Orchestrator: dedup, circuit breaker</title>
+<meta name="description" content="Put a queue, dedup and a circuit breaker in front of Anthropic, OpenAI, llama.cpp or vLLM. Rust library, HTTP server and Windows, macOS, Linux downloads.">
+<link rel="canonical" href="https://mattbusel.github.io/tokio-prompt-orchestrator/">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://mattbusel.github.io/tokio-prompt-orchestrator/">
+<meta property="og:title" content="tokio-prompt-orchestrator: a Rust LLM request orchestrator">
+<meta property="og:description" content="Put a queue, dedup and a circuit breaker in front of Anthropic, OpenAI, llama.cpp or vLLM. Rust library, HTTP server and Windows, macOS, Linux downloads.">
 <meta property="og:image" content="https://mattbusel.github.io/tokio-prompt-orchestrator/assets/social-preview.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="tokio-prompt-orchestrator: dedup, circuit breaker and dead-letter queue in front of an LLM">
 <meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="tokio-prompt-orchestrator: a Rust LLM request orchestrator">
+<meta name="twitter:description" content="Put a queue, dedup and a circuit breaker in front of Anthropic, OpenAI, llama.cpp or vLLM. Rust library, HTTP server and Windows, macOS, Linux downloads.">
+<meta name="twitter:image" content="https://mattbusel.github.io/tokio-prompt-orchestrator/assets/social-preview.png">
+<script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@type": "SoftwareApplication",
+ "name": "tokio-prompt-orchestrator",
+ "description": "Rust LLM request orchestrator: a bounded Tokio pipeline with deduplication, a circuit breaker, timeouts and a dead-letter queue in front of Anthropic, OpenAI, llama.cpp, vLLM or your own backend. Library, HTTP server and CLI.",
+ "applicationCategory": "DeveloperApplication",
+ "operatingSystem": "Windows, macOS, Linux",
+ "url": "https://mattbusel.github.io/tokio-prompt-orchestrator/",
+ "codeRepository": "https://github.com/Mattbusel/tokio-prompt-orchestrator",
+ "programmingLanguage": "Rust",
+ "license": "https://opensource.org/licenses/MIT",
+ "author": {
+  "@type": "Person",
+  "name": "Matthew Busel",
+  "url": "https://mattbusel.github.io/"
+ },
+ "downloadUrl": "https://github.com/Mattbusel/tokio-prompt-orchestrator/releases/latest/download/orchestrator-windows-x64.exe",
+ "softwareVersion": "1.4.3",
+ "offers": {
+  "@type": "Offer",
+  "price": "0",
+  "priceCurrency": "USD"
+ },
+ "image": "https://mattbusel.github.io/tokio-prompt-orchestrator/assets/social-preview.png"
+}
+</script>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230f1113'/%3E%3Cpath d='M5 10h9M5 16h9M5 22h9' stroke='%23f0b429' stroke-width='2.5' stroke-linecap='round'/%3E%3Cpath d='M14 10c5 0 5 6 9 6M14 22c5 0 5-6 9-6M14 16h13' stroke='%232cc7a6' stroke-width='2.5' stroke-linecap='round' fill='none'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="assets/flow.css">
 <link rel="stylesheet" href="assets/site.css">
@@ -38,6 +74,8 @@
   <h1>Put a bounded pipeline between your users and your LLM.</h1>
   <p class="lede">Duplicate prompts share one model call. A failing provider trips a circuit breaker so requests fail fast instead of piling up. Every request the pipeline drops lands in a dead-letter queue you can inspect and replay. Works with Anthropic, OpenAI, llama.cpp, vLLM or your own backend.</p>
   <div class="cta">
+    <a class="btn dl" href="https://github.com/Mattbusel/tokio-prompt-orchestrator/releases/latest/download/orchestrator-windows-x64.exe">Download for Windows (.exe)</a>
+    <a class="alt-dl" href="#quick-start">macOS, Linux, Homebrew, Scoop, cargo</a>
     <div class="cmd"><code>cargo run --example llm_pipeline</code><button class="copy" data-copy="git clone https://github.com/Mattbusel/tokio-prompt-orchestrator &amp;&amp; cd tokio-prompt-orchestrator &amp;&amp; cargo run --example llm_pipeline" type="button">Copy</button></div>
     <span class="hint">No API key. Runs the exact scenario drawn below.</span>
   </div>
@@ -119,7 +157,7 @@ cargo run --example llm_pipeline</pre></div>
     </div>
     <div class="step">
       <h3><span class="n">2</span>Install and run the server</h3>
-      <p>Interactive terminal plus an HTTP API on port 8080. <code>echo</code> needs no key. Windows (one PowerShell line), Homebrew, Scoop and <code>cargo binstall</code>: see <a href="https://github.com/Mattbusel/tokio-prompt-orchestrator#install">Install</a>.</p>
+      <p>Interactive terminal plus an HTTP API on port 8080. <code>echo</code> needs no key. Windows (one PowerShell line), Homebrew, Scoop and <code>cargo binstall</code>: see <a href="https://github.com/Mattbusel/tokio-prompt-orchestrator#download">Download</a>.</p>
       <div class="code"><button class="copy" type="button" data-target="c2">Copy</button><pre id="c2" class="mono">curl -fsSL https://raw.githubusercontent.com/Mattbusel/tokio-prompt-orchestrator/main/install.sh | sh
 orchestrator --provider echo
 
@@ -164,7 +202,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }</pre></div>
     <h2 id="srv-h">The server, for agents and tools</h2>
     <p>The <code>orchestrator</code> binary runs a terminal prompt and a REST, SSE and WebSocket API side by side. Post a prompt, get a request id, then fetch the result; <code>/health</code> reports the breaker state and queue depth.</p>
     <p>Claude Desktop and Claude Code connect through the separate <code>mcp</code> binary over stdio: <a class="arrow" href="https://github.com/Mattbusel/tokio-prompt-orchestrator/blob/main/examples/mcp_claude_desktop.md">MCP setup</a></p>
-    <p class="note">Prebuilt 1.4.0 binaries exit right after printing the banner; the fix is on <code>main</code> and ships in the next release. Build from source until then.</p>
+    <p class="note">Windows: <a href="https://github.com/Mattbusel/tokio-prompt-orchestrator/releases/latest/download/orchestrator-windows-x64.exe">download the .exe</a> and double-click it; pick <code>echo</code> in the setup to try it with no key.</p>
   </div>
   <img class="shot" src="assets/terminal-server.png" alt="The orchestrator started with --provider echo, answering one prompt typed in the terminal and one sent with curl to /api/v1/infer" width="1184" height="607" loading="lazy">
 </section>

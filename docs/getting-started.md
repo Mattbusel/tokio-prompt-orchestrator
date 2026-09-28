@@ -16,7 +16,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ## Your first pipeline
 
 The simplest pipeline uses `EchoWorker`, which echoes the prompt back as
-tokens — no API key required.
+tokens: no API key required.
 
 ```rust
 use std::collections::HashMap;
@@ -166,7 +166,7 @@ JSON logs suitable for log aggregation.
 
 ## Next steps
 
-- [primitives.md](primitives.md) — detailed guide to all enhanced primitives
-- [configuration.md](configuration.md) — all config fields with defaults
-- [architecture.md](architecture.md) — pipeline design and module map
-- [API docs](https://docs.rs/tokio-prompt-orchestrator) — full rustdoc
+- [primitives.md](primitives.md): detailed guide to all enhanced primitives
+- [configuration.md](configuration.md): all config fields with defaults
+- [ARCHITECTURE.md](ARCHITECTURE.md): pipeline design and module map
+- [API docs](https://docs.rs/tokio-prompt-orchestrator): full rustdoc

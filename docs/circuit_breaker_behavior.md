@@ -78,13 +78,13 @@ The circuit breaker transitions from **Closed** to **Open** on the 5th consecuti
 - Request 9: Second failure (failures = 2)
 - Request 10: Third failure (failures = 3)
 - Request 11: Fourth failure (failures = 4)
-- **Request 12: Fifth failure (failures = 5) — CIRCUIT OPENS**
+- **Request 12: Fifth failure (failures = 5): CIRCUIT OPENS**
 
 The state machine correctly counts **consecutive** failures. Any success during the failure sequence resets the counter to 0 (`record_success` sets `failures = 0` when Closed).
 
 ### 2. Open State Provides Instant Fast-Fail
 
-Once open, requests 13-29 are **immediately rejected** without reaching the worker. This is the core value proposition — protecting a failing downstream service from further load while giving it time to recover.
+Once open, requests 13-29 are **immediately rejected** without reaching the worker. This is the core value proposition, protecting a failing downstream service from further load while giving it time to recover.
 
 - Zero worker calls during open state
 - Rejection latency: sub-microsecond (no async work)
@@ -93,7 +93,7 @@ Once open, requests 13-29 are **immediately rejected** without reaching the work
 
 After the 200ms `recovery_timeout` elapses (triggered by the sleep at request #29), the circuit transitions to **HalfOpen** and allows one probe request through:
 
-- **Request #30**: Probe reaches the worker — but the worker is still failing (call 13, within fail range 8..27)
+- **Request #30**: Probe reaches the worker, but the worker is still failing (call 13, within fail range 8..27)
 - The probe fails, circuit **immediately reopens**
 - Requests 31-49 are rejected again
 
@@ -139,7 +139,7 @@ In a real scenario with a recovered service:
 | 50 requests total elapsed | **265ms** (includes 250ms deliberate sleep) |
 | Requests actually reaching worker | **14 of 50** (8 success + 5 failure + 1 probe) |
 | Requests fast-failed by circuit | **36 of 50** (72%) |
-| Worker load reduction | **72%** — circuit breaker shielded the failing service |
+| Worker load reduction | **72%**, circuit breaker shielded the failing service |
 
 ---
 
@@ -149,5 +149,5 @@ In a real scenario with a recovered service:
 - **Configurable at runtime**: Use `configure_pipeline` MCP tool to adjust `circuit_breaker_threshold`
 - **Manual recovery**: `CircuitBreaker::reset()` immediately closes the circuit
 - **Manual trip**: `CircuitBreaker::trip()` immediately opens the circuit
-- **Thread-safe**: All operations use `Arc<RwLock<>>` — safe for concurrent pipeline stages
-- **MCP status gap**: The current `pipeline_status` MCP tool reports hardcoded "closed" states rather than querying the real `CircuitBreaker` instances — this should be wired up for production observability
+- **Thread-safe**: All operations use `Arc<RwLock<>>`, safe for concurrent pipeline stages
+- **MCP status gap**: The current `pipeline_status` MCP tool reports hardcoded "closed" states rather than querying the real `CircuitBreaker` instances, this should be wired up for production observability

@@ -59,8 +59,10 @@
 //!
 //! ## How it works
 //!
+//! ![Animated diagram: requests pass through five bounded stages; stage 3 wraps the model call in a deadline check, a circuit breaker and a timeout; dropped requests go to a dead-letter queue](https://raw.githubusercontent.com/Mattbusel/tokio-prompt-orchestrator/main/assets/how-it-works.svg)
+//!
 //! ```text
-//! PromptRequest -> RAG(512) -> Assemble(512) -> Inference(1024) -> Post(512) -> Stream(256)
+//! PromptRequest -(512)-> Retrieve -(512)-> Assemble -(512)-> Inference -(1024)-> Post -(512)-> Stream -(256)-> output
 //! ```
 //!
 //! Each stage runs as its own Tokio task, joined by bounded channels. When a

@@ -4,7 +4,9 @@ name: Release
 # attach them, with SHA256SUMS.txt, to a GitHub Release. Publishing to
 # crates.io stays manual. Asset names (orchestrator-<tag>-<target>.<ext>) are
 # relied on by cargo-binstall metadata in Cargo.toml, install.sh, install.ps1,
-# the Homebrew formula and the Scoop manifest: do not rename them.
+# the Homebrew formula and the Scoop manifest: do not rename them. The extra
+# orchestrator-windows-x64.exe (no version in the name) is the README's direct
+# Windows download link.
 on:
   push:
     tags:
@@ -94,6 +96,12 @@ jobs:
           Compress-Archive -Path $name -DestinationPath "$name.zip"
           $hash = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
+          # Also the bare exe under a name without the version, so the README's
+          # "Download for Windows" link (releases/latest/download/...) never changes.
+          $exe = "$env:NAME-windows-x64.exe"
+          Copy-Item "target/${{ matrix.target }}/release/$env:NAME.exe" $exe
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  $exe" | Out-File -Encoding ascii "$exe.sha256"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -101,6 +109,7 @@ jobs:
           path: |
             ${{ env.NAME }}-*.tar.gz*
             ${{ env.NAME }}-*.zip*
+            ${{ env.NAME }}-*.exe*
 
   release:
     name: Publish GitHub Release
@@ -131,12 +140,12 @@ jobs:
 
           | System | File |
           |--------|------|
-          | Windows x86_64 | \`${NAME}-${TAG}-x86_64-pc-windows-msvc.zip\` |
+          | Windows x86_64 | \`${NAME}-${TAG}-x86_64-pc-windows-msvc.zip\`, or just the program: \`${NAME}-windows-x64.exe\` |
           | macOS Apple Silicon | \`${NAME}-${TAG}-aarch64-apple-darwin.tar.gz\` |
           | macOS Intel | \`${NAME}-${TAG}-x86_64-apple-darwin.tar.gz\` |
           | Linux x86_64 | \`${NAME}-${TAG}-x86_64-unknown-linux-gnu.tar.gz\` |
 
-          Or install in one line: see the Install section of the README. Unpack and run \`orchestrator --provider echo\` to try it with no API key. The binaries are unsigned: Windows SmartScreen may show "unknown publisher" (More info, then Run anyway); on macOS right-click the file and choose Open. Verify downloads with SHA256SUMS.txt. See CHANGELOG.md for what changed.
+          Or install in one line: see the Download section of the README. Unpack and run \`orchestrator --provider echo\` to try it with no API key. The binaries are unsigned: Windows SmartScreen may show "unknown publisher" (More info, then Run anyway); on macOS right-click the file and choose Open. Verify downloads with SHA256SUMS.txt. See CHANGELOG.md for what changed.
           NOTES
           sed -i 's/^          //' notes.md
           if gh release view "$TAG" >/dev/null 2>&1; then

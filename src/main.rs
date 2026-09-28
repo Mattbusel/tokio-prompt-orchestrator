@@ -141,8 +141,9 @@ fn print_help() {
         r#"orchestrator {}
 
 What it does
-  Routes your prompts through a resilience pipeline (deduplication,
-  retries, circuit breakers) so AI agents stay online under load.
+  Puts a bounded queue, a circuit breaker, per-call timeouts and a
+  dead-letter queue between your tools and an AI model, so a slow or
+  failing provider fails fast instead of hanging everything.
   Run it once, leave the window open, and any tool can use it.
 
 USAGE:
@@ -405,13 +406,13 @@ fn run_wizard(args: CliArgs) -> ResolvedConfig {
     if is_first_run || args.reset {
         println!();
         println!("  ┌─────────────────────────────────────────────────────┐");
-        println!("  │         Welcome to tokio-prompt-orchestrator         │");
-        println!("  │                                                       │");
-        println!("  │  This tool routes your prompts through an AI         │");
-        println!("  │  pipeline with automatic retries, deduplication,     │");
-        println!("  │  and circuit breakers.                                │");
-        println!("  │                                                       │");
-        println!("  │  Setup takes about 60 seconds.                       │");
+        println!("  │         Welcome to tokio-prompt-orchestrator        │");
+        println!("  │                                                     │");
+        println!("  │  This tool routes your prompts through a bounded    │");
+        println!("  │  AI pipeline with a circuit breaker, timeouts       │");
+        println!("  │  and a dead-letter queue.                           │");
+        println!("  │                                                     │");
+        println!("  │  Setup takes about 60 seconds.                      │");
         println!("  └─────────────────────────────────────────────────────┘");
         println!();
     }
@@ -854,6 +855,8 @@ fn init_tracing(level: &str) {
         let _ = fmt()
             .with_env_filter(EnvFilter::new(filter))
             .with_target(false)
+            // A log file is not a terminal: no colour escape codes in it.
+            .with_ansi(false)
             .with_writer(std::sync::Mutex::new(file))
             .try_init();
     } else {
@@ -861,6 +864,7 @@ fn init_tracing(level: &str) {
         let _ = fmt()
             .with_env_filter(EnvFilter::new(filter))
             .with_target(false)
+            .with_ansi(env::var_os("NO_COLOR").is_none())
             .with_writer(std::io::stderr)
             .try_init();
     }
