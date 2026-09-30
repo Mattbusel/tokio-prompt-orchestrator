@@ -11,7 +11,7 @@ variables:
   SMOKE: "./target/release/orchestrator --help"          # command run against the built binary as a test
   PKG: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${BIN}/${CI_COMMIT_TAG}"
 
-stages: [build, release]
+stages: [test, build, release]
 
 build-linux:
   stage: build
@@ -63,3 +63,22 @@ release:
           url: "${PKG}/SHA256SUMS.txt"
           link_type: other
           direct_asset_path: "/SHA256SUMS.txt"
+
+test:
+  stage: test
+  image: rust:1-bookworm
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_PIPELINE_SOURCE == "web"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      changes: ["src/**/*", "tests/**/*", "Cargo.toml", "Cargo.lock", ".gitlab-ci.yml"]
+  variables:
+    CARGO_HOME: "${CI_PROJECT_DIR}/.cargo-home"
+    CARGO_TARGET_DIR: "${CI_PROJECT_DIR}/target"
+  cache:
+    key: cargo-test
+    paths: [target/, .cargo-home/]
+  script:
+    - cargo test --locked --lib
