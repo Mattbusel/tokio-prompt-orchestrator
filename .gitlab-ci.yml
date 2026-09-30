@@ -1,0 +1,64 @@
+# Release pipeline: on a v* tag, build the Linux x86_64 binary, smoke-test it,
+# upload it to this project's generic package registry and publish a GitLab release.
+# Built on Debian bullseye (glibc 2.31) so it runs on Ubuntu 20.04+ and Debian 11+.
+#
+# Stable download links (always the newest release):
+#   https://gitlab.com/<project>/-/releases/permalink/latest/downloads/<BIN>-linux-x86_64.tar.gz
+
+variables:
+  BIN: "orchestrator"
+  EXTRA: ""          # extra files or folders to ship in the archive
+  SMOKE: "./target/release/orchestrator --help"          # command run against the built binary as a test
+  PKG: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${BIN}/${CI_COMMIT_TAG}"
+
+stages: [build, release]
+
+build-linux:
+  stage: build
+  image: rust:1-bullseye
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d/
+  cache:
+    key: cargo-bullseye
+    paths: [target/, .cargo-home/]
+  variables:
+    CARGO_HOME: "${CI_PROJECT_DIR}/.cargo-home"
+  script:
+    - cargo build --release --locked --bin "$BIN"
+    - ./target/release/$BIN --version
+    - sh -c "$SMOKE"
+    - name="$BIN-$CI_COMMIT_TAG-x86_64-unknown-linux-gnu"
+    - mkdir -p "dist/$name"
+    - cp "target/release/$BIN" README.md LICENSE "dist/$name/"
+    - for x in $EXTRA; do cp -r "${x%%=*}" "dist/$name/$(basename "${x#*=}")"; done
+    - cd dist
+    - tar czf "$name.tar.gz" "$name"
+    - cp "$name.tar.gz" "$BIN-linux-x86_64.tar.gz"
+    - rm -rf "$name"
+    - sha256sum *.tar.gz > SHA256SUMS.txt
+    - cat SHA256SUMS.txt
+    - 'for f in *; do curl --fail -sS -H "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file "$f" "$PKG/$f" >/dev/null; echo "uploaded $f"; done'
+  artifacts:
+    paths: [dist/]
+
+release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d/
+  script:
+    - echo "Releasing $CI_COMMIT_TAG"
+  release:
+    tag_name: $CI_COMMIT_TAG
+    name: "$BIN $CI_COMMIT_TAG"
+    description: "Linux x86_64 build of $BIN $CI_COMMIT_TAG (glibc 2.31+: Ubuntu 20.04, Debian 11 and newer). Download, `tar xzf`, run. Checksums in SHA256SUMS.txt. Or build from source with `cargo install --locked`."
+    assets:
+      links:
+        - name: "Linux x86_64 (tar.gz)"
+          url: "${PKG}/${BIN}-linux-x86_64.tar.gz"
+          link_type: package
+          direct_asset_path: "/${BIN}-linux-x86_64.tar.gz"
+        - name: "SHA256SUMS.txt"
+          url: "${PKG}/SHA256SUMS.txt"
+          link_type: other
+          direct_asset_path: "/SHA256SUMS.txt"
