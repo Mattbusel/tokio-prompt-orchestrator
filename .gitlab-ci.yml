@@ -23,6 +23,7 @@ build-linux:
     paths: [target/, .cargo-home/]
   variables:
     CARGO_HOME: "${CI_PROJECT_DIR}/.cargo-home"
+    CARGO_TARGET_DIR: "${CI_PROJECT_DIR}/target"
   script:
     - cargo build --release --locked --bin "$BIN"
     - ./target/release/$BIN --version
