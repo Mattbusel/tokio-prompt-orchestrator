@@ -7,7 +7,6 @@ For developers who call an LLM API from an app, an agent or a script and want it
 <p>
   <a href="https://crates.io/crates/tokio-prompt-orchestrator"><img alt="crates.io" src="https://img.shields.io/crates/v/tokio-prompt-orchestrator.svg"></a>
   <a href="https://docs.rs/tokio-prompt-orchestrator"><img alt="docs.rs" src="https://img.shields.io/docsrs/tokio-prompt-orchestrator"></a>
-  <a href="https://github.com/Mattbusel/tokio-prompt-orchestrator/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Mattbusel/tokio-prompt-orchestrator/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://github.com/Mattbusel/tokio-prompt-orchestrator/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/Mattbusel/tokio-prompt-orchestrator"></a>
   <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
 </p>
@@ -24,8 +23,8 @@ Double-click it: a short setup asks for a provider (pick **echo** to try it with
 
 | Where | One line |
 |---|---|
-| **macOS / Linux** | `curl -fsSL https://raw.githubusercontent.com/Mattbusel/tokio-prompt-orchestrator/main/install.sh \| sh` |
-| **Windows** (PowerShell, adds it to PATH) | `irm https://raw.githubusercontent.com/Mattbusel/tokio-prompt-orchestrator/main/install.ps1 \| iex` |
+| **macOS / Linux** | `curl -fsSL https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/raw/main/install.sh \| sh` |
+| **Windows** (PowerShell, adds it to PATH) | `irm https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/raw/main/install.ps1 \| iex` |
 | Homebrew | `brew install mattbusel/tap/tokio-prompt-orchestrator` |
 | Scoop | `scoop bucket add mattbusel https://github.com/Mattbusel/scoop-bucket; scoop install mattbusel/tokio-prompt-orchestrator` |
 | Rust | `cargo binstall tokio-prompt-orchestrator` (prebuilt) or `cargo install tokio-prompt-orchestrator --features web-api` |
