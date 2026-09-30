@@ -13,7 +13,7 @@ For developers who call an LLM API from an app, an agent or a script and want it
 
 <img alt="Recorded session. Part 1: cargo run --example llm_pipeline answers 12 requests with 3 model calls, then during a simulated outage 5 calls fail with 503, the circuit breaker opens and the next 3 fail fast. Part 2: orchestrator --provider echo answers a question typed at its prompt while a second terminal sends a prompt with curl, fetches the result and reads /health." src="assets/demo.gif" width="100%">
 
-<sub>A real recording, sped up only where it was waiting. <a href="https://mattbusel.github.io/tokio-prompt-orchestrator/">The site</a> replays the same run step by step.</sub>
+<sub>A real recording, sped up only where it was waiting. <a href="https://tokio-prompt-orchestrator.vercel.app/">The site</a> replays the same run step by step.</sub>
 
 ## Install
 
@@ -143,4 +143,4 @@ Contributions welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). MIT licensed, see
 
 ## Hire the author
 
-**Need this kind of engineering on your product?** I take on a small number of client builds: LLM features, iOS apps and performance work, fixed price. [Services and pricing](https://mattbusel.github.io/) · [Email](mailto:mattbusel@gmail.com) · [LinkedIn](https://www.linkedin.com/in/matthewbusel/)
+**Need this kind of engineering on your product?** I take on a small number of client builds: LLM features, iOS apps and performance work, fixed price. [Services and pricing](https://mattbusel.vercel.app/) · [Email](mailto:mattbusel@gmail.com) · [LinkedIn](https://www.linkedin.com/in/matthewbusel/)

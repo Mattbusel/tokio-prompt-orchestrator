@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install the latest `orchestrator` release on Linux or macOS.
 #
-#   curl -fsSL https://raw.githubusercontent.com/Mattbusel/tokio-prompt-orchestrator/main/install.sh | sh
+#   curl -fsSL https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/raw/main/install.sh | sh
 #
 # Downloads the archive for this OS and CPU from GitHub Releases, checks it
 # against SHA256SUMS.txt, and copies the binaries into ~/.local/bin (override

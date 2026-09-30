@@ -22,7 +22,7 @@ Thank you for your interest in contributing. This is a research-grade, productio
 
 3. **Clone the repo**:
    ```bash
-   git clone https://github.com/Mattbusel/tokio-prompt-orchestrator
+   git clone https://gitlab.com/mattbusel/tokio-prompt-orchestrator
    cd tokio-prompt-orchestrator
    ```
 
@@ -274,4 +274,4 @@ curl http://localhost:8080/api/v1/debug/circuit_breaker | jq .state
 
 ## Questions
 
-Open a [Discussion](https://github.com/Mattbusel/tokio-prompt-orchestrator/discussions) for design questions, research ideas, or "would you accept a PR for X?" conversations.
+Open a [Discussion](https://gitlab.com/mattbusel/tokio-prompt-orchestrator/discussions) for design questions, research ideas, or "would you accept a PR for X?" conversations.

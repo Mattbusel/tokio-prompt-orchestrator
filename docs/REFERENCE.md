@@ -84,7 +84,7 @@ From the last recorded run in [BENCHMARKS.md](../BENCHMARKS.md) (Windows, x86_64
 | 1000 concurrent `EchoWorker` calls | 7.1 ms total, about 140,800 req/s |
 | 100 identical concurrent prompts with dedup | 52.6 µs total, one inference |
 
-In other words the orchestration overhead is small next to any real model call. CI records the pipeline benchmarks on every push to `main`: [benchmark history](https://mattbusel.github.io/tokio-prompt-orchestrator/dev/bench/). Run them yourself:
+In other words the orchestration overhead is small next to any real model call. CI records the pipeline benchmarks on every push to `main`: [benchmark history](https://tokio-prompt-orchestrator.vercel.app/dev/bench/). Run them yourself:
 
 ```bash
 cargo bench --features full
@@ -227,5 +227,5 @@ All features are opt-in. The default build has no optional dependencies.
 - **PromptGuard embedding mode**: Current detection is lexical (no external deps). A future optional mode will use local embedding models for semantic similarity detection.
 - **ArbitrageEngine + circuit breaker integration**: A future release will auto-exclude circuit-breaker-open providers from the arbitrage candidate set.
 - **PoolSizer and pipeline integration**: Currently advisory only. Future versions will wire `PoolSizer` directly to the pipeline stage worker count.
-- **Docker**: the Dockerfile does not build a working image yet ([#5](https://github.com/Mattbusel/tokio-prompt-orchestrator/issues/5)).
-- **RAG stage**: stage 1 has no pluggable retriever yet ([#6](https://github.com/Mattbusel/tokio-prompt-orchestrator/issues/6)).
+- **Docker**: the Dockerfile does not build a working image yet ([#5](https://gitlab.com/mattbusel/tokio-prompt-orchestrator)).
+- **RAG stage**: stage 1 has no pluggable retriever yet ([#6](https://gitlab.com/mattbusel/tokio-prompt-orchestrator)).

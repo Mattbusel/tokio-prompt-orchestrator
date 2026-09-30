@@ -3,12 +3,12 @@ PackageIdentifier: Mattbusel.TokioPromptOrchestrator
 PackageVersion: 1.4.2
 PackageLocale: en-US
 Publisher: Matt Busel
-PublisherUrl: https://github.com/Mattbusel
-PublisherSupportUrl: https://github.com/Mattbusel/tokio-prompt-orchestrator/issues
+PublisherUrl: https://gitlab.com/mattbusel
+PublisherSupportUrl: https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/issues
 PackageName: tokio-prompt-orchestrator
-PackageUrl: https://github.com/Mattbusel/tokio-prompt-orchestrator
+PackageUrl: https://gitlab.com/mattbusel/tokio-prompt-orchestrator
 License: MIT
-LicenseUrl: https://github.com/Mattbusel/tokio-prompt-orchestrator/blob/main/LICENSE
+LicenseUrl: https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/blob/main/LICENSE
 ShortDescription: Put a queue, deduplication and a circuit breaker in front of LLM API calls.
 Description: |-
   orchestrator runs a prompt pipeline with request deduplication, a circuit breaker and a dead-letter queue in front of Anthropic, OpenAI, llama.cpp or vLLM. It serves a terminal prompt and an HTTP API (REST, SSE, WebSocket) at the same time. Run "orchestrator --provider echo" to try it with no API key.
@@ -19,6 +19,6 @@ Tags:
   - anthropic
   - circuit-breaker
   - cli
-ReleaseNotesUrl: https://github.com/Mattbusel/tokio-prompt-orchestrator/releases/tag/v1.4.2
+ReleaseNotesUrl: https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/releases
 ManifestType: defaultLocale
 ManifestVersion: 1.6.0

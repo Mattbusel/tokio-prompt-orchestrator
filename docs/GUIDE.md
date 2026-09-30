@@ -17,7 +17,7 @@ cargo run --features full,tui --bin tui
 
 <img alt="The orchestrator binary in echo mode answering a prompt typed in the terminal, while a second terminal posts a prompt to /api/v1/infer and fetches the result" src="../assets/terminal-server.png" width="100%">
 
-To use the library from `main` instead of the crates.io release: `tokio-prompt-orchestrator = { git = "https://github.com/Mattbusel/tokio-prompt-orchestrator" }`.
+To use the library from `main` instead of the crates.io release: `tokio-prompt-orchestrator = { git = "https://gitlab.com/mattbusel/tokio-prompt-orchestrator" }`.
 
 Without `--provider` the first launch runs a setup wizard (Anthropic, OpenAI, llama.cpp, or offline echo) and saves the choice to `orchestrator.env` next to the binary. Use 1.4.1 or later: the 1.4.0 binaries exited right after printing the banner.
 
@@ -96,7 +96,7 @@ Flags: `--port` (default 8080), `--host` (default 127.0.0.1), `--no-web`, `--max
 
 ### Docker
 
-A `Dockerfile` and a `docker-compose.yml` (orchestrator, Redis, NATS, Prometheus, Grafana) are in the repo, but the Dockerfile does not build a working image yet: see [#5](https://github.com/Mattbusel/tokio-prompt-orchestrator/issues/5). A pre-built Grafana dashboard is in `grafana-dashboard.json`.
+A `Dockerfile` and a `docker-compose.yml` (orchestrator, Redis, NATS, Prometheus, Grafana) are in the repo, but the Dockerfile does not build a working image yet: see [#5](https://gitlab.com/mattbusel/tokio-prompt-orchestrator). A pre-built Grafana dashboard is in `grafana-dashboard.json`.
 
 ### Multi-node distributed mode
 

@@ -2,7 +2,7 @@
 //! provider, so repeated prompts cost one call and an outage fails fast instead
 //! of piling up.
 //!
-//! ![demo](https://raw.githubusercontent.com/Mattbusel/tokio-prompt-orchestrator/main/assets/demo.gif)
+//! ![demo](https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/raw/main/assets/demo.gif)
 //!
 //! ## Quick start
 //!
@@ -59,7 +59,7 @@
 //!
 //! ## How it works
 //!
-//! ![Animated diagram: requests pass through five bounded stages; stage 3 wraps the model call in a deadline check, a circuit breaker and a timeout; dropped requests go to a dead-letter queue](https://raw.githubusercontent.com/Mattbusel/tokio-prompt-orchestrator/main/assets/how-it-works.svg)
+//! ![Animated diagram: requests pass through five bounded stages; stage 3 wraps the model call in a deadline check, a circuit breaker and a timeout; dropped requests go to a dead-letter queue](https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/raw/main/assets/how-it-works.svg)
 //!
 //! ```text
 //! PromptRequest -(512)-> Retrieve -(512)-> Assemble -(512)-> Inference -(1024)-> Post -(512)-> Stream -(256)-> output
@@ -74,7 +74,7 @@
 //! ## Binaries and features
 //!
 //! The `orchestrator` binary (prebuilt on the
-//! [releases page](https://github.com/Mattbusel/tokio-prompt-orchestrator/releases/latest),
+//! [releases page](https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/releases),
 //! or `cargo binstall tokio-prompt-orchestrator`) serves the pipeline over a
 //! terminal prompt and an HTTP API: `orchestrator --provider echo` runs with no key.
 //! No features are on by default. `web-api` adds the REST, SSE and WebSocket
