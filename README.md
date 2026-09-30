@@ -7,7 +7,7 @@ For developers who call an LLM API from an app, an agent or a script and want it
 <p>
   <a href="https://crates.io/crates/tokio-prompt-orchestrator"><img alt="crates.io" src="https://img.shields.io/crates/v/tokio-prompt-orchestrator.svg"></a>
   <a href="https://docs.rs/tokio-prompt-orchestrator"><img alt="docs.rs" src="https://img.shields.io/docsrs/tokio-prompt-orchestrator"></a>
-  <a href="https://github.com/Mattbusel/tokio-prompt-orchestrator/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/Mattbusel/tokio-prompt-orchestrator"></a>
+  <a href="https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/releases"><img alt="release" src="https://img.shields.io/gitlab/v/release/mattbusel%2Ftokio-prompt-orchestrator"></a>
   <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
 </p>
 
@@ -15,22 +15,20 @@ For developers who call an LLM API from an app, an agent or a script and want it
 
 <sub>A real recording, sped up only where it was waiting. <a href="https://mattbusel.github.io/tokio-prompt-orchestrator/">The site</a> replays the same run step by step.</sub>
 
-## Download
+## Install
 
-### [Download for Windows (.exe)](https://github.com/Mattbusel/tokio-prompt-orchestrator/releases/latest/download/orchestrator-windows-x64.exe)
+**Linux** (x86_64, Ubuntu 20.04+ / Debian 11+). One line, no dependencies, installs to `~/.local/bin`:
 
-Double-click it: a short setup asks for a provider (pick **echo** to try it with no key and no internet), then it runs. Windows may say "unknown publisher" because the file is unsigned: click More info, then Run anyway.
+```sh
+mkdir -p ~/.local/bin && curl -fsSL https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/releases/permalink/latest/downloads/orchestrator-linux-x86_64.tar.gz | tar xz --strip-components=1 -C ~/.local/bin --wildcards '*/orchestrator'
+```
 
-| Where | One line |
+| Other systems | |
 |---|---|
-| **macOS / Linux** | `curl -fsSL https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/raw/main/install.sh \| sh` |
-| **Windows** (PowerShell, adds it to PATH) | `irm https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/raw/main/install.ps1 \| iex` |
-| Homebrew | `brew install mattbusel/tap/tokio-prompt-orchestrator` |
-| Scoop | `scoop bucket add mattbusel https://github.com/Mattbusel/scoop-bucket; scoop install mattbusel/tokio-prompt-orchestrator` |
-| Rust | `cargo binstall tokio-prompt-orchestrator` (prebuilt) or `cargo install tokio-prompt-orchestrator --features web-api` |
-| **As a library** | `cargo add tokio-prompt-orchestrator` |
+| **Windows** | [Download orchestrator-windows-x86_64.exe](https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/releases/permalink/latest/downloads/orchestrator-windows-x86_64.exe) and run it. (Unsigned, so SmartScreen may ask: *More info*, then *Run anyway*.) |
+| **macOS, or from source** | `cargo install --locked tokio-prompt-orchestrator --features web-api` |
 
-Every method installs the same `orchestrator` command. Zips and tarballs for Windows, macOS (Apple Silicon and Intel) and Linux, with `SHA256SUMS.txt`, are on the [Releases](https://github.com/Mattbusel/tokio-prompt-orchestrator/releases/latest) page.
+Every method installs the same `orchestrator` command. Every release, with SHA-256 checksums: [Releases](https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/releases).
 
 ## How it works
 
