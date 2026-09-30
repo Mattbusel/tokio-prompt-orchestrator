@@ -30,6 +30,54 @@ mkdir -p ~/.local/bin && curl -fsSL https://gitlab.com/mattbusel/tokio-prompt-or
 
 Every method installs the same `orchestrator` command. Every release, with SHA-256 checksums: [Releases](https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/releases).
 
+## Drop-in OpenAI proxy
+
+Any app that already uses an OpenAI client gets deduplication, the circuit breaker, timeouts, a spend cap and the dead-letter queue with no code change: start `orchestrator` and point the client's base URL at it.
+
+```sh
+export OPENAI_BASE_URL=http://127.0.0.1:8080/v1
+```
+
+With `orchestrator --provider echo` running (echo mode answers with your prompt, no key needed), the official Python client (`pip install openai`), unchanged:
+
+```python
+from openai import OpenAI
+
+client = OpenAI()  # reads OPENAI_BASE_URL and OPENAI_API_KEY
+
+reply = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Summarize this ticket"}],
+)
+print(reply.choices[0].message.content, reply.usage.total_tokens)
+
+for chunk in client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Now stream it"}],
+    stream=True,
+):
+    if chunk.choices:
+        print(chunk.choices[0].delta.content or "", end="")
+print()
+```
+```text
+Summarize this ticket 10
+Now stream it
+```
+
+The same question again from `curl` is answered from the dedup window, without a model call:
+
+```bash
+curl -s -i localhost:8080/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "Summarize this ticket"}]}'
+```
+```text
+x-orchestrator-dedup: cached
+{"choices":[{"finish_reason":"stop","index":0,"logprobs":null,"message":{"content":"Summarize this ticket","refusal":null,"role":"assistant"}}],"created":1790804186,"id":"chatcmpl-4d5284a811bd4c0f90bee01018103e1a","model":"echo","object":"chat.completion","system_fingerprint":null,"usage":{"completion_tokens":5,"prompt_tokens":5,"total_tokens":10}}
+```
+
+The orchestrator answers with the provider and model it was started with (`--provider openai --model gpt-4o-mini`, say), whatever `model` the request names. Errors come back in OpenAI's format: 503 while the breaker is open, 429 at the spend cap. Details, auth and limits: [docs/REFERENCE.md](docs/REFERENCE.md#openai-compatible-api).
+
 ## How it works
 
 <img alt="Animated diagram of the real pipeline. A request enters through input_tx.send() or POST /api/v1/infer and passes five stages joined by bounded channels of 512, 512, 512, 1024, 512 and 256: Retrieve, Assemble, Inference, Post-process, Stream. Inside stage 3 every request goes through a deadline check, the circuit breaker (5 failures open it, it refuses calls for 60 s, then lets one probe through), a 120 s timeout, and then your ModelWorker. Deduplicator, RetryPolicy and RateLimiter are optional wrappers around the worker. Dropped requests land in a 1000-entry dead-letter queue with a reason such as backpressure, deadline_expired, circuit_breaker_open, inference_timeout or inference_failure. The animation shows healthy traffic, then an outage where the breaker opens and calls fail fast into the dead-letter queue." src="assets/how-it-works.svg" width="100%">

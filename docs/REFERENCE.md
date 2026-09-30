@@ -166,6 +166,8 @@ node_id   = "node-1"
 | `JAEGER_ENDPOINT` | OTLP HTTP endpoint | disabled |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Alternative OTLP endpoint | disabled |
 | `METRICS_API_KEY` | Bearer token to guard `/metrics` | disabled |
+| `ORCHESTRATOR_API_KEY` | Bearer token required on the HTTP API, including `/v1/chat/completions` (`API_KEY` is the older name) | disabled |
+| `ORCHESTRATOR_DEDUP_SECS` | Seconds a finished chat completion is reused for an identical request | `300` |
 
 ## Feature flags
 
@@ -173,7 +175,7 @@ All features are opt-in. The default build has no optional dependencies.
 
 | Flag | Enables | Typical use |
 |---|---|---|
-| `web-api` | Axum HTTP/WS/SSE server | REST clients, streaming |
+| `web-api` | Axum HTTP/WS/SSE server, including the OpenAI-compatible `/v1` API | REST clients, OpenAI SDKs, streaming |
 | `metrics-server` | Prometheus `/metrics` endpoint | Grafana dashboards |
 | `tui` | Ratatui terminal dashboard | Local monitoring |
 | `mcp` | Model Context Protocol server | Claude Desktop / Claude Code |
@@ -189,6 +191,64 @@ All features are opt-in. The default build has no optional dependencies.
 | `schema` | JSON Schema export for `PipelineConfig` | IDE validation |
 | `dashboard` | Web dashboard UI | Browser monitoring |
 | `core-pinning` | CPU core affinity for pipeline tasks | Latency-sensitive deployments |
+
+## OpenAI-compatible API
+
+`orchestrator` (built with `web-api`, as the release binaries are) serves the OpenAI Chat Completions API, so an existing OpenAI client works by changing its base URL to `http://<host>:<port>/v1` (or setting `OPENAI_BASE_URL`, which the official Python and Node SDKs read).
+
+| Endpoint | Behaviour |
+|---|---|
+| `POST /v1/chat/completions` | Standard request body. Returns a `chat.completion` object with `usage`, or with `"stream": true` Server-Sent Events in `chat.completion.chunk` format ending with `data: [DONE]`. `stream_options.include_usage` adds the final usage chunk. |
+| `GET /v1/models` | One entry: the model the orchestrator was started with, `owned_by` set to the provider. |
+
+**What happens to a request.** It goes into the same five-stage pipeline as `POST /api/v1/infer`: bounded queues, the circuit breaker (5 failures open it, one probe after 60 s), the 120 s inference timeout, and the dead-letter queue. A dropped request is answered at once with an error that says why, instead of hanging until the client times out.
+
+- **Messages.** A single user message is sent to the model exactly as written. A longer conversation is flattened into one prompt, one `Role: text` turn per message separated by blank lines (`System`, `User`, `Assistant`, `Tool`). Content may be a string or an array of `text` parts.
+- **Model and sampling.** The worker calls the provider and model given at startup (`--provider`, `--model`), and the response's `model` field reports that model. The request's `model`, `temperature`, `max_tokens`, `top_p` and other unknown fields are accepted and ignored.
+- **Deduplication.** Requests whose flattened prompt is identical share one upstream call while it is in flight, and a finished answer is reused for `ORCHESTRATOR_DEDUP_SECS` seconds (default 300; `0` keeps only in-flight sharing). The `x-orchestrator-dedup` response header is `miss` (this request called the model), `joined` (it waited on an identical call already in flight) or `cached`. If the shared call fails, every request that joined it gets the same error.
+- **Streaming.** The pipeline returns the whole answer at once, so the stream starts when the answer is ready and delivers it as word-sized chunks. Errors therefore still arrive as a normal HTTP error response, never half way through a stream.
+- **Usage.** `prompt_tokens` and `completion_tokens` are estimates (about 4 characters per token), since the pipeline does not carry the provider's own counts.
+- **Not supported:** `n` greater than 1 (400), image or audio content parts (400), tool and function calling (the `tools` field is ignored), `logprobs`.
+
+**Errors** use OpenAI's shape, `{"error": {"message", "type", "param", "code"}}`, so the SDKs raise their usual exceptions (`AuthenticationError`, `RateLimitError`, `APIStatusError`).
+
+| Status | `code` | When |
+|---|---|---|
+| 400 | `invalid_request` | Body is not valid JSON, `messages` missing or empty, unsupported content, `n` > 1 |
+| 401 | `invalid_api_key` | Auth is on and the bearer token is missing or wrong |
+| 429 | `insufficient_quota` | The spend cap is reached |
+| 429 | `server_busy` | A pipeline queue is full (`Retry-After: 5`) |
+| 429 | `upstream_rate_limited` | The provider answered 429 |
+| 502 | `upstream_error` | The provider call failed |
+| 503 | `circuit_open` | The circuit breaker is open, so the provider was not called |
+| 503 | `shutting_down`, `pipeline_closed`, `tracker_full` | The server cannot take the request |
+| 504 | `upstream_timeout`, `timeout` | The provider or the whole request ran past its time limit |
+
+A real run against a provider that is down (`LLAMA_CPP_URL=http://127.0.0.1:9 orchestrator --provider llama`, seven different questions), trimmed:
+
+```text
+{"error":{"code":"upstream_error","message":"The upstream model call failed: inference failed: llama.cpp request failed: error sending request for url (http://127.0.0.1:9/completion)","param":null,"type":"api_error"}}  HTTP 502
+... the same for questions 2 to 5 ...
+{"error":{"code":"circuit_open","message":"The upstream model is failing, so the orchestrator's circuit breaker is open and this request was refused without calling it. Retry later.","param":null,"type":"server_error"}}  HTTP 503
+{"error":{"code":"circuit_open", ...}}  HTTP 503
+```
+
+All seven are in the dead-letter queue (`GET /api/v1/debug/dlq` showed `"count":7`) with their reasons.
+
+**Auth.** Set `ORCHESTRATOR_API_KEY` (or the older `API_KEY`) and every endpoint except `/health`, `/v1/health`, `/live`, `/ready`, `/version` and `/api/v1/schema` requires `Authorization: Bearer <key>`; give the same key to the client as its `api_key`. Unset, the server is open, which suits the default bind address `127.0.0.1`; clients may send any key. Real run with `ORCHESTRATOR_API_KEY=sk-local-123`:
+
+```text
+$ curl -s localhost:18556/v1/chat/completions -H 'Content-Type: application/json' -d '{"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}]}'
+{"error":{"code":"invalid_api_key","message":"Missing or incorrect API key. Send the orchestrator's key (ORCHESTRATOR_API_KEY) as 'Authorization: Bearer <key>'.","param":null,"type":"invalid_request_error"}}
+```
+
+**Spend cap.** `--max-spend <dollars>` caps estimated spend on this endpoint. Each upstream call (not dedup hits) is priced from the token estimates and the built-in price table in `cost_estimator` (models not in the table are priced at the `gpt-4o` rate; `echo` and `llama` are free) and added to the `orchestrator_inference_cost_usd_total` metric. At the cap the endpoint answers 429 and the server keeps running (with `--no-web` the program exits instead, as before). Real run with `--max-spend 0`:
+
+```text
+{"error":{"code":"insufficient_quota","message":"The orchestrator's spend cap of $0.00 is reached (estimated spend $0.0000). Restart it or raise --max-spend.","param":null,"type":"insufficient_quota"}}
+```
+
+The integration tests in [`tests/openai_compat_tests.rs`](../tests/openai_compat_tests.rs) cover all of the above: `cargo test --features web-api --test openai_compat_tests`.
 
 ## Quick API reference
 

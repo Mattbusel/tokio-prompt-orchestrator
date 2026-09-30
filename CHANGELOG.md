@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-09-30
+
+### Added
+
+- OpenAI-compatible API: `POST /v1/chat/completions` (JSON, or Server-Sent
+  Events in `chat.completion.chunk` format ending with `data: [DONE]` when
+  `"stream": true`) and `GET /v1/models`. Point any OpenAI client at
+  `http://127.0.0.1:8080/v1` (or set `OPENAI_BASE_URL`) and its requests go
+  through the pipeline: bounded queues, circuit breaker, timeouts and the
+  dead-letter queue. Verified with the official `openai` Python package and
+  `curl`; see "Drop-in OpenAI proxy" in the README and docs/REFERENCE.md.
+- Deduplication on that endpoint: identical conversations share one upstream
+  call while it is in flight, and the answer is reused for
+  `ORCHESTRATOR_DEDUP_SECS` (default 300). Response header
+  `x-orchestrator-dedup: miss | joined | cached`.
+- Errors in OpenAI's JSON shape with matching status codes: 503 while the
+  circuit breaker is open, 429 at the spend cap or when a queue is full, 502
+  for a failed provider call, 504 on timeout, 401 for a bad key.
+- `ORCHESTRATOR_API_KEY` turns on bearer auth for the HTTP API (`API_KEY`
+  still works).
+- `DeadLetterQueue::subscribe()` to be told about dropped requests as they
+  happen, `PromptRequest::is_raw_prompt()` and `META_PROMPT_MODE` (send the
+  input to the model without the placeholder context template), and
+  `CostEstimator::cost_for_tokens()`.
+- `ServerConfig` fields `provider`, `model`, `max_spend_usd`,
+  `dedup_window_secs` and `api_key` (all with defaults).
+
+### Changed
+
+- `--max-spend` now works with the web API: the OpenAI endpoint records an
+  estimated cost per upstream call and answers 429 `insufficient_quota` at the
+  cap, and the server keeps running. Before, nothing recorded cost, so the cap
+  never triggered. With `--no-web` it still exits at the cap.
+- Requests the pipeline drops now show as `failed` with the reason on
+  `GET /api/v1/status/<id>` and `/api/v1/result/<id>` right away, instead of
+  staying `processing` until the timeout.
+- The Linux release binary is built with the `web-api` feature. Earlier Linux
+  builds (1.4.x) had no HTTP server; the Windows build already had it. The
+  release job now also starts the binary and checks `/v1/models` and a chat
+  completion before publishing.
+
+### Fixed
+
+- `cargo test --lib --features web-api` compiles again (a stale test helper
+  in `web_api.rs`).
+
 ## [1.4.3] - 2026-09-28
 
 ### Changed

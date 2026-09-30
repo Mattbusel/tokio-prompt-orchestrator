@@ -14,6 +14,10 @@
 //! - `GET  /health`  -  Health check
 //! - `GET  /metrics`  -  Prometheus metrics
 //!
+//! ### OpenAI-compatible
+//! - `POST /v1/chat/completions`  -  Chat completions (JSON or SSE with `"stream": true`)
+//! - `GET  /v1/models`  -  The configured model
+//!
 //! ### WebSocket
 //! - `WS /api/v1/ws`  -  Real-time streaming inference
 
@@ -146,6 +150,41 @@ pub struct ServerConfig {
     /// Lower values reduce tail latency but increase CPU usage; higher values
     /// save CPU at the cost of slightly delayed responses.  Default: 100 ms.
     pub poll_interval_ms: u64,
+    /// Provider name the pipeline's worker talks to (`openai`, `anthropic`,
+    /// `llama`, `echo`, ...). Reported by `GET /v1/models` and used to decide
+    /// whether calls cost money (`echo` and `llama` are free).
+    #[serde(default = "default_provider")]
+    pub provider: String,
+    /// Model the pipeline's worker calls. Returned as `model` by the
+    /// OpenAI-compatible endpoints and listed by `GET /v1/models`.
+    #[serde(default = "default_provider")]
+    pub model: String,
+    /// Spend cap in USD for the OpenAI-compatible endpoint. Once the estimated
+    /// spend reaches it, `POST /v1/chat/completions` answers 429
+    /// `insufficient_quota`. `None` means no cap.
+    #[serde(default)]
+    pub max_spend_usd: Option<f64>,
+    /// How long (seconds) a completed answer is reused for an identical
+    /// request on `POST /v1/chat/completions`. Identical requests that arrive
+    /// while one is in flight always share that one upstream call; `0` turns
+    /// off reuse after completion. Default: 300.
+    #[serde(default = "default_dedup_window_secs")]
+    pub dedup_window_secs: u64,
+    /// Bearer token required on every non-public endpoint. When `None`, the
+    /// server reads `ORCHESTRATOR_API_KEY`, then `API_KEY`, from the
+    /// environment; when neither is set, auth is off.
+    #[serde(default, skip_serializing)]
+    pub api_key: Option<String>,
+}
+
+#[cfg(feature = "web-api")]
+fn default_provider() -> String {
+    "echo".to_string()
+}
+
+#[cfg(feature = "web-api")]
+fn default_dedup_window_secs() -> u64 {
+    300
 }
 
 #[cfg(feature = "web-api")]
@@ -158,6 +197,11 @@ impl Default for ServerConfig {
             timeout_seconds: 300,               // 5 minutes
             debug_mode: true,
             poll_interval_ms: 100,
+            provider: default_provider(),
+            model: default_provider(),
+            max_spend_usd: None,
+            dedup_window_secs: default_dedup_window_secs(),
+            api_key: None,
         }
     }
 }
@@ -564,7 +608,12 @@ struct AppState {
     ab_runner: Arc<crate::ab_test::AbTestRunner>,
     /// Conversation session manager — backs the `/api/v1/sessions` endpoints.
     session_manager: Arc<crate::session_mgr::SessionManager>,
+    /// State for the OpenAI-compatible `/v1/chat/completions` endpoint.
+    openai: openai_compat::OpenAiState,
 }
+
+#[cfg(feature = "web-api")]
+mod openai_compat;
 
 // ============================================================================
 // Constants
@@ -616,14 +665,19 @@ pub async fn start_server(
 
     info!("Starting web API server on http://{}", addr);
 
-    // Read optional API key from environment.
-    let api_key = match std::env::var("API_KEY") {
-        Ok(k) if !k.is_empty() => Some(k),
-        _ => {
-            debug!("API_KEY not set — web API auth disabled (fine for local use)");
-            None
-        }
-    };
+    // API key: explicit config first, then ORCHESTRATOR_API_KEY, then API_KEY.
+    let api_key = config
+        .api_key
+        .clone()
+        .filter(|k| !k.is_empty())
+        .or_else(|| {
+            ["ORCHESTRATOR_API_KEY", "API_KEY"]
+                .iter()
+                .find_map(|v| std::env::var(v).ok().filter(|k| !k.is_empty()))
+        });
+    if api_key.is_none() {
+        debug!("ORCHESTRATOR_API_KEY / API_KEY not set, web API auth disabled (fine for local use)");
+    }
 
     // Configure CORS origins from ALLOWED_ORIGINS or fall back to wildcard.
     //
@@ -660,49 +714,62 @@ pub async fn start_server(
         }
     };
 
-    let tracker = RequestTracker::new();
     let metrics_key = match std::env::var("METRICS_API_KEY") {
         Ok(k) if !k.is_empty() => Some(k),
         _ => None,
     };
-    let batch_tracker = BatchJobTracker::new();
-    let debug_mode = config.debug_mode;
-
-    let shutting_down = Arc::new(AtomicBool::new(false));
-
-    let state = Arc::new(AppState {
+    let state = Arc::new(build_state(
+        config.clone(),
         pipeline_tx,
-        tracker,
-        batch_tracker,
-        config: config.clone(),
-        api_key,
-        debug_mode,
         dlq,
         circuit_breaker,
+        api_key,
         metrics_key,
-        shutting_down,
-        started_at: Instant::now(),
-        session_budget: Arc::new(crate::session::SessionBudget::new()),
-        ab_runner: Arc::new(crate::ab_test::AbTestRunner::new()),
-        prompt_cache: crate::cache::PromptCache::new(crate::cache::CacheConfig::default()),
-        rate_limiter: crate::rate_limiter::RateLimiterRegistry::new(),
-        template_library: Arc::new(std::sync::RwLock::new(
-            crate::template::TemplateLibrary::new(),
-        )),
-        load_balancer: Arc::new(crate::load_balancer::LoadBalancer::new(
-            crate::load_balancer::BalancerConfig::default(),
-        )),
-        session_manager: Arc::new(crate::session_mgr::SessionManager::new()),
-    });
+        RequestTracker::new(),
+    ));
 
-    // Collector task: receives pipeline output and writes results into the tracker.
+    // Collector task: receives pipeline output and writes results into the
+    // tracker, then wakes an OpenAI-endpoint handler waiting on that request.
     let collector_state = state.clone();
     tokio::spawn(async move {
         while let Some(output) = output_rx.recv().await {
             if let Some(mut tracked) = collector_state.tracker.status.get_mut(&output.request_id) {
                 tracked.status = RequestStatus::Completed;
-                tracked.result = Some(output.text);
+                tracked.result = Some(output.text.clone());
                 tracked.completed_at = Some(Instant::now());
+            }
+            collector_state
+                .openai
+                .resolve(&output.request_id, Ok(output.text));
+        }
+    });
+
+    // Dead-letter listener: a request the pipeline drops (circuit open,
+    // timeout, provider error, backpressure) is marked failed with the reason
+    // instead of staying "processing" until the client gives up.
+    let mut dlq_events = state.dlq.subscribe();
+    let dlq_state = state.clone();
+    tokio::spawn(async move {
+        loop {
+            match dlq_events.recv().await {
+                Ok(dropped) => {
+                    if let Some(mut tracked) =
+                        dlq_state.tracker.status.get_mut(&dropped.request_id)
+                    {
+                        if !matches!(tracked.status, RequestStatus::Completed) {
+                            tracked.status = RequestStatus::Failed;
+                            tracked.error = Some(dropped.reason.clone());
+                            tracked.completed_at = Some(Instant::now());
+                        }
+                    }
+                    dlq_state
+                        .openai
+                        .resolve(&dropped.request_id, Err(dropped.reason));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    warn!(skipped = n, "dead-letter listener lagged; some waiters will time out");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
     });
@@ -738,6 +805,8 @@ pub async fn start_server(
         .route("/api/v1/sessions/:id/messages", post(session_append_handler))
         .route("/v1/sessions/:session_id/budget", get(session_budget_handler))
         .route("/v1/sessions/:session_id/budget/reset", post(session_budget_reset_handler))
+        .route("/v1/chat/completions", post(openai_compat::chat_completions_handler))
+        .route("/v1/models", get(openai_compat::models_handler))
         .route("/health", get(health_handler))
         .route("/v1/health", get(health_handler))
         .route("/live", get(live_handler))
@@ -816,6 +885,45 @@ pub async fn start_server(
     }
 
     Ok(())
+}
+
+/// Assemble the shared [`AppState`]. Must be called inside a Tokio runtime.
+#[cfg(feature = "web-api")]
+fn build_state(
+    config: ServerConfig,
+    pipeline_tx: mpsc::Sender<PromptRequest>,
+    dlq: Arc<crate::DeadLetterQueue>,
+    circuit_breaker: crate::enhanced::CircuitBreaker,
+    api_key: Option<String>,
+    metrics_key: Option<String>,
+    tracker: RequestTracker,
+) -> AppState {
+    let openai = openai_compat::OpenAiState::new(&config);
+    AppState {
+        pipeline_tx,
+        tracker,
+        batch_tracker: BatchJobTracker::new(),
+        debug_mode: config.debug_mode,
+        config,
+        api_key,
+        dlq,
+        circuit_breaker,
+        metrics_key,
+        shutting_down: Arc::new(AtomicBool::new(false)),
+        started_at: Instant::now(),
+        session_budget: Arc::new(crate::session::SessionBudget::new()),
+        ab_runner: Arc::new(crate::ab_test::AbTestRunner::new()),
+        prompt_cache: crate::cache::PromptCache::new(crate::cache::CacheConfig::default()),
+        rate_limiter: crate::rate_limiter::RateLimiterRegistry::new(),
+        template_library: Arc::new(std::sync::RwLock::new(
+            crate::template::TemplateLibrary::new(),
+        )),
+        load_balancer: Arc::new(crate::load_balancer::LoadBalancer::new(
+            crate::load_balancer::BalancerConfig::default(),
+        )),
+        session_manager: Arc::new(crate::session_mgr::SessionManager::new()),
+        openai,
+    }
 }
 
 // ============================================================================
@@ -907,6 +1015,8 @@ async fn auth_middleware(
 
     if token_valid {
         next.run(req).await
+    } else if openai_compat::is_openai_path(&req_path) {
+        openai_compat::unauthorized()
     } else {
         (
             StatusCode::UNAUTHORIZED,
@@ -3132,23 +3242,24 @@ mod tests {
     /// Build a minimal AppState for unit testing auth middleware.
     fn make_state_with_key(key: Option<&str>) -> Arc<AppState> {
         let (tx, _rx) = mpsc::channel(1);
-        Arc::new(AppState {
-            pipeline_tx: tx,
-            tracker: RequestTracker {
+        // build_state spawns background tasks, so it needs a runtime.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap_or_else(|e| panic!("test runtime: {e}"));
+        let _guard = rt.enter();
+        Arc::new(build_state(
+            ServerConfig::default(),
+            tx,
+            Arc::new(crate::DeadLetterQueue::new(100)),
+            crate::enhanced::CircuitBreaker::new(5, 0.8, std::time::Duration::from_secs(60)),
+            key.map(|s| s.to_string()),
+            None,
+            RequestTracker {
                 status: Arc::new(DashMap::new()),
                 max_entries: 100_000,
             },
-            batch_tracker: BatchJobTracker::new(),
-            config: ServerConfig::default(),
-            api_key: key.map(|s| s.to_string()),
-            debug_mode: true,
-            dlq: Arc::new(crate::DeadLetterQueue::new(100)),
-            circuit_breaker: crate::enhanced::CircuitBreaker::new(
-                5,
-                0.8,
-                std::time::Duration::from_secs(60),
-            ),
-        })
+        ))
     }
 
     #[test]

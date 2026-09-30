@@ -25,9 +25,16 @@ build-linux:
     CARGO_HOME: "${CI_PROJECT_DIR}/.cargo-home"
     CARGO_TARGET_DIR: "${CI_PROJECT_DIR}/target"
   script:
-    - cargo build --release --locked --bin "$BIN"
+    # web-api: the HTTP server (including the OpenAI-compatible /v1 endpoints)
+    - cargo build --release --locked --features web-api --bin "$BIN"
     - ./target/release/$BIN --version
     - sh -c "$SMOKE"
+    # Serve for real and answer an OpenAI-style request before publishing.
+    - ./target/release/$BIN --provider echo --port 18080 </dev/null >/tmp/orch.log 2>&1 & echo $! > /tmp/orch.pid
+    - sleep 3
+    - curl -sf http://127.0.0.1:18080/v1/models || { cat /tmp/orch.log; exit 1; }
+    - 'curl -sf http://127.0.0.1:18080/v1/chat/completions -H "Content-Type: application/json" -d "{\"model\":\"echo\",\"messages\":[{\"role\":\"user\",\"content\":\"release smoke test\"}]}" | grep -q "release smoke test" || { cat /tmp/orch.log; exit 1; }'
+    - kill "$(cat /tmp/orch.pid)" || true
     - name="$BIN-$CI_COMMIT_TAG-x86_64-unknown-linux-gnu"
     - mkdir -p "dist/$name"
     - cp "target/release/$BIN" README.md LICENSE "dist/$name/"

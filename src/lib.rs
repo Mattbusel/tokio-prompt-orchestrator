@@ -398,6 +398,14 @@ impl std::fmt::Display for SessionId {
     }
 }
 
+/// Metadata key that controls how the pipeline builds the model prompt.
+///
+/// When `meta[META_PROMPT_MODE] == "raw"` the RAG and assemble stages pass
+/// `input` to the model unchanged instead of wrapping it in the placeholder
+/// context template. The OpenAI-compatible endpoint sets this so a client's
+/// messages reach the provider as written.
+pub const META_PROMPT_MODE: &str = "prompt_mode";
+
 /// Initial prompt request from client
 #[derive(Debug, Clone)]
 pub struct PromptRequest {
@@ -417,6 +425,16 @@ pub struct PromptRequest {
 }
 
 impl PromptRequest {
+    /// `true` when the request asks for its `input` to be sent to the model
+    /// verbatim (see [`META_PROMPT_MODE`]).
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
+    pub fn is_raw_prompt(&self) -> bool {
+        self.meta.get(META_PROMPT_MODE).map(String::as_str) == Some("raw")
+    }
+
     /// Builder-style helper that sets an absolute deadline `duration` from now.
     ///
     /// This is an infallible convenience wrapper around `try_with_deadline`.
@@ -616,6 +634,10 @@ pub struct DroppedRequest {
 pub struct DeadLetterQueue {
     inner: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<DroppedRequest>>>,
     capacity: usize,
+    /// Every pushed entry is also broadcast here so a caller waiting on a
+    /// specific request (for example an HTTP handler) learns it was dropped
+    /// without polling the queue. Sending with no subscribers is a no-op.
+    events: tokio::sync::broadcast::Sender<DroppedRequest>,
 }
 
 impl DeadLetterQueue {
@@ -630,7 +652,21 @@ impl DeadLetterQueue {
                 std::collections::VecDeque::with_capacity(capacity.min(1024)),
             )),
             capacity,
+            events: tokio::sync::broadcast::channel(1024).0,
         }
+    }
+
+    /// Subscribe to entries as they are pushed.
+    ///
+    /// Each subscriber receives every [`DroppedRequest`] pushed after it
+    /// subscribed. A subscriber that falls more than 1024 entries behind gets
+    /// `RecvError::Lagged` and skips ahead; the ring buffer itself is unaffected.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic.
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<DroppedRequest> {
+        self.events.subscribe()
     }
 
     /// Push a dropped request into the queue.  Evicts the oldest entry if full.
@@ -652,6 +688,9 @@ impl DeadLetterQueue {
         });
         if guard.len() >= self.capacity {
             guard.pop_front();
+        }
+        if self.events.receiver_count() > 0 {
+            let _ = self.events.send(req.clone());
         }
         guard.push_back(req);
     }

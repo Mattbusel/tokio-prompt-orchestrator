@@ -157,7 +157,8 @@ OPTIONS:
     --port     <N>                             HTTP port     (default: 8080)
     --host     <addr>                          Bind address  (default: 127.0.0.1)
     --log-level <trace|debug|info|warn|error>  Log verbosity (default: info)
-    --max-spend <dollars>                      Kill session when spend reaches this USD cap
+    --max-spend <dollars>                      USD spend cap: the OpenAI endpoint answers 429
+                                               once reached (with --no-web, the program exits)
     --no-web                                   Disable web API
     --reset                                    Re-run setup wizard
     --help, -h                                 Print this help
@@ -170,6 +171,9 @@ GETTING AN API KEY:
 
 CONNECTING AGENTS / IDEs:
     (needs a build with the web-api feature; the release binaries have it)
+    Any OpenAI client: set its base URL to http://127.0.0.1:8080/v1
+      POST /v1/chat/completions   (JSON, or SSE with "stream": true)
+      GET  /v1/models
     POST http://127.0.0.1:8080/api/v1/infer         {{"prompt": "..."}} returns a request_id
     GET  http://127.0.0.1:8080/api/v1/result/<id>   waits for and returns the answer
     WS   ws://127.0.0.1:8080/v1/stream              streaming responses
@@ -190,6 +194,12 @@ EXAMPLES:
 
     # A real model on another port
     orchestrator --provider anthropic --model claude-sonnet-4-6 --port 9000
+
+ENVIRONMENT:
+    ORCHESTRATOR_API_KEY   require 'Authorization: Bearer <key>' on the HTTP API
+                           (API_KEY also works; unset = open, fine on 127.0.0.1)
+    ORCHESTRATOR_DEDUP_SECS  reuse an identical chat completion for this many
+                           seconds (default 300; 0 = only share in-flight calls)
 
 SETTINGS FILE:
     orchestrator.env  (same folder as the binary)
@@ -565,11 +575,12 @@ fn run_wizard(args: CliArgs) -> ResolvedConfig {
 // ---------------------------------------------------------------------------
 
 fn print_banner(cfg: &ResolvedConfig) {
-    let api_key_set = env::var("API_KEY").map(|v| !v.is_empty()).unwrap_or(false);
-    let auth_status = if api_key_set {
-        "enabled (API_KEY set)"
-    } else {
-        "open (no bearer token)"
+    let key_var = ["ORCHESTRATOR_API_KEY", "API_KEY"]
+        .into_iter()
+        .find(|v| env::var(v).map(|k| !k.is_empty()).unwrap_or(false));
+    let auth_status = match key_var {
+        Some(v) => format!("bearer token ({v})"),
+        None => "open (no bearer token)".to_string(),
     };
     let web_compiled = cfg!(feature = "web-api");
     let web_on = web_compiled && !cfg.no_web;
@@ -624,6 +635,7 @@ fn print_banner(cfg: &ResolvedConfig) {
         let ws_base = format!("ws://{}:{}", cfg.host, cfg.port);
         row("");
         row("  Agents and IDEs, over HTTP while this runs:");
+        row(&format!("    OpenAI base URL: {base}/v1"));
         row(&format!("    POST {base}/api/v1/infer"));
         row(&format!("    GET  {base}/api/v1/result/<id>"));
         row(&format!("    WS   {ws_base}/v1/stream"));
@@ -985,8 +997,10 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
 
     // ── Budget enforcement task ─────────────────────────────────────────────
     // If `--max-spend` was given, poll the Prometheus `inference_cost_total`
-    // counter every 10 seconds and exit when the cap is reached.
-    if let Some(cap) = cfg.max_spend {
+    // counter every 10 seconds and exit when the cap is reached. With the web
+    // API on, the server enforces the cap itself (HTTP 429) and keeps running.
+    let server_enforces_cap = cfg!(feature = "web-api") && !cfg.no_web;
+    if let (Some(cap), false) = (cfg.max_spend, server_enforces_cap) {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
@@ -1078,10 +1092,25 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
             let pipeline_tx = handles.input_tx.clone();
             let dlq = handles.dlq.clone();
             let circuit_breaker = handles.circuit_breaker.clone();
+            let defaults = ServerConfig::default();
+            let dedup_window_secs = match env::var("ORCHESTRATOR_DEDUP_SECS") {
+                Ok(v) => v.trim().parse().unwrap_or_else(|_| {
+                    eprintln!(
+                        "Warning: ORCHESTRATOR_DEDUP_SECS must be a whole number of seconds, got '{v}'; using {}",
+                        defaults.dedup_window_secs
+                    );
+                    defaults.dedup_window_secs
+                }),
+                Err(_) => defaults.dedup_window_secs,
+            };
             let config = ServerConfig {
                 host: cfg.host.clone(),
                 port: cfg.port,
-                ..ServerConfig::default()
+                provider: cfg.provider.clone(),
+                model: cfg.model.clone(),
+                max_spend_usd: cfg.max_spend,
+                dedup_window_secs,
+                ..defaults
             };
             tracing::info!(addr = %format!("{}:{}", cfg.host, cfg.port), "Starting web API");
             tokio::select! {

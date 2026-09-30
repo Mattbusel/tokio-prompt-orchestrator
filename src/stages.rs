@@ -554,10 +554,14 @@ async fn rag_stage(
         let deadline = request.deadline;
         let output = RagOutput {
             session: session.clone(),
-            context: format!(
-                "CONTEXT: Retrieved documents for '{}'",
-                request.input.chars().take(50).collect::<String>()
-            ),
+            context: if request.is_raw_prompt() {
+                String::new()
+            } else {
+                format!(
+                    "CONTEXT: Retrieved documents for '{}'",
+                    request.input.chars().take(50).collect::<String>()
+                )
+            },
             original: request,
             deadline,
         };
@@ -646,10 +650,18 @@ async fn assemble_stage(
 
         // Construct prompt from context + user input
         // NOTE: prompt content is NOT logged  -  it is sensitive data
-        let prompt = format!(
-            "{}\n\nUser Query: {}\n\nAssistant:",
-            rag_output.context, rag_output.original.input
-        );
+        let prompt = if rag_output.original.is_raw_prompt() {
+            rag_output.original.input.clone()
+        } else {
+            format!(
+                "{}
+
+User Query: {}
+
+Assistant:",
+                rag_output.context, rag_output.original.input
+            )
+        };
 
         let output = AssembleOutput {
             session: rag_output.session,
@@ -1441,10 +1453,14 @@ async fn rag_stage_tracked(
         let deadline = request.deadline;
         let output = RagOutput {
             session: session.clone(),
-            context: format!(
-                "CONTEXT: Retrieved documents for '{}'",
-                request.input.chars().take(50).collect::<String>()
-            ),
+            context: if request.is_raw_prompt() {
+                String::new()
+            } else {
+                format!(
+                    "CONTEXT: Retrieved documents for '{}'",
+                    request.input.chars().take(50).collect::<String>()
+                )
+            },
             original: request,
             deadline,
         };

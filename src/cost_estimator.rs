@@ -213,6 +213,15 @@ impl CostEstimator {
     // Public API
     // -----------------------------------------------------------------------
 
+    /// Cost in USD of a call that used `input_tokens` and `output_tokens` on
+    /// `model`, from the built-in price table.
+    ///
+    /// A model missing from the table is priced at the `gpt-4o` rate, which
+    /// errs on the side of over-counting when the result feeds a spend cap.
+    pub fn cost_for_tokens(&self, input_tokens: usize, output_tokens: usize, model: &str) -> f64 {
+        self.compute_cost(input_tokens, output_tokens, model).0
+    }
+
     /// Estimate the cost of a single prompt/model/task combination.
     pub fn estimate_cost(
         &self,
