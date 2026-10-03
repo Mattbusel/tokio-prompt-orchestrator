@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["CountMethod","TokenizerFamily"],"struct":["BpeApproxTokenizer","TokenCount","TokenCounter"]};
+window.SIDEBAR_ITEMS = {"enum":["CountMethod","TokenizerFamily"],"fn":["count_for_model","exact_chat_prompt_tokens","exact_token_count"],"struct":["BpeApproxTokenizer","TokenCount","TokenCounter"]};

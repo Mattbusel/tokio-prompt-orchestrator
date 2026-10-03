@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["RetryResult","RetryStrategy"],"fn":["retry_if","retry_inference","with_jitter"],"struct":["RetryPolicy"]};
+window.SIDEBAR_ITEMS = {"enum":["RetryResult","RetryStrategy"],"fn":["retry_if","retry_inference","with_jitter"],"struct":["InferenceRetry","RetryPolicy"]};

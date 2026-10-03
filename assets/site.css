@@ -135,3 +135,10 @@ td.r, th.r { text-align: right; white-space: nowrap; }
   .foot { flex-direction: column; }
   .cmd code { font-size: 13.5px; }
 }
+
+/* Download button (hero) */
+a.btn.dl { display: inline-flex; align-items: center; text-decoration: none; font-size: 16px; min-height: 48px; padding: 0 22px; }
+a.btn.dl:hover { opacity: .9; }
+a.btn.dl:focus-visible { outline: 3px solid var(--ink); outline-offset: 3px; }
+.alt-dl { font-size: 14px; }
+.cta .cmd { flex-basis: 100%; }

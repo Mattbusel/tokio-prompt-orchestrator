@@ -3,12 +3,48 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>tokio-prompt-orchestrator</title>
-<meta name="description" content="A bounded Tokio pipeline in front of your LLM: request deduplication, a circuit breaker and a dead-letter queue, in front of Anthropic, OpenAI, llama.cpp, vLLM or your own backend.">
-<meta property="og:title" content="tokio-prompt-orchestrator">
-<meta property="og:description" content="A bounded Tokio pipeline in front of your LLM: dedup, circuit breaker, dead-letter queue.">
-<meta property="og:image" content="https://mattbusel.github.io/tokio-prompt-orchestrator/assets/social-preview.png">
+<title>Rust LLM Request Orchestrator: dedup, circuit breaker</title>
+<meta name="description" content="Put a queue, dedup and a circuit breaker in front of Anthropic, OpenAI, llama.cpp or vLLM. Rust library, HTTP server and Windows, macOS, Linux downloads.">
+<link rel="canonical" href="https://tokio-prompt-orchestrator.vercel.app/">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://tokio-prompt-orchestrator.vercel.app/">
+<meta property="og:title" content="tokio-prompt-orchestrator: a Rust LLM request orchestrator">
+<meta property="og:description" content="Put a queue, dedup and a circuit breaker in front of Anthropic, OpenAI, llama.cpp or vLLM. Rust library, HTTP server and Windows, macOS, Linux downloads.">
+<meta property="og:image" content="https://tokio-prompt-orchestrator.vercel.app/assets/social-preview.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="tokio-prompt-orchestrator: dedup, circuit breaker and dead-letter queue in front of an LLM">
 <meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="tokio-prompt-orchestrator: a Rust LLM request orchestrator">
+<meta name="twitter:description" content="Put a queue, dedup and a circuit breaker in front of Anthropic, OpenAI, llama.cpp or vLLM. Rust library, HTTP server and Windows, macOS, Linux downloads.">
+<meta name="twitter:image" content="https://tokio-prompt-orchestrator.vercel.app/assets/social-preview.png">
+<script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@type": "SoftwareApplication",
+ "name": "tokio-prompt-orchestrator",
+ "description": "Rust LLM request orchestrator: a bounded Tokio pipeline with deduplication, a circuit breaker, timeouts and a dead-letter queue in front of Anthropic, OpenAI, llama.cpp, vLLM or your own backend. Library, HTTP server and CLI.",
+ "applicationCategory": "DeveloperApplication",
+ "operatingSystem": "Windows, macOS, Linux",
+ "url": "https://tokio-prompt-orchestrator.vercel.app/",
+ "codeRepository": "https://gitlab.com/mattbusel/tokio-prompt-orchestrator",
+ "programmingLanguage": "Rust",
+ "license": "https://opensource.org/licenses/MIT",
+ "author": {
+  "@type": "Person",
+  "name": "Matthew Busel",
+  "url": "https://mattbusel.vercel.app/"
+ },
+ "downloadUrl": "https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/releases/permalink/latest/downloads/orchestrator-windows-x86_64.exe",
+ "softwareVersion": "1.4.3",
+ "offers": {
+  "@type": "Offer",
+  "price": "0",
+  "priceCurrency": "USD"
+ },
+ "image": "https://tokio-prompt-orchestrator.vercel.app/assets/social-preview.png"
+}
+</script>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230f1113'/%3E%3Cpath d='M5 10h9M5 16h9M5 22h9' stroke='%23f0b429' stroke-width='2.5' stroke-linecap='round'/%3E%3Cpath d='M14 10c5 0 5 6 9 6M14 22c5 0 5-6 9-6M14 16h13' stroke='%232cc7a6' stroke-width='2.5' stroke-linecap='round' fill='none'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="assets/flow.css">
 <link rel="stylesheet" href="assets/site.css">
@@ -23,9 +59,9 @@
     <a class="mark" href="./"><span>tokio-prompt-</span><span class="dim">orchestrator</span></a>
     <nav aria-label="Project links">
       <a href="#quick-start">Quick start</a>
-      <a href="api/tokio_prompt_orchestrator/">API docs</a>
+      <a href="https://docs.rs/tokio-prompt-orchestrator">API docs</a>
       <a href="https://crates.io/crates/tokio-prompt-orchestrator">crates.io</a>
-      <a href="https://github.com/Mattbusel/tokio-prompt-orchestrator">GitHub</a>
+      <a href="https://gitlab.com/mattbusel/tokio-prompt-orchestrator">GitHub</a>
       <button class="theme" id="theme" type="button" aria-label="Switch colour theme"><svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="7" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 3a7 7 0 0 1 0 14z" fill="currentColor"/></svg></button>
     </nav>
   </div>
@@ -38,7 +74,9 @@
   <h1>Put a bounded pipeline between your users and your LLM.</h1>
   <p class="lede">Duplicate prompts share one model call. A failing provider trips a circuit breaker so requests fail fast instead of piling up. Every request the pipeline drops lands in a dead-letter queue you can inspect and replay. Works with Anthropic, OpenAI, llama.cpp, vLLM or your own backend.</p>
   <div class="cta">
-    <div class="cmd"><code>cargo run --example llm_pipeline</code><button class="copy" data-copy="git clone https://github.com/Mattbusel/tokio-prompt-orchestrator &amp;&amp; cd tokio-prompt-orchestrator &amp;&amp; cargo run --example llm_pipeline" type="button">Copy</button></div>
+    <a class="btn dl" href="https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/releases/permalink/latest/downloads/orchestrator-windows-x86_64.exe">Download for Windows (.exe)</a>
+    <a class="alt-dl" href="#quick-start">macOS, Linux, Homebrew, Scoop, cargo</a>
+    <div class="cmd"><code>cargo run --example llm_pipeline</code><button class="copy" data-copy="git clone https://gitlab.com/mattbusel/tokio-prompt-orchestrator &amp;&amp; cd tokio-prompt-orchestrator &amp;&amp; cargo run --example llm_pipeline" type="button">Copy</button></div>
     <span class="hint">No API key. Runs the exact scenario drawn below.</span>
   </div>
  </div>
@@ -90,7 +128,7 @@
   <div>
     <h2 id="out-h">What that run printed</h2>
     <p>The example is about 200 lines and a good template for wiring your own backend. Set <code>PROVIDER=anthropic</code> or <code>PROVIDER=openai</code> with a key to make the same 3 calls against a real model; the outage is simulated in front of the provider, so it costs nothing.</p>
-    <p><a class="arrow" href="https://github.com/Mattbusel/tokio-prompt-orchestrator/blob/main/examples/llm_pipeline.rs">Read examples/llm_pipeline.rs</a></p>
+    <p><a class="arrow" href="https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/blob/main/examples/llm_pipeline.rs">Read examples/llm_pipeline.rs</a></p>
   </div>
   <div class="term" role="region" aria-label="Terminal output of cargo run --example llm_pipeline">
     <div class="tbar"><i></i><i></i><i></i><span>cargo run --example llm_pipeline</span></div>
@@ -113,14 +151,14 @@
     <div class="step">
       <h3><span class="n">1</span>See it work</h3>
       <p>Clone and run the example. No key, no network.</p>
-      <div class="code"><button class="copy" type="button" data-target="c1">Copy</button><pre id="c1" class="mono">git clone https://github.com/Mattbusel/tokio-prompt-orchestrator
+      <div class="code"><button class="copy" type="button" data-target="c1">Copy</button><pre id="c1" class="mono">git clone https://gitlab.com/mattbusel/tokio-prompt-orchestrator
 cd tokio-prompt-orchestrator
 cargo run --example llm_pipeline</pre></div>
     </div>
     <div class="step">
       <h3><span class="n">2</span>Install and run the server</h3>
-      <p>Interactive terminal plus an HTTP API on port 8080. <code>echo</code> needs no key. Windows (one PowerShell line), Homebrew, Scoop and <code>cargo binstall</code>: see <a href="https://github.com/Mattbusel/tokio-prompt-orchestrator#install">Install</a>.</p>
-      <div class="code"><button class="copy" type="button" data-target="c2">Copy</button><pre id="c2" class="mono">curl -fsSL https://raw.githubusercontent.com/Mattbusel/tokio-prompt-orchestrator/main/install.sh | sh
+      <p>Interactive terminal plus an HTTP API on port 8080. <code>echo</code> needs no key. Windows (one PowerShell line), Homebrew, Scoop and <code>cargo binstall</code>: see <a href="https://gitlab.com/mattbusel/tokio-prompt-orchestrator#download">Download</a>.</p>
+      <div class="code"><button class="copy" type="button" data-target="c2">Copy</button><pre id="c2" class="mono">curl -fsSL https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/raw/main/install.sh | sh
 orchestrator --provider echo
 
 # then, from another terminal
@@ -163,8 +201,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }</pre></div>
   <div>
     <h2 id="srv-h">The server, for agents and tools</h2>
     <p>The <code>orchestrator</code> binary runs a terminal prompt and a REST, SSE and WebSocket API side by side. Post a prompt, get a request id, then fetch the result; <code>/health</code> reports the breaker state and queue depth.</p>
-    <p>Claude Desktop and Claude Code connect through the separate <code>mcp</code> binary over stdio: <a class="arrow" href="https://github.com/Mattbusel/tokio-prompt-orchestrator/blob/main/examples/mcp_claude_desktop.md">MCP setup</a></p>
-    <p class="note">Prebuilt 1.4.0 binaries exit right after printing the banner; the fix is on <code>main</code> and ships in the next release. Build from source until then.</p>
+    <p>Claude Desktop and Claude Code connect through the separate <code>mcp</code> binary over stdio: <a class="arrow" href="https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/blob/main/examples/mcp_claude_desktop.md">MCP setup</a></p>
+    <p class="note">Windows: <a href="https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/releases/permalink/latest/downloads/orchestrator-windows-x86_64.exe">download the .exe</a> and double-click it; pick <code>echo</code> in the setup to try it with no key.</p>
   </div>
   <img class="shot" src="assets/terminal-server.png" alt="The orchestrator started with --provider echo, answering one prompt typed in the terminal and one sent with curl to /api/v1/infer" width="1184" height="607" loading="lazy">
 </section>
@@ -202,7 +240,7 @@ req-12 throttled: sliding window limit exceeded; window resets in 60001 ms</pre>
 
 <section class="wrap" aria-labelledby="bench-h">
   <h2 id="bench-h">Overhead</h2>
-  <p>From the last recorded run in <a href="https://github.com/Mattbusel/tokio-prompt-orchestrator/blob/main/BENCHMARKS.md">BENCHMARKS.md</a> (Windows, x86_64, <code>EchoWorker</code>, so no network or model time). CI tracks the pipeline benchmarks on every push: <a class="arrow" href="dev/bench/">benchmark history</a></p>
+  <p>From the last recorded run in <a href="https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/blob/main/BENCHMARKS.md">BENCHMARKS.md</a> (Windows, x86_64, <code>EchoWorker</code>, so no network or model time).</p>
   <div class="table-wrap">
   <table>
     <thead><tr><th scope="col">Measurement</th><th scope="col" class="r">p50</th></tr></thead>
@@ -222,15 +260,15 @@ req-12 throttled: sliding window limit exceeded; window resets in 60001 ms</pre>
 <footer class="wrap foot">
   <div>
     <span class="mark small"><span>tokio-prompt-</span><span class="dim">orchestrator</span></span>
-    <p>MIT licensed. Known gaps are tracked in the open: the Dockerfile does not build a working image yet (<a href="https://github.com/Mattbusel/tokio-prompt-orchestrator/issues/5">#5</a>), and the RAG stage has no real retriever trait yet (<a href="https://github.com/Mattbusel/tokio-prompt-orchestrator/issues/6">#6</a>).</p>
+    <p>MIT licensed. Known gaps are tracked in the open: the Dockerfile does not build a working image yet (<a href="https://gitlab.com/mattbusel/tokio-prompt-orchestrator">#5</a>), and the RAG stage has no real retriever trait yet (<a href="https://gitlab.com/mattbusel/tokio-prompt-orchestrator">#6</a>).</p>
   </div>
   <nav aria-label="Footer links">
-    <a href="https://github.com/Mattbusel/tokio-prompt-orchestrator">Source</a>
+    <a href="https://gitlab.com/mattbusel/tokio-prompt-orchestrator">Source</a>
     <a href="https://docs.rs/tokio-prompt-orchestrator">docs.rs</a>
-    <a href="api/tokio_prompt_orchestrator/">API docs (main)</a>
-    <a href="dev/bench/">Benchmarks</a>
-    <a href="https://github.com/Mattbusel/tokio-prompt-orchestrator/releases">Releases</a>
-    <a href="https://github.com/Mattbusel/tokio-prompt-orchestrator/issues">Issues</a>
+    <a href="https://docs.rs/tokio-prompt-orchestrator">API docs (main)</a>
+    <a href="https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/blob/main/BENCHMARKS.md">Benchmarks</a>
+    <a href="https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/releases">Releases</a>
+    <a href="https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/issues">Issues</a>
   </nav>
 </footer>
 
