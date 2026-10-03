@@ -230,7 +230,9 @@ impl CostEstimator {
         task_type: TaskType,
         budget: &BudgetConfig,
     ) -> CostEstimate {
-        let input_tokens = Self::estimate_tokens(prompt);
+        // Exact for OpenAI models when built with `tiktoken`, else estimated.
+        let input_tokens = crate::token_counter::exact_token_count(model, prompt)
+            .map_or_else(|| Self::estimate_tokens(prompt), |n| n.max(1));
         let output_tokens = Self::estimate_output_tokens(input_tokens, task_type);
         let (cost, confidence) = self.compute_cost(input_tokens, output_tokens, model);
 

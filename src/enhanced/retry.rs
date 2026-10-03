@@ -1,6 +1,9 @@
 //! Retry Logic
 //!
-//! Automatic retry with exponential backoff for transient failures.
+//! Automatic retry with backoff for transient failures, built on the
+//! [`backon`](https://docs.rs/backon) crate. This module keeps the
+//! orchestrator's own policy types ([`RetryPolicy`], [`InferenceRetry`]) and
+//! lets `backon` do the attempt counting, delay schedule, jitter and sleeping.
 //!
 //! ## Usage
 //!
@@ -12,7 +15,7 @@
 //! let policy = RetryPolicy::exponential(3, Duration::from_millis(100));
 //!
 //! let result = policy.retry(|| async {
-//!     // Your fallible operation — returns Ok on success, Err on transient failure
+//!     // Your fallible operation: returns Ok on success, Err on transient failure
 //!     Ok::<String, std::io::Error>("inference result".to_string())
 //! }).await;
 //!
@@ -23,9 +26,14 @@
 //! # }
 //! ```
 
+use crate::config::ResilienceConfig;
 use crate::OrchestratorError;
+use backon::{
+    BackoffBuilder, ConstantBackoff, ConstantBuilder, ExponentialBackoff, ExponentialBuilder,
+    Retryable,
+};
 use std::time::Duration;
-use tracing::{debug, warn};
+use tracing::warn;
 
 /// Configuration for automatic retry behaviour with backoff.
 ///
@@ -62,14 +70,10 @@ pub struct RetryPolicy {
 
 /// Backoff algorithm applied between successive [`RetryPolicy`] attempts.
 ///
-/// Select the strategy that best matches your workload:
-///
-/// - [`RetryStrategy::Fixed`] — constant pause; good for idempotent operations
-///   where timing is well understood.
-/// - [`RetryStrategy::Exponential`] — classic exponential back-off; good for
-///   transient network errors where you want to back off quickly under load.
-/// - [`RetryStrategy::Linear`] — linear growth; a middle ground useful when a
-///   fixed number of timed steps is preferable to unbounded growth.
+/// - [`RetryStrategy::Fixed`]: constant pause.
+/// - [`RetryStrategy::Exponential`]: the delay is multiplied after each
+///   failure, up to a cap.
+/// - [`RetryStrategy::Linear`]: the delay grows by a fixed increment.
 #[derive(Clone, Debug)]
 pub enum RetryStrategy {
     /// Fixed delay between retries
@@ -106,14 +110,56 @@ pub enum RetryResult<T, E> {
     },
 }
 
+/// The delay schedule of a [`RetryPolicy`], as a `backon` backoff.
+///
+/// Fixed and exponential schedules are `backon`'s own; linear has no
+/// `backon` builder, so it is a plain iterator.
+enum PolicyBackoff {
+    Fixed(ConstantBackoff),
+    Exponential(ExponentialBackoff),
+    Linear {
+        next: Duration,
+        increment: Duration,
+        remaining: usize,
+    },
+}
+
+impl Iterator for PolicyBackoff {
+    type Item = Duration;
+
+    fn next(&mut self) -> Option<Duration> {
+        match self {
+            Self::Fixed(b) => b.next(),
+            // backon multiplies in f32 (40 ms comes out as 39.999999 ms);
+            // round to whole milliseconds as the policy always has.
+            Self::Exponential(b) => b
+                .next()
+                .map(|d| Duration::from_millis((d.as_secs_f64() * 1000.0).round() as u64)),
+            Self::Linear {
+                next,
+                increment,
+                remaining,
+            } => {
+                if *remaining == 0 {
+                    return None;
+                }
+                *remaining -= 1;
+                let current = *next;
+                *next = next.saturating_add(*increment);
+                Some(current)
+            }
+        }
+    }
+}
+
 impl RetryPolicy {
     /// Create a policy that waits a constant `delay` between attempts.
     ///
     /// # Arguments
     ///
-    /// * `max_attempts` — Total attempts including the first try.  `1` means
+    /// * `max_attempts`: total attempts including the first try. `1` means
     ///   no retries.
-    /// * `delay` — Fixed pause between consecutive attempts.
+    /// * `delay`: fixed pause between consecutive attempts.
     ///
     /// # Examples
     ///
@@ -131,15 +177,9 @@ impl RetryPolicy {
         }
     }
 
-    /// Create a policy with exponential back-off (multiplier 2×, cap 60 s).
+    /// Create a policy with exponential back-off (multiplier 2x, cap 60 s).
     ///
-    /// The delay before attempt `n` is:
-    /// `min(initial_delay × 2^(n-1), 60 s)`
-    ///
-    /// # Arguments
-    ///
-    /// * `max_attempts` — Total attempts including the first try.
-    /// * `initial_delay` — Delay before the second attempt.
+    /// The delay before attempt `n + 1` is `min(initial_delay * 2^(n-1), 60 s)`.
     ///
     /// # Examples
     ///
@@ -172,16 +212,52 @@ impl RetryPolicy {
         }
     }
 
+    /// The delays between attempts, `retries` of them at most.
+    fn backoff(&self, retries: usize) -> PolicyBackoff {
+        match &self.strategy {
+            RetryStrategy::Fixed(delay) => PolicyBackoff::Fixed(
+                ConstantBuilder::new()
+                    .with_delay(*delay)
+                    .with_max_times(retries)
+                    .build(),
+            ),
+            RetryStrategy::Exponential {
+                initial_delay,
+                max_delay,
+                multiplier,
+            } => PolicyBackoff::Exponential(
+                ExponentialBuilder::new()
+                    .with_min_delay(*initial_delay)
+                    .with_max_delay(*max_delay)
+                    .with_factor(*multiplier as f32)
+                    .with_max_times(retries)
+                    .build(),
+            ),
+            RetryStrategy::Linear {
+                initial_delay,
+                increment,
+            } => PolicyBackoff::Linear {
+                next: *initial_delay,
+                increment: *increment,
+                remaining: retries,
+            },
+        }
+    }
+
+    /// Delay slept after failed attempt number `attempt` (1-based).
+    #[cfg(test)]
+    fn calculate_delay(&self, attempt: usize) -> Duration {
+        self.backoff(attempt)
+            .nth(attempt.saturating_sub(1))
+            .unwrap_or_default()
+    }
+
     /// Execute a fallible async closure, retrying on error according to this
     /// policy.
     ///
-    /// The closure `f` is called up to `max_attempts` times.  Between
-    /// consecutive failures the task sleeps for the duration computed by the
+    /// The closure `f` is called up to `max_attempts` times. Between
+    /// consecutive failures the task sleeps for the delay given by the
     /// configured [`RetryStrategy`].
-    ///
-    /// # Arguments
-    ///
-    /// * `f` — A `FnMut` that returns a `Future<Output = Result<T, E>>`.
     ///
     /// # Returns
     ///
@@ -201,56 +277,13 @@ impl RetryPolicy {
     /// assert_eq!(result, Ok("done"));
     /// # }
     /// ```
-    pub async fn retry<F, Fut, T, E>(&self, mut f: F) -> Result<T, E>
+    pub async fn retry<F, Fut, T, E>(&self, f: F) -> Result<T, E>
     where
         F: FnMut() -> Fut,
         Fut: std::future::Future<Output = Result<T, E>>,
         E: std::fmt::Display,
     {
-        let mut attempt = 0;
-
-        loop {
-            attempt += 1;
-
-            debug!(
-                attempt = attempt,
-                max = self.max_attempts,
-                "retry: attempting operation"
-            );
-
-            match f().await {
-                Ok(result) => {
-                    if attempt > 1 {
-                        debug!(
-                            attempt = attempt,
-                            "retry: operation succeeded after retries"
-                        );
-                    }
-                    return Ok(result);
-                }
-                Err(e) => {
-                    warn!(
-                        attempt = attempt,
-                        max = self.max_attempts,
-                        error = %e,
-                        "retry: operation failed"
-                    );
-
-                    if attempt >= self.max_attempts {
-                        warn!(attempts = attempt, "retry: all attempts exhausted");
-                        return Err(e);
-                    }
-
-                    // Calculate delay
-                    let delay = self.calculate_delay(attempt);
-                    debug!(
-                        delay_ms = delay.as_millis(),
-                        "retry: waiting before next attempt"
-                    );
-                    tokio::time::sleep(delay).await;
-                }
-            }
-        }
+        retry_if(self, f, |_| true).await
     }
 
     /// Execute with retries, returning detailed result
@@ -269,38 +302,9 @@ impl RetryPolicy {
         }
     }
 
-    fn calculate_delay(&self, attempt: usize) -> Duration {
-        match &self.strategy {
-            RetryStrategy::Fixed(delay) => *delay,
-            RetryStrategy::Exponential {
-                initial_delay,
-                max_delay,
-                multiplier,
-            } => {
-                let max_ms = max_delay.as_millis() as f64;
-                // saturating_sub prevents underflow when attempt == 0 (would give powi(-1) = decay).
-                // The cap at 62 prevents f64 overflow for very large attempt counts.
-                let exp = attempt.saturating_sub(1).min(62) as i32;
-                let delay_ms = (initial_delay.as_millis() as f64 * multiplier.powi(exp))
-                    .min(max_ms);
-                Duration::from_millis(delay_ms as u64)
-            }
-            RetryStrategy::Linear {
-                initial_delay,
-                increment,
-            } => {
-                let steps = attempt.saturating_sub(1) as u32;
-                let added = increment.as_millis().saturating_mul(steps as u128);
-                let total_ms = initial_delay.as_millis().saturating_add(added);
-                Duration::from_millis(total_ms.min(u64::MAX as u128) as u64)
-            }
-        }
-    }
-
     /// Check if error is retryable (can be customized)
     pub fn is_retryable<E>(&self, _error: &E) -> bool {
-        // Default: retry all errors
-        // Override this for specific error types
+        // Default: retry all errors. Use `retry_if` to filter.
         true
     }
 }
@@ -309,20 +313,6 @@ impl RetryPolicy {
 ///
 /// Unlike [`RetryPolicy::retry`], errors for which `should_retry` returns
 /// `false` are propagated immediately without consuming further attempts.
-/// This is useful for distinguishing transient errors (e.g. network timeout)
-/// from permanent ones (e.g. invalid request body).
-///
-/// # Arguments
-///
-/// * `policy` — The [`RetryPolicy`] controlling attempt counts and delays.
-/// * `f` — The fallible async closure to invoke.
-/// * `should_retry` — A predicate called on each error; return `true` to retry
-///   or `false` to propagate immediately.
-///
-/// # Returns
-///
-/// `Ok(value)` on success, or `Err(error)` when the predicate returns `false`
-/// or `max_attempts` are exhausted.
 ///
 /// # Examples
 ///
@@ -341,47 +331,24 @@ impl RetryPolicy {
 /// assert_eq!(result.unwrap_err(), "permanent"); // stopped immediately
 /// # }
 /// ```
-pub async fn retry_if<F, Fut, T, E, P>(
-    policy: &RetryPolicy,
-    mut f: F,
-    mut should_retry: P,
-) -> Result<T, E>
+pub async fn retry_if<F, Fut, T, E, P>(policy: &RetryPolicy, f: F, should_retry: P) -> Result<T, E>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, E>>,
     P: FnMut(&E) -> bool,
     E: std::fmt::Display,
 {
-    let mut attempt = 0;
-
-    loop {
-        attempt += 1;
-
-        match f().await {
-            Ok(result) => return Ok(result),
-            Err(e) => {
-                if !should_retry(&e) {
-                    warn!(error = %e, "retry: error is not retryable");
-                    return Err(e);
-                }
-
-                if attempt >= policy.max_attempts {
-                    return Err(e);
-                }
-
-                let delay = policy.calculate_delay(attempt);
-                tokio::time::sleep(delay).await;
-            }
-        }
-    }
+    let retries = policy.max_attempts.saturating_sub(1);
+    f.retry(policy.backoff(retries))
+        .when(should_retry)
+        .notify(|e: &E, delay: Duration| {
+            warn!(error = %e, delay_ms = delay.as_millis() as u64, "retry: operation failed, retrying");
+        })
+        .await
 }
 
 /// Add random jitter (up to 25 %) to a delay to prevent thundering-herd
 /// scenarios when many clients retry at the same time.
-///
-/// # Arguments
-///
-/// * `duration` — Base delay to which jitter is added.
 ///
 /// # Returns
 ///
@@ -413,8 +380,9 @@ pub fn with_jitter(duration: Duration) -> Duration {
 ///
 /// Unlike `RetryPolicy::retry`, this variant:
 /// - Sleeps for exactly `retry_after_secs` when the provider says to back off.
-/// - Stops retrying on `BudgetExceeded` (non-transient).
-/// - Falls back to exponential backoff for all other errors.
+/// - Stops at once on errors that cannot succeed on a retry
+///   ([`OrchestratorError::is_retryable`] is `false`: bad key, budget, config).
+/// - Uses jittered exponential backoff (capped at 60 s) for everything else.
 ///
 /// ```no_run
 /// use std::time::Duration;
@@ -431,49 +399,147 @@ pub fn with_jitter(duration: Duration) -> Duration {
 pub async fn retry_inference<F, Fut>(
     max_attempts: usize,
     base_delay: Duration,
-    mut f: F,
+    f: F,
 ) -> Result<Vec<String>, OrchestratorError>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<Vec<String>, OrchestratorError>>,
 {
-    let mut attempt = 0;
+    let backoff = ExponentialBuilder::new()
+        .with_min_delay(base_delay)
+        .with_max_delay(Duration::from_secs(60))
+        .with_max_times(max_attempts.saturating_sub(1))
+        .with_jitter();
+    f.retry(backoff)
+        .when(OrchestratorError::is_retryable)
+        .adjust(|e, delay| match e {
+            OrchestratorError::RateLimited { retry_after_secs } => {
+                delay.map(|_| Duration::from_secs(*retry_after_secs))
+            }
+            _ => delay,
+        })
+        .notify(|e, delay| {
+            warn!(error = %e, delay_ms = delay.as_millis() as u64, "transient error, retrying");
+        })
+        .await
+}
 
-    loop {
-        attempt += 1;
-        match f().await {
-            Ok(v) => return Ok(v),
-            Err(OrchestratorError::BudgetExceeded { spent, limit }) => {
-                // Non-transient — propagate immediately.
-                return Err(OrchestratorError::BudgetExceeded { spent, limit });
-            }
-            Err(OrchestratorError::RateLimited { retry_after_secs }) => {
-                if attempt >= max_attempts {
-                    return Err(OrchestratorError::RateLimited { retry_after_secs });
-                }
-                let wait = Duration::from_secs(retry_after_secs);
-                warn!(
-                    attempt,
-                    wait_secs = retry_after_secs,
-                    "rate limited — sleeping for Retry-After duration"
-                );
-                tokio::time::sleep(wait).await;
-            }
-            Err(e) => {
-                if attempt >= max_attempts {
-                    return Err(e);
-                }
-                // Exponential backoff for all other transient errors.
-                // saturating_sub prevents underflow when attempt == 0 (would give powi(-1) = decay).
-                // The cap at 62 prevents f64 overflow for very large attempt counts.
-                let exp = attempt.saturating_sub(1).min(62) as i32;
-                let delay_ms = (base_delay.as_millis() as f64 * 2_f64.powi(exp))
-                    .min(60_000.0) as u64;
-                let delay = with_jitter(Duration::from_millis(delay_ms));
-                warn!(attempt, delay_ms = delay.as_millis(), error = %e, "transient error — retrying");
-                tokio::time::sleep(delay).await;
-            }
+/// Retry settings for the pipeline's inference stage.
+///
+/// Every model call made by the pipeline goes through
+/// [`InferenceRetry::run`]. With `max_retries == 0` (the default for
+/// [`spawn_pipeline`](crate::spawn_pipeline)) the call is made exactly once.
+/// Otherwise a call that fails with a transient error (429, 5xx, network)
+/// is retried with jittered exponential backoff, and a provider's
+/// `Retry-After` is respected when it is no longer than `max_delay`.
+/// Errors that cannot succeed on a retry (bad key, budget exceeded, bad
+/// config) are returned at once.
+///
+/// All attempts of one request count as one call for the circuit breaker,
+/// and all of them together must fit in the inference timeout.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+/// use tokio_prompt_orchestrator::enhanced::InferenceRetry;
+///
+/// let retry = InferenceRetry::new(2, Duration::from_millis(200), Duration::from_secs(5));
+/// assert!(retry.is_enabled());
+/// assert!(!InferenceRetry::disabled().is_enabled());
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InferenceRetry {
+    /// Retries after the first attempt. `0` disables retrying.
+    pub max_retries: u32,
+    /// Delay before the first retry; it doubles on each further retry.
+    pub base_delay: Duration,
+    /// Cap on the backoff delay, and on how long a `Retry-After` may ask
+    /// the stage to wait. A longer `Retry-After` fails the request instead.
+    pub max_delay: Duration,
+}
+
+impl Default for InferenceRetry {
+    fn default() -> Self {
+        Self::disabled()
+    }
+}
+
+impl InferenceRetry {
+    /// No retries: every request makes exactly one model call.
+    pub const fn disabled() -> Self {
+        Self {
+            max_retries: 0,
+            base_delay: Duration::from_millis(100),
+            max_delay: Duration::from_secs(5),
         }
+    }
+
+    /// Retry up to `max_retries` times, starting at `base_delay` and capping
+    /// each wait at `max_delay`.
+    pub const fn new(max_retries: u32, base_delay: Duration, max_delay: Duration) -> Self {
+        Self {
+            max_retries,
+            base_delay,
+            max_delay,
+        }
+    }
+
+    /// Read `retry_attempts`, `retry_base_ms` and `retry_max_ms` from the
+    /// `[resilience]` section of a pipeline config.
+    pub fn from_resilience(r: &ResilienceConfig) -> Self {
+        Self::new(
+            r.retry_attempts,
+            Duration::from_millis(r.retry_base_ms),
+            Duration::from_millis(r.retry_max_ms),
+        )
+    }
+
+    /// `true` when at least one retry is allowed.
+    pub const fn is_enabled(&self) -> bool {
+        self.max_retries > 0
+    }
+
+    /// Run `f`, retrying transient failures according to these settings.
+    pub async fn run<F, Fut, T>(&self, mut f: F) -> Result<T, OrchestratorError>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<T, OrchestratorError>>,
+    {
+        if !self.is_enabled() {
+            return f().await;
+        }
+        let max_delay = self.max_delay;
+        let backoff = ExponentialBuilder::new()
+            .with_min_delay(self.base_delay.min(max_delay))
+            .with_max_delay(max_delay)
+            .with_max_times(self.max_retries as usize)
+            .with_jitter();
+        f.retry(backoff)
+            .when(OrchestratorError::is_retryable)
+            .adjust(move |e, delay| match e {
+                // Wait as long as the provider asked, unless that is longer
+                // than we are allowed to wait: then give up and fail fast.
+                OrchestratorError::RateLimited { retry_after_secs } => {
+                    let asked = Duration::from_secs(*retry_after_secs);
+                    if asked > max_delay {
+                        None
+                    } else {
+                        delay.map(|d| d.max(asked))
+                    }
+                }
+                _ => delay,
+            })
+            .notify(|e, delay| {
+                crate::metrics::inc_inference_retry();
+                warn!(
+                    target: "orchestrator::pipeline",
+                    error_kind = e.error_kind(),
+                    delay_ms = delay.as_millis() as u64,
+                    "Inference failed with a transient error, retrying"
+                );
+            })
+            .await
     }
 }
 
@@ -511,13 +577,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_retry_exhausts_attempts() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let a = attempts.clone();
         let policy = RetryPolicy::fixed(3, Duration::from_millis(10));
 
         let result = policy
-            .retry(|| async { Err::<(), _>("always fails") })
+            .retry(|| {
+                a.fetch_add(1, Ordering::SeqCst);
+                async { Err::<(), _>("always fails") }
+            })
             .await;
 
-        assert!(result.is_err(), "all 3 attempts exhausted — result must be Err");
+        assert!(result.is_err(), "all 3 attempts exhausted, result must be Err");
+        assert_eq!(attempts.load(Ordering::SeqCst), 3, "max_attempts counts the first try");
     }
 
     #[tokio::test]
@@ -531,6 +603,23 @@ mod tests {
         assert_eq!(delay1, Duration::from_millis(10), "attempt 1 delay should equal initial_delay");
         assert_eq!(delay2, Duration::from_millis(20), "attempt 2 delay should be initial_delay * 2");
         assert_eq!(delay3, Duration::from_millis(40), "attempt 3 delay should be initial_delay * 4");
+    }
+
+    #[test]
+    fn test_exponential_backoff_respects_cap() {
+        let policy = RetryPolicy {
+            max_attempts: 10,
+            strategy: RetryStrategy::Exponential {
+                initial_delay: Duration::from_millis(100),
+                max_delay: Duration::from_millis(300),
+                multiplier: 2.0,
+            },
+        };
+        let delays: Vec<_> = policy.backoff(5).collect();
+        assert_eq!(
+            delays,
+            [100, 200, 300, 300, 300].map(Duration::from_millis).to_vec()
+        );
     }
 
     #[tokio::test]
@@ -577,8 +666,104 @@ mod tests {
         let base = Duration::from_secs(1);
         let jittered = with_jitter(base);
 
-        // Should be within range
         assert!(jittered >= base, "jittered delay must not be less than the base delay");
         assert!(jittered <= base + Duration::from_millis(250), "jitter must not exceed 25% of base (250ms for a 1s base)");
+    }
+
+    #[tokio::test]
+    async fn test_retry_inference_stops_on_auth_failure() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let result = retry_inference(5, Duration::from_millis(1), || {
+            c.fetch_add(1, Ordering::SeqCst);
+            async { Err(OrchestratorError::AuthFailed("HTTP 401".into())) }
+        })
+        .await;
+        assert!(matches!(result, Err(OrchestratorError::AuthFailed(_))));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "a bad key is never retried");
+    }
+
+    #[tokio::test]
+    async fn test_inference_retry_disabled_calls_once() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let result: Result<(), _> = InferenceRetry::disabled()
+            .run(|| {
+                c.fetch_add(1, Ordering::SeqCst);
+                async { Err(OrchestratorError::Inference("503".into())) }
+            })
+            .await;
+        assert!(result.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_inference_retry_recovers_from_transient_errors() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let retry = InferenceRetry::new(3, Duration::from_millis(1), Duration::from_millis(10));
+        let result = retry
+            .run(|| {
+                let n = c.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    match n {
+                        0 => Err(OrchestratorError::Inference("503 Service Unavailable".into())),
+                        1 => Err(OrchestratorError::RateLimited { retry_after_secs: 0 }),
+                        _ => Ok("answer"),
+                    }
+                }
+            })
+            .await;
+        assert_eq!(result.ok(), Some("answer"));
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn test_inference_retry_gives_up_after_max_retries() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let retry = InferenceRetry::new(2, Duration::from_millis(1), Duration::from_millis(10));
+        let result: Result<(), _> = retry
+            .run(|| {
+                c.fetch_add(1, Ordering::SeqCst);
+                async { Err(OrchestratorError::Inference("503".into())) }
+            })
+            .await;
+        assert!(result.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 3, "first try plus 2 retries");
+    }
+
+    #[tokio::test]
+    async fn test_inference_retry_fails_fast_when_retry_after_exceeds_cap() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let retry = InferenceRetry::new(5, Duration::from_millis(1), Duration::from_secs(5));
+        let started = std::time::Instant::now();
+        let result: Result<(), _> = retry
+            .run(|| {
+                c.fetch_add(1, Ordering::SeqCst);
+                async { Err(OrchestratorError::RateLimited { retry_after_secs: 60 }) }
+            })
+            .await;
+        assert!(matches!(result, Err(OrchestratorError::RateLimited { .. })));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "a 60 s Retry-After is over the 5 s cap");
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_inference_retry_from_resilience_config() {
+        let r = ResilienceConfig {
+            retry_attempts: 3,
+            retry_base_ms: 50,
+            retry_max_ms: 2000,
+            circuit_breaker_threshold: 5,
+            circuit_breaker_timeout_s: 60,
+            circuit_breaker_success_rate: 0.8,
+        };
+        let retry = InferenceRetry::from_resilience(&r);
+        assert_eq!(
+            retry,
+            InferenceRetry::new(3, Duration::from_millis(50), Duration::from_secs(2))
+        );
     }
 }

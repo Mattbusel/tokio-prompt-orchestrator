@@ -1,6 +1,6 @@
 [package]
 name = "tokio-prompt-orchestrator"
-version = "1.5.0"
+version = "1.6.0"
 edition = "2021"
 rust-version = "1.85"
 default-run = "orchestrator"
@@ -63,15 +63,10 @@ serde_json = "1.0"
 clap = { version = "4", features = ["derive", "env"] }
 
 # Metrics
-# prometheus 0.13 has RUSTSEC-2024-0437 (protobuf DoS via crafted scrape request).
-# Mitigated by: METRICS_API_KEY auth on /metrics endpoint (added 2026-03-19).
-# prometheus 0.14 has breaking API changes (see https://github.com/tikv/rust-prometheus/releases).
-# Specifically: the `prometheus::proto` module (and protobuf support) was removed in 0.14;
-# src/metrics.rs uses `prometheus::proto::MetricFamily` in gather() which must be migrated first.
-# Track upgrade in issue #XXX.
-# TODO(2026-Q3): migrate prometheus::proto::MetricFamily usages then upgrade to 0.14
-prometheus = "0.13"
-lazy_static = "1.4"  # used by prometheus crate — do not remove
+# prometheus 0.14 without its default `protobuf` feature: the text exposition
+# format is all /metrics serves, and dropping protobuf removes the
+# RUSTSEC-2024-0437 dependency (and the advisory ignore in deny.toml) entirely.
+prometheus = { version = "0.14", default-features = false }
 
 # Web (feature-gated)
 axum = { version = "0.7", optional = true, features = ["ws", "macros"] }
@@ -96,6 +91,15 @@ core_affinity = { version = "0.8", optional = true }
 
 # Regex engine for RegexReplaceStage in pipeline.rs
 regex = "1"
+
+# Retry with backoff and jitter: enhanced::retry and the inference stage
+backon = { version = "1.6", default-features = false, features = ["std", "tokio-sleep"] }
+
+# Bounded, per-entry-TTL concurrent cache behind enhanced::Deduplicator
+moka = { version = "0.12", features = ["sync"] }
+
+# Exact OpenAI token counts (token_counter, OpenAI proxy usage and spend cap)
+tiktoken-rs = { version = "0.12", optional = true }
 
 # SHA-256 for prompt cache content-addressing
 sha2 = "0.10"
@@ -126,7 +130,12 @@ metrics-server = ["axum", "tower", "tower-http"]
 
 # web-api: Full HTTP server with REST endpoints, SSE streaming, and WebSocket.
 # Required by: mcp, dashboard.
-web-api = ["axum", "tower", "tower-http", "tokio-stream"]
+web-api = ["axum", "tower", "tower-http", "tokio-stream", "tiktoken"]
+
+# tiktoken: exact token counts for OpenAI models (GPT-5, GPT-4.1, GPT-4o,
+# GPT-4, GPT-3.5, o-series) via tiktoken-rs. Other models keep the estimate.
+# Adds the BPE tables (several MB) to the binary. Enabled by web-api.
+tiktoken = ["tiktoken-rs"]
 
 # caching: Redis-backed TTL result cache for inference responses.
 # Reduces LLM API cost for repeated identical prompts across process restarts.

@@ -33,9 +33,13 @@
 //! ```
 
 use dashmap::DashMap;
+use moka::ops::compute::Op;
+use moka::sync::Cache;
+use moka::Expiry;
+use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tracing::{debug, info};
 use uuid::Uuid;
@@ -114,8 +118,11 @@ pub struct DeduplicationToken {
     /// Useful for structured log correlation.
     pub id: String,
     key: String,
-    completed: Arc<std::sync::atomic::AtomicBool>,
-    requests: Arc<DashMap<String, RequestState>>,
+    completed: Arc<AtomicBool>,
+    /// The same channel waiters subscribed to. Held by the token so that
+    /// waiters are always woken, even if the cache evicted the entry.
+    waiter_tx: broadcast::Sender<String>,
+    requests: Cache<String, RequestState>,
 }
 
 /// # Behavior on Drop
@@ -131,9 +138,9 @@ pub struct DeduplicationToken {
 ///    can detect cancellation by checking for this sentinel.
 ///
 /// 2. **Entry removal**: After the cancellation broadcast the `InProgress`
-///    entry is removed from the shared map.  This drops the `Sender`, closing
-///    the broadcast channel.  Any tasks that subscribe *after* the removal will
-///    find no entry and `wait_for_result` will return `None`.
+///    entry is removed from the shared cache.  Any tasks that subscribe
+///    *after* the removal will find no entry and `wait_for_result` will
+///    return `None`.
 ///
 /// 3. **Re-registrability**: Because the entry is removed, the *next* caller
 ///    to invoke `check_and_register` for the same key will receive a fresh
@@ -159,25 +166,14 @@ pub fn is_cancelled_result(result: &str) -> bool {
 impl Drop for DeduplicationToken {
     fn drop(&mut self) {
         // Only act if this is the last clone and complete() was never called.
-        if Arc::strong_count(&self.completed) == 1
-            && !self.completed.load(std::sync::atomic::Ordering::Acquire)
-        {
-            // Broadcast a cancellation sentinel so tasks already blocked in
-            // wait_for_result() are unblocked immediately rather than hanging
-            // until the Sender is dropped by the map removal below.
-            if let Some(state) = self.requests.get(&self.key) {
-                if let RequestState::InProgress { waiter_tx, .. } = state.value() {
-                    // Ignore send errors — if there are no receivers, that's fine.
-                    let _ = waiter_tx.send(DEDUP_CANCELLED_SENTINEL.to_string());
-                }
-            }
-
-            // Remove the in-progress entry.  This drops the broadcast Sender,
-            // closing the channel for any tasks that subscribe after this point.
-            self.requests.remove(&self.key);
+        if Arc::strong_count(&self.completed) == 1 && !self.completed.load(Ordering::Acquire) {
+            // Wake tasks already blocked in wait_for_result() at once.
+            // Send errors only mean nobody is waiting.
+            let _ = self.waiter_tx.send(DEDUP_CANCELLED_SENTINEL.to_string());
+            remove_if_owned_by(&self.requests, &self.key, &self.id);
             tracing::warn!(
                 key = %self.key,
-                "DeduplicationToken dropped without complete() — cancellation sent and in-progress entry removed"
+                "DeduplicationToken dropped without complete(): cancellation sent and in-progress entry removed"
             );
         }
     }
@@ -187,14 +183,69 @@ impl Drop for DeduplicationToken {
 #[derive(Debug, Clone)]
 enum RequestState {
     InProgress {
-        started_at: SystemTime,
+        /// Id of the [`DeduplicationToken`] that owns this entry.
+        owner: Arc<str>,
         waiter_tx: broadcast::Sender<String>,
     },
     Completed {
-        result: String,
-        completed_at: SystemTime,
+        result: Arc<str>,
     },
 }
+
+/// Remove `key` only while it is still the in-progress entry of token `owner`,
+/// so a stale token can never clear a newer registration or a cached result.
+fn remove_if_owned_by(requests: &Cache<String, RequestState>, key: &str, owner: &str) {
+    requests
+        .entry_by_ref(key)
+        .and_compute_with(|current| match current.map(|e| e.into_value()) {
+            Some(RequestState::InProgress { owner: o, .. }) if &*o == owner => Op::Remove,
+            _ => Op::Nop,
+        });
+}
+
+/// Per-entry lifetimes: a completed result lives for the dedup window; an
+/// in-progress entry lives long enough for a slow model call to finish.
+struct DedupExpiry {
+    cache_duration: Duration,
+    in_progress_ttl: Duration,
+}
+
+impl Expiry<String, RequestState> for DedupExpiry {
+    fn expire_after_create(
+        &self,
+        _key: &String,
+        value: &RequestState,
+        _created_at: Instant,
+    ) -> Option<Duration> {
+        Some(self.ttl_for(value))
+    }
+
+    fn expire_after_update(
+        &self,
+        _key: &String,
+        value: &RequestState,
+        _updated_at: Instant,
+        _duration_until_expiry: Option<Duration>,
+    ) -> Option<Duration> {
+        Some(self.ttl_for(value))
+    }
+}
+
+impl DedupExpiry {
+    fn ttl_for(&self, value: &RequestState) -> Duration {
+        match value {
+            RequestState::InProgress { .. } => self.in_progress_ttl,
+            RequestState::Completed { .. } => self.cache_duration,
+        }
+    }
+}
+
+/// Default bound on tracked keys (in-progress plus cached) per [`Deduplicator`].
+pub const DEFAULT_DEDUP_MAX_ENTRIES: u64 = 100_000;
+
+/// An in-progress entry is dropped after 10x the cache window, but never
+/// sooner than this, so a zero-length window still shares in-flight calls.
+const MIN_IN_PROGRESS_TTL: Duration = Duration::from_secs(600);
 
 /// In-process request deduplicator that coalesces identical concurrent
 /// requests and caches recently completed results.
@@ -204,21 +255,28 @@ enum RequestState {
 /// 1. The caller derives a stable cache key (see [`dedup_key`]) from the
 ///    prompt and session.
 /// 2. [`Deduplicator::check_and_register`] atomically checks the shared
-///    state map and returns one of three outcomes:
-///    - [`DeduplicationResult::New`] — the caller is the first to see this
+///    state and returns one of three outcomes:
+///    - [`DeduplicationResult::New`]: the caller is the first to see this
 ///      key; it receives a [`DeduplicationToken`] and must process the request.
-///    - [`DeduplicationResult::InProgress`] — another task is already working;
+///    - [`DeduplicationResult::InProgress`]: another task is already working;
 ///      the caller should call [`Deduplicator::wait_for_result`] to block.
-///    - [`DeduplicationResult::Cached`] — a prior result is still within the
+///    - [`DeduplicationResult::Cached`]: a prior result is still within the
 ///      `cache_duration` TTL; the caller can return it immediately.
 /// 3. On success the worker calls [`Deduplicator::complete`]; on failure it
 ///    calls [`Deduplicator::fail`], which removes the entry.
 ///
+/// # Storage
+///
+/// Entries live in a [`moka`] concurrent cache with a per-entry expiry and a
+/// size bound ([`DEFAULT_DEDUP_MAX_ENTRIES`] unless set with
+/// [`Deduplicator::with_max_entries`]). Expired entries are never returned
+/// and are evicted by the cache itself, so there is no background sweeper
+/// task, and memory stays bounded however many distinct prompts arrive
+/// within one window.
+///
 /// # Thread safety
 ///
-/// `Deduplicator` is `Clone + Send + Sync`.  All clones share the same
-/// underlying `Arc<DashMap>`.  A background task cleans up expired entries
-/// every 60 seconds; it stops when the *last* `Deduplicator` clone is dropped.
+/// `Deduplicator` is `Clone + Send + Sync`.  All clones share the same cache.
 ///
 /// # Examples
 ///
@@ -245,12 +303,8 @@ enum RequestState {
 /// ```
 #[derive(Clone)]
 pub struct Deduplicator {
-    requests: Arc<DashMap<String, RequestState>>,
+    requests: Cache<String, RequestState>,
     cache_duration: Duration,
-    /// Signals the background cleanup task to stop when set to `true`.
-    shutdown: Arc<AtomicBool>,
-    /// Handle to the background cleanup task, used by [`shutdown`](Self::shutdown).
-    cleanup_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// Optional embedding store for semantic (cosine-similarity) deduplication.
     embeddings: Arc<DashMap<String, Vec<f32>>>,
     /// Minimum cosine similarity score to treat a new prompt as a duplicate.
@@ -258,17 +312,15 @@ pub struct Deduplicator {
 }
 
 impl Deduplicator {
-    /// Create a new `Deduplicator` with the given cache TTL.
-    ///
-    /// A background cleanup task is spawned immediately.  It wakes up every
-    /// 60 seconds to evict expired entries and exits when the last
-    /// `Deduplicator` clone is dropped.
+    /// Create a new `Deduplicator` with the given cache TTL and room for
+    /// [`DEFAULT_DEDUP_MAX_ENTRIES`] keys.
     ///
     /// # Arguments
     ///
-    /// * `cache_duration` — How long a completed result remains cached before
+    /// * `cache_duration`: how long a completed result remains cached before
     ///   being treated as a fresh request.  Common choices: 5 minutes for
-    ///   interactive use, 1 hour for batch/idempotent workloads.
+    ///   interactive use, 1 hour for batch/idempotent workloads. `0` shares
+    ///   only calls that are still in flight.
     ///
     /// # Examples
     ///
@@ -276,85 +328,62 @@ impl Deduplicator {
     /// use std::time::Duration;
     /// use tokio_prompt_orchestrator::enhanced::Deduplicator;
     ///
-    /// # #[tokio::main]
-    /// # async fn main() {
     /// let dedup = Deduplicator::new(Duration::from_secs(300));
-    /// # }
     /// ```
-    ///
-    /// # Panics
-    ///
-    /// Spawns a background cleanup task, so it must be called from within a
-    /// Tokio runtime.
     pub fn new(cache_duration: Duration) -> Self {
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let cleanup_handle = Arc::new(tokio::sync::Mutex::new(None::<tokio::task::JoinHandle<()>>));
-        let dedup = Self {
-            requests: Arc::new(DashMap::new()),
+        Self::with_max_entries(cache_duration, DEFAULT_DEDUP_MAX_ENTRIES)
+    }
+
+    /// Like [`new`](Self::new), but holding at most `max_entries` keys. When
+    /// full, the cache evicts the entries least likely to be reused.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use tokio_prompt_orchestrator::enhanced::Deduplicator;
+    ///
+    /// let dedup = Deduplicator::with_max_entries(Duration::from_secs(60), 10_000);
+    /// ```
+    pub fn with_max_entries(cache_duration: Duration, max_entries: u64) -> Self {
+        let in_progress_ttl = cache_duration.saturating_mul(10).max(MIN_IN_PROGRESS_TTL);
+        let requests = Cache::builder()
+            .max_capacity(max_entries)
+            .expire_after(DedupExpiry {
+                cache_duration,
+                in_progress_ttl,
+            })
+            .build();
+        Self {
+            requests,
             cache_duration,
-            shutdown: shutdown.clone(),
-            cleanup_handle: cleanup_handle.clone(),
             embeddings: Arc::new(DashMap::new()),
             similarity_threshold: 1.0, // disabled by default: exact match only
-        };
-
-        // Start cleanup task; checks `shutdown` flag each iteration so it
-        // stops promptly when the last Deduplicator handle is dropped or
-        // shutdown() is called.
-        let requests = dedup.requests.clone();
-        let cache_duration = dedup.cache_duration;
-        let handle = tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(60)).await;
-                if shutdown.load(Ordering::Relaxed) {
-                    break;
-                }
-                cleanup_expired(&requests, cache_duration);
-            }
-        });
-        if let Ok(mut slot) = cleanup_handle.try_lock() {
-            *slot = Some(handle);
-        }
-
-        dedup
-    }
-
-    /// Signal the background cleanup task to stop without waiting for it.
-    ///
-    /// Sets the shutdown `AtomicBool` to `true`.  The cleanup loop exits on its
-    /// next wake-up.  Call [`shutdown`](Self::shutdown) if you need to await
-    /// completion.
-    pub fn signal_shutdown(&self) {
-        self.shutdown.store(true, Ordering::Relaxed);
-    }
-
-    /// Gracefully shut down the background cleanup task.
-    ///
-    /// Sets the shutdown flag so the cleanup loop exits on its next wake-up,
-    /// then waits for the task to finish.  Safe to call multiple times.
-    pub async fn shutdown(&self) {
-        self.shutdown.store(true, Ordering::Relaxed);
-        let handle = self.cleanup_handle.lock().await.take();
-        if let Some(h) = handle {
-            h.abort();
         }
     }
+
+    /// The window a completed result stays reusable for.
+    pub fn cache_duration(&self) -> Duration {
+        self.cache_duration
+    }
+
+    /// Kept for API compatibility. The cache needs no background task, so
+    /// there is nothing to stop.
+    pub fn signal_shutdown(&self) {}
+
+    /// Kept for API compatibility. The cache needs no background task, so
+    /// this returns at once.
+    pub async fn shutdown(&self) {}
 
     /// Atomically check whether a request is new, in-progress, or cached, and
     /// register it as in-progress if it is new.
     ///
-    /// Uses `DashMap::entry()` for a compare-and-insert that prevents multiple
-    /// concurrent callers from each receiving [`DeduplicationResult::New`] for
-    /// the same key — only one will win the race.
+    /// Only one of any number of concurrent callers with the same key
+    /// receives [`DeduplicationResult::New`].
     ///
     /// # Arguments
     ///
-    /// * `key` — Stable cache key; derive one with [`dedup_key`].
-    ///
-    /// # Returns
-    ///
-    /// A [`DeduplicationResult`] indicating whether the caller should process
-    /// the request, wait for another task, or reuse a cached result.
+    /// * `key`: stable cache key; derive one with [`dedup_key`].
     ///
     /// # Examples
     ///
@@ -371,136 +400,54 @@ impl Deduplicator {
     /// # }
     /// ```
     pub async fn check_and_register(&self, key: &str) -> DeduplicationResult {
-        use dashmap::mapref::entry::Entry;
+        let id = Uuid::new_v4().to_string();
+        let (tx, _) = broadcast::channel(16);
+        let entry = self
+            .requests
+            .entry_by_ref(key)
+            .or_insert_with(|| RequestState::InProgress {
+                owner: Arc::from(id.as_str()),
+                waiter_tx: tx.clone(),
+            });
 
-        // First, handle the already-present cases through a read-side fast path.
-        // We still need the atomic entry() below for the insert path.
-        if let Some(state) = self.requests.get(key) {
-            return match state.value() {
-                RequestState::InProgress { .. } => {
-                    info!(key = key, "duplicate request detected (in progress)");
-                    crate::metrics::inc_dedup_hit();
-                    DeduplicationResult::InProgress
-                }
-                RequestState::Completed {
-                    result,
-                    completed_at,
-                } => {
-                    if completed_at.elapsed().unwrap_or_default() < self.cache_duration {
-                        info!(key = key, "duplicate request detected (cached)");
-                        crate::metrics::inc_dedup_hit();
-                        DeduplicationResult::Cached(result.clone())
-                    } else {
-                        // Expired — fall through to the atomic entry path below.
-                        drop(state);
-                        // Remove the expired entry so the entry() call below sees it as absent.
-                        self.requests.remove(key);
-                        // Fall through to atomic insert.
-                        return self.atomic_register_new(key);
-                    }
-                }
+        if entry.is_fresh() {
+            let token = DeduplicationToken {
+                id,
+                key: key.to_string(),
+                completed: Arc::new(AtomicBool::new(false)),
+                waiter_tx: tx,
+                requests: self.requests.clone(),
             };
+            debug!(key = key, token_id = %token.id, "new request registered");
+            return DeduplicationResult::New(token);
         }
 
-        // Key is absent — use entry() for an atomic check-and-insert so that
-        // concurrent callers cannot both see "absent" and both get New.
-        match self.requests.entry(key.to_string()) {
-            Entry::Occupied(occ) => {
-                // Another task raced us and inserted first.
-                match occ.get() {
-                    RequestState::InProgress { .. } => {
-                        info!(key = key, "duplicate request detected (in progress, raced)");
-                        crate::metrics::inc_dedup_hit();
-                        DeduplicationResult::InProgress
-                    }
-                    RequestState::Completed { result, .. } => {
-                        info!(key = key, "duplicate request detected (cached, raced)");
-                        crate::metrics::inc_dedup_hit();
-                        DeduplicationResult::Cached(result.clone())
-                    }
-                }
+        crate::metrics::inc_dedup_hit();
+        match entry.into_value() {
+            RequestState::InProgress { .. } => {
+                info!(key = key, "duplicate request detected (in progress)");
+                DeduplicationResult::InProgress
             }
-            Entry::Vacant(vac) => {
-                // NOTE: buffer size 16 — allows up to 16 waiters to receive the
-                // completion notification without the sender blocking.  If more
-                // than 16 tasks subscribe and the sender falls behind, `recv()`
-                // returns `Err(RecvError::Lagged)` and the waiter must treat the
-                // request as a miss and re-check the map.  A buffer of 1 would
-                // drop notifications under moderate concurrency.
-                let (tx, _) = broadcast::channel(16);
-                vac.insert(RequestState::InProgress {
-                    started_at: SystemTime::now(),
-                    waiter_tx: tx,
-                });
-                let token = DeduplicationToken {
-                    id: Uuid::new_v4().to_string(),
-                    key: key.to_string(),
-                    completed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                    requests: Arc::clone(&self.requests),
-                };
-                debug!(key = key, token_id = %token.id, "new request registered");
-                DeduplicationResult::New(token)
-            }
-        }
-    }
-
-    /// Atomically insert a new `InProgress` entry.  Called only when we have
-    /// already removed an expired entry and need a fresh registration.
-    fn atomic_register_new(&self, key: &str) -> DeduplicationResult {
-        use dashmap::mapref::entry::Entry;
-        match self.requests.entry(key.to_string()) {
-            Entry::Occupied(occ) => match occ.get() {
-                RequestState::InProgress { .. } => {
-                    crate::metrics::inc_dedup_hit();
-                    DeduplicationResult::InProgress
-                }
-                RequestState::Completed { result, .. } => {
-                    crate::metrics::inc_dedup_hit();
-                    DeduplicationResult::Cached(result.clone())
-                }
-            },
-            Entry::Vacant(vac) => {
-                // NOTE: same buffer-size rationale as check_and_register — see above.
-                let (tx, _) = broadcast::channel(16);
-                vac.insert(RequestState::InProgress {
-                    started_at: SystemTime::now(),
-                    waiter_tx: tx,
-                });
-                let token = DeduplicationToken {
-                    id: Uuid::new_v4().to_string(),
-                    key: key.to_string(),
-                    completed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                    requests: Arc::clone(&self.requests),
-                };
-                debug!(key = key, "new request registered (after expiry)");
-                DeduplicationResult::New(token)
+            RequestState::Completed { result } => {
+                info!(key = key, "duplicate request detected (cached)");
+                DeduplicationResult::Cached(result.to_string())
             }
         }
     }
 
     /// Wait for an in-progress request to complete and return its result.
     ///
-    /// Subscribes to the internal broadcast channel for the given key.  If the
-    /// request has already completed by the time this is called, the cached
-    /// result is returned immediately without waiting.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` — The same key passed to [`Deduplicator::check_and_register`].
+    /// If the request has already completed by the time this is called, the
+    /// cached result is returned immediately without waiting.
     ///
     /// # Returns
     ///
     /// `Some(result)` when the pending request completes, or `None` if the
     /// key is not tracked (e.g. the worker called [`Deduplicator::fail`]).
     pub async fn wait_for_result(&self, key: &str) -> Option<String> {
-        let mut rx = {
-            let state = self.requests.get(key)?;
-            match state.value() {
-                RequestState::InProgress { waiter_tx, .. } => waiter_tx.subscribe(),
-                RequestState::Completed { result, .. } => {
-                    return Some(result.clone());
-                }
-            }
+        let mut rx = match self.requests.get(key)? {
+            RequestState::InProgress { waiter_tx, .. } => waiter_tx.subscribe(),
+            RequestState::Completed { result } => return Some(result.to_string()),
         };
 
         let result = rx.recv().await.ok();
@@ -513,74 +460,66 @@ impl Deduplicator {
     /// Mark a request as successfully completed and cache its result.
     ///
     /// Notifies all tasks currently blocked in [`Deduplicator::wait_for_result`]
-    /// for the same key.  The result is retained in the cache for
-    /// `cache_duration` so subsequent callers receive
-    /// [`DeduplicationResult::Cached`].
-    ///
-    /// # Arguments
-    ///
-    /// * `token` — The [`DeduplicationToken`] returned by
-    ///   [`Deduplicator::check_and_register`].
-    /// * `result` — The serialised response to cache and broadcast.
+    /// for the same key.  The result is retained for `cache_duration` so
+    /// subsequent callers receive [`DeduplicationResult::Cached`].
     pub async fn complete(&self, token: DeduplicationToken, result: String) {
-        token
-            .completed
-            .store(true, std::sync::atomic::Ordering::Release);
-        if let Some(mut entry) = self.requests.get_mut(&token.key) {
-            if let RequestState::InProgress { waiter_tx, .. } = entry.value() {
-                let _ = waiter_tx.send(result.clone());
-            }
-
-            *entry = RequestState::Completed {
-                result,
-                completed_at: SystemTime::now(),
+        token.completed.store(true, Ordering::Release);
+        let _ = token.waiter_tx.send(result.clone());
+        if self.cache_duration.is_zero() {
+            // Nothing to cache: just release the key.
+            remove_if_owned_by(&self.requests, &token.key, &token.id);
+        } else {
+            let cached = RequestState::Completed {
+                result: Arc::from(result),
             };
-
-            info!(key = token.key, token_id = %token.id, "request completed");
+            self.requests
+                .entry_by_ref(&token.key)
+                .and_compute_with(|current| match current.map(|e| e.into_value()) {
+                    Some(RequestState::InProgress { owner, .. }) if *owner == *token.id => {
+                        Op::Put(cached)
+                    }
+                    // Evicted while in flight: cache the answer anyway.
+                    None => Op::Put(cached),
+                    _ => Op::Nop,
+                });
         }
+        info!(key = token.key, token_id = %token.id, "request completed");
     }
 
     /// Mark a request as failed and remove it from tracking.
     ///
     /// After this call, the next [`Deduplicator::check_and_register`] for the
     /// same key will receive [`DeduplicationResult::New`] so the request can
-    /// be retried.  Any tasks waiting in [`Deduplicator::wait_for_result`] will
-    /// receive `None` on their next `recv()` after the sender is dropped.
-    ///
-    /// # Arguments
-    ///
-    /// * `token` — The [`DeduplicationToken`] returned by
-    ///   [`Deduplicator::check_and_register`].
+    /// be retried.  Tasks waiting in [`Deduplicator::wait_for_result`]
+    /// receive the cancellation sentinel (see [`is_cancelled_result`]).
     pub async fn fail(&self, token: DeduplicationToken) {
-        self.requests.remove(&token.key);
+        remove_if_owned_by(&self.requests, &token.key, &token.id);
         debug!(key = token.key, token_id = %token.id, "request failed, removed from dedup");
     }
 
     /// Return a snapshot of current deduplication statistics.
     ///
-    /// The counts are computed by iterating the internal map in O(n).
-    /// Use sparingly on hot paths; prefer Prometheus counters for high-frequency
-    /// monitoring.
+    /// The counts are computed by iterating the cache in O(n). Use sparingly
+    /// on hot paths; prefer Prometheus counters for high-frequency monitoring.
     pub fn stats(&self) -> DeduplicationStats {
         let mut stats = DeduplicationStats {
-            total: self.requests.len(),
+            total: 0,
             in_progress: 0,
             cached: 0,
         };
-
-        for entry in self.requests.iter() {
-            match entry.value() {
+        for (_, state) in self.requests.iter() {
+            stats.total += 1;
+            match state {
                 RequestState::InProgress { .. } => stats.in_progress += 1,
                 RequestState::Completed { .. } => stats.cached += 1,
             }
         }
-
         stats
     }
 
     /// Clear all cached results
     pub fn clear(&self) {
-        self.requests.clear();
+        self.requests.invalidate_all();
         debug!("deduplication cache cleared");
     }
 
@@ -588,11 +527,11 @@ impl Deduplicator {
     ///
     /// When enabled, [`check_and_register_with_embedding`](Self::check_and_register_with_embedding)
     /// compares new embeddings against all stored embeddings using cosine similarity.
-    /// Any stored embedding with similarity ≥ `threshold` is treated as a cache hit.
+    /// Any stored embedding with similarity >= `threshold` is treated as a cache hit.
     ///
     /// # Arguments
     ///
-    /// * `threshold` — Cosine similarity score in `[0.0, 1.0]`.  `1.0` requires
+    /// * `threshold`: cosine similarity score in `[0.0, 1.0]`.  `1.0` requires
     ///   exact vector match (default); `0.95` catches near-paraphrases.
     ///
     /// # Example
@@ -601,11 +540,8 @@ impl Deduplicator {
     /// use std::time::Duration;
     /// use tokio_prompt_orchestrator::enhanced::Deduplicator;
     ///
-    /// # #[tokio::main]
-    /// # async fn main() {
     /// let dedup = Deduplicator::new(Duration::from_secs(300))
     ///     .with_semantic(0.95);
-    /// # }
     /// ```
     pub fn with_semantic(mut self, threshold: f32) -> Self {
         self.similarity_threshold = threshold;
@@ -623,11 +559,6 @@ impl Deduplicator {
     ///
     /// Falls back to exact-key lookup when `embedding` is `None` or the threshold
     /// equals `1.0`.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` — Exact cache key for this request.
-    /// * `embedding` — Optional dense vector embedding of the prompt.
     pub async fn check_and_register_with_embedding(
         &self,
         key: &str,
@@ -649,22 +580,12 @@ impl Deduplicator {
                         return DeduplicationResult::Cached(String::new());
                     }
                 }
-                // No semantic match — store embedding for future lookups.
+                // No semantic match: store embedding for future lookups.
                 self.embeddings.insert(key.to_string(), emb.clone());
             }
         }
 
         self.check_and_register(key).await
-    }
-}
-
-impl Drop for Deduplicator {
-    fn drop(&mut self) {
-        // Signal the background cleanup task to stop on its next wake-up.
-        // Only the last owner sets this; clones share the same Arc.
-        if Arc::strong_count(&self.shutdown) == 1 {
-            self.shutdown.store(true, Ordering::Relaxed);
-        }
     }
 }
 
@@ -684,38 +605,6 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         0.0
     } else {
         dot / (norm_a * norm_b)
-    }
-}
-
-fn cleanup_expired(requests: &DashMap<String, RequestState>, cache_duration: Duration) {
-    let _now = SystemTime::now();
-    let mut removed = 0;
-
-    requests.retain(|_, state| {
-        match state {
-            RequestState::InProgress { started_at, .. } => {
-                // Remove stale in-progress requests (10x cache duration)
-                if started_at.elapsed().unwrap_or_default() > cache_duration * 10 {
-                    removed += 1;
-                    return false;
-                }
-            }
-            RequestState::Completed { completed_at, .. } => {
-                // Remove expired cached results
-                if completed_at.elapsed().unwrap_or_default() > cache_duration {
-                    removed += 1;
-                    return false;
-                }
-            }
-        }
-        true
-    });
-
-    if removed > 0 {
-        debug!(
-            removed = removed,
-            "cleaned up expired deduplication entries"
-        );
     }
 }
 
@@ -759,16 +648,6 @@ pub struct DeduplicationStats {
 /// let k4 = dedup_key("hello", &meta, None);
 /// assert_ne!(k1, k4);
 /// ```
-/// FNV-1a hash (64-bit). Deterministic across process restarts — unlike
-/// `DefaultHasher` which uses a randomised seed since Rust 1.36.
-fn fnv1a(bytes: &[u8]) -> u64 {
-    const PRIME: u64 = 1_099_511_628_211;
-    const BASIS: u64 = 14_695_981_039_346_656_037;
-    bytes
-        .iter()
-        .fold(BASIS, |acc, &b| acc.wrapping_mul(PRIME) ^ b as u64)
-}
-
 pub fn dedup_key(
     prompt: &str,
     metadata: &std::collections::HashMap<String, String>,
@@ -796,10 +675,14 @@ pub fn dedup_key(
         }
     }
 
-    let hash = fnv1a(buf.as_bytes());
+    // SHA-256, truncated to 128 bits: deterministic across restarts and
+    // processes, and wide enough that two different prompts never share a
+    // cached answer by accident (a 64-bit hash makes that a real risk at scale).
+    let digest = Sha256::digest(buf.as_bytes());
+    let hash = hex::encode(&digest[..16]);
     match session_id {
-        Some(_) => format!("dedup:s:{hash:x}"),
-        None => format!("dedup:g:{hash:x}"),
+        Some(_) => format!("dedup:s:{hash}"),
+        None => format!("dedup:g:{hash}"),
     }
 }
 
@@ -974,5 +857,80 @@ mod tests {
         assert_ne!(k1, k2);
         assert_ne!(k1, k3);
         assert_ne!(k2, k3);
+    }
+
+    #[test]
+    fn test_dedup_key_is_128_bit_hex() {
+        let key = dedup_key("hello", &HashMap::new(), None);
+        let hash = key.trim_start_matches("dedup:g:");
+        assert_eq!(hash.len(), 32, "key={key}");
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_memory_is_bounded() {
+        let dedup = Deduplicator::with_max_entries(Duration::from_secs(300), 100);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            for i in 0..5_000 {
+                if let DeduplicationResult::New(t) = dedup.check_and_register(&format!("k{i}")).await {
+                    dedup.complete(t, "x".into()).await;
+                }
+            }
+        });
+        dedup.requests.run_pending_tasks();
+        assert!(
+            dedup.requests.entry_count() <= 100,
+            "entries={}",
+            dedup.requests.entry_count()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_zero_window_still_shares_in_flight_calls() {
+        let dedup = Deduplicator::new(Duration::ZERO);
+        let token = match dedup.check_and_register("k").await {
+            DeduplicationResult::New(t) => t,
+            other => unreachable!("expected New, got {other:?}"),
+        };
+        assert!(matches!(
+            dedup.check_and_register("k").await,
+            DeduplicationResult::InProgress
+        ));
+        let waiter = {
+            let d = dedup.clone();
+            tokio::spawn(async move { d.wait_for_result("k").await })
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        dedup.complete(token, "answer".into()).await;
+        assert_eq!(waiter.await.ok().flatten().as_deref(), Some("answer"));
+        // Nothing is cached with a zero window.
+        assert!(matches!(
+            dedup.check_and_register("k").await,
+            DeduplicationResult::New(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_dropped_token_wakes_waiters_and_frees_key() {
+        let dedup = Deduplicator::new(Duration::from_secs(60));
+        let token = match dedup.check_and_register("k").await {
+            DeduplicationResult::New(t) => t,
+            other => unreachable!("expected New, got {other:?}"),
+        };
+        let waiter = {
+            let d = dedup.clone();
+            tokio::spawn(async move { d.wait_for_result("k").await })
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        drop(token);
+        let got = waiter.await.ok().flatten();
+        assert!(got.as_deref().map_or(true, is_cancelled_result), "got {got:?}");
+        assert!(matches!(
+            dedup.check_and_register("k").await,
+            DeduplicationResult::New(_)
+        ));
     }
 }

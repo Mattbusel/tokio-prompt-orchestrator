@@ -102,9 +102,9 @@ Retry and circuit-breaker settings.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `retry_attempts` | `u32` | none | Total attempts (includes first try) |
-| `retry_base_ms` | `u64` | `100` | Initial exponential back-off delay (ms) |
-| `retry_max_ms` | `u64` | `5000` | Max back-off delay cap (ms) |
+| `retry_attempts` | `u32` | none | Retries after the first try when a model call fails with a 429, a 5xx or a network error (`0` = never retry) |
+| `retry_base_ms` | `u64` | `100` | Delay before the first retry (ms); it doubles on each further retry, plus random jitter |
+| `retry_max_ms` | `u64` | `5000` | Cap on each retry delay (ms). A provider `Retry-After` longer than this fails the request instead of waiting |
 | `circuit_breaker_threshold` | `u32` | none | Failures before circuit opens |
 | `circuit_breaker_timeout_s` | `u64` | none | Seconds open before probing |
 | `circuit_breaker_success_rate` | `f64` | none | Success rate to close circuit (0.0 to 1.0) |

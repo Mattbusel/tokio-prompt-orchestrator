@@ -19,7 +19,11 @@ use serde_json::{json, Value};
 
 use tokio_prompt_orchestrator::stages::PipelineHandles;
 use tokio_prompt_orchestrator::web_api::{start_server, ServerConfig};
-use tokio_prompt_orchestrator::{spawn_pipeline, EchoWorker, ModelWorker, OrchestratorError};
+use tokio_prompt_orchestrator::enhanced::InferenceRetry;
+use tokio_prompt_orchestrator::token_counter::{exact_chat_prompt_tokens, exact_token_count};
+use tokio_prompt_orchestrator::{
+    spawn_pipeline, spawn_pipeline_with_retry, EchoWorker, ModelWorker, OrchestratorError,
+};
 
 // ============================================================================
 // Harness
@@ -60,7 +64,10 @@ fn free_port() -> u16 {
 }
 
 async fn start(worker: Arc<dyn ModelWorker>, tweak: impl FnOnce(&mut ServerConfig)) -> Server {
-    let handles = spawn_pipeline(worker);
+    start_with(spawn_pipeline(worker), tweak).await
+}
+
+async fn start_with(handles: PipelineHandles, tweak: impl FnOnce(&mut ServerConfig)) -> Server {
     let output_rx = handles.take_output_rx().await.expect("output receiver");
     let port = free_port();
     let mut config = ServerConfig {
@@ -384,6 +391,53 @@ async fn bad_requests_get_openai_shaped_400s() {
     let n2 = post_chat(&s.base, &n2).await;
     assert_eq!(n2.status(), StatusCode::BAD_REQUEST);
     assert_eq!(n2.json::<Value>().await.expect("json")["error"]["param"], "n");
+}
+
+#[tokio::test]
+async fn usage_is_counted_with_the_models_own_tokenizer() {
+    // Same echo upstream, but the orchestrator is configured for an OpenAI
+    // model, so usage must match what OpenAI would bill for that call.
+    let s = start(Arc::new(EchoWorker::new()), |c| c.model = "gpt-4o-mini".into()).await;
+    let text = "Count my tokens exactly, please: 12345 and some punctuation!?";
+    let resp = post_chat(&s.base, &chat_body(text)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: Value = resp.json().await.expect("json");
+    let answer = v["choices"][0]["message"]["content"].as_str().expect("content");
+
+    let expected_prompt = exact_chat_prompt_tokens("gpt-4o-mini", &[("user", text)]).expect("known model");
+    let expected_completion = exact_token_count("gpt-4o-mini", answer).expect("known model");
+    assert_eq!(v["usage"]["prompt_tokens"], expected_prompt as u64, "{v}");
+    assert_eq!(v["usage"]["completion_tokens"], expected_completion as u64, "{v}");
+    // Message framing: 3 per message, 1 for the role, 3 to prime the reply.
+    assert_eq!(expected_prompt, expected_completion + 7, "echo answers with the prompt");
+}
+
+#[tokio::test]
+async fn transient_provider_errors_are_retried() {
+    /// Fails with a 503 twice, then answers.
+    struct FlakyWorker {
+        calls: Arc<AtomicUsize>,
+    }
+    #[async_trait]
+    impl ModelWorker for FlakyWorker {
+        async fn infer(&self, prompt: &str) -> Result<Vec<String>, OrchestratorError> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) < 2 {
+                return Err(OrchestratorError::Inference("503 Service Unavailable".into()));
+            }
+            Ok(vec![prompt.to_string()])
+        }
+    }
+    let calls = Arc::new(AtomicUsize::new(0));
+    let worker = Arc::new(FlakyWorker { calls: Arc::clone(&calls) });
+    let retry = InferenceRetry::new(2, Duration::from_millis(10), Duration::from_millis(100));
+    let s = start_with(spawn_pipeline_with_retry(worker, retry), |_| {}).await;
+
+    let resp = post_chat(&s.base, &chat_body("survive a blip")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: Value = resp.json().await.expect("json");
+    assert_eq!(v["choices"][0]["message"]["content"], "survive a blip");
+    assert_eq!(calls.load(Ordering::SeqCst), 3, "two failures, then the answer");
+    assert!(s.handles.dlq.peek().is_empty(), "nothing was dropped");
 }
 
 #[tokio::test]

@@ -78,11 +78,17 @@ x-orchestrator-dedup: cached
 
 The orchestrator answers with the provider and model it was started with (`--provider openai --model gpt-4o-mini`, say), whatever `model` the request names. Errors come back in OpenAI's format: 503 while the breaker is open, 429 at the spend cap. Details, auth and limits: [docs/REFERENCE.md](docs/REFERENCE.md#openai-compatible-api).
 
+For OpenAI models the token counts in `usage` (and so the spend cap) come from the model's own tokenizer, so they match your OpenAI bill. Other models get an estimate of about 4 characters per token, which is what you see from `echo` above.
+
 ## How it works
 
 <img alt="Animated diagram of the real pipeline. A request enters through input_tx.send() or POST /api/v1/infer and passes five stages joined by bounded channels of 512, 512, 512, 1024, 512 and 256: Retrieve, Assemble, Inference, Post-process, Stream. Inside stage 3 every request goes through a deadline check, the circuit breaker (5 failures open it, it refuses calls for 60 s, then lets one probe through), a 120 s timeout, and then your ModelWorker. Deduplicator, RetryPolicy and RateLimiter are optional wrappers around the worker. Dropped requests land in a 1000-entry dead-letter queue with a reason such as backpressure, deadline_expired, circuit_breaker_open, inference_timeout or inference_failure. The animation shows healthy traffic, then an outage where the breaker opens and calls fail fast into the dead-letter queue." src="assets/how-it-works.svg" width="100%">
 
 Each stage is its own Tokio task. A full channel never grows memory: the request is shed to the dead-letter queue with the reason, and the HTTP API answers `429` with `Retry-After`. Everything in the drawing is read from [`src/stages.rs`](src/stages.rs); more in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+**Retries for brief hiccups.** Providers sometimes fail for a second: a 429, a 503, a dropped connection. Start with `orchestrator --retries 2` (or set `retry_attempts` in a pipeline config) and such a call is tried again after a short, randomised wait that doubles each time, before it counts as a failure. A provider's `Retry-After` is respected, a bad API key is never retried, and all the tries of one request count once for the circuit breaker. It is off by default, so the breaker demo above behaves exactly as shown.
+
+**Built on proven crates.** The parts that are easy to get subtly wrong come from widely used open-source libraries rather than code written here: [backon](https://crates.io/crates/backon) for retry timing, [moka](https://crates.io/crates/moka) for the dedup cache (it has a size limit, so a flood of different prompts cannot grow memory without bound), [tiktoken-rs](https://crates.io/crates/tiktoken-rs) for OpenAI token counts, and [prometheus](https://crates.io/crates/prometheus) for `/metrics`.
 
 ## Examples
 

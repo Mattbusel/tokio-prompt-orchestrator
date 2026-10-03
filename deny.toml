@@ -31,10 +31,9 @@ vulnerability = "deny"
 unmaintained = "warn"
 yanked = "warn"
 notice = "warn"
-# RUSTSEC-2024-0437: protobuf DoS via prometheus transitive dep.
-# prometheus 0.13 pins protobuf 2.x; tracked for upgrade when prometheus 0.14
-# stabilises.
-ignore = ["RUSTSEC-2024-0437"]
+# No ignores. RUSTSEC-2024-0437 (protobuf, via prometheus 0.13) went away
+# with prometheus 0.14 built without its protobuf feature.
+ignore = []
 
 [sources]
 unknown-registry = "deny"

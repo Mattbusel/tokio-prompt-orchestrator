@@ -35,7 +35,7 @@ Deduplication, retries, caching, rate limiting and load balancing are building b
 | **A/B Test Assignment** | `AbTestRunner` uses consistent FNV-1a hashing to map `(experiment, user_id)` pairs to variants deterministically; same user always sees same variant |
 | **Circuit Breaker** | Opens on consecutive failures, enters half-open probe mode after configurable timeout |
 | **Multi-provider Cascade Fallback** | `ProviderCascade` chains an ordered list of providers (primary, secondary, tertiary); open breakers are skipped automatically; per-provider latency and success-rate metrics tracked |
-| **Retry + Jitter** | Exponential backoff with full jitter, prevents synchronized retry storms |
+| **Retry + Jitter** | Exponential backoff with jitter ([backon](https://docs.rs/backon)), honours `Retry-After`, never retries a bad key or a budget error. Built into the inference stage (`--retries`, `[resilience] retry_attempts`) and available as `enhanced::RetryPolicy` |
 | **Rate Limiter** | Per-model sliding window plus token bucket (`rate_limiter::RateLimiterRegistry`) |
 | **Dead-letter Queue** | Shed requests land in a ring buffer for inspection and replay |
 | **DLQ Replay Scheduler** | `DlqReplayScheduler` re-injects DLQ entries with exponential backoff; supports per-session replay and age-based eviction |
@@ -94,7 +94,7 @@ cargo bench --features full
 
 Load a `pipeline.toml` with `config::loader::load_from_file` and pass it to `spawn_pipeline_with_config`. Check a file with `cargo run --bin validate -- --config pipeline.toml`. All fields have documented defaults; [`pipeline.example.toml`](../pipeline.example.toml) is a complete example.
 
-> **What the pipeline applies from this file.** `spawn_pipeline_with_config` uses the channel capacities, the circuit breaker settings (`circuit_breaker_*`), the inference `timeout_ms`, the adaptive timeout and the number of inference workers. The `[deduplication]`, `[rate_limits]` and `retry_*` fields are parsed and validated, but the pipeline does not apply them by itself: wrap your `ModelWorker` in `enhanced::Deduplicator`, `enhanced::RetryPolicy` or a rate limiter to get that behaviour (see [`examples/llm_pipeline.rs`](../examples/llm_pipeline.rs)).
+> **What the pipeline applies from this file.** `spawn_pipeline_with_config` uses the channel capacities, the circuit breaker settings (`circuit_breaker_*`), the retry settings (`retry_attempts`, `retry_base_ms`, `retry_max_ms`: a model call that fails with a 429, a 5xx or a network error is retried with jittered exponential backoff, and all attempts of one request count once for the circuit breaker), the inference `timeout_ms`, the adaptive timeout and the number of inference workers. The `[deduplication]` and `[rate_limits]` fields are parsed and validated, but the pipeline does not apply them by itself: wrap your `ModelWorker` in `enhanced::Deduplicator` or a rate limiter to get that behaviour (see [`examples/llm_pipeline.rs`](../examples/llm_pipeline.rs)).
 
 ```toml
 [pipeline]
@@ -175,7 +175,8 @@ All features are opt-in. The default build has no optional dependencies.
 
 | Flag | Enables | Typical use |
 |---|---|---|
-| `web-api` | Axum HTTP/WS/SSE server, including the OpenAI-compatible `/v1` API | REST clients, OpenAI SDKs, streaming |
+| `web-api` | Axum HTTP/WS/SSE server, including the OpenAI-compatible `/v1` API (turns on `tiktoken`) | REST clients, OpenAI SDKs, streaming |
+| `tiktoken` | Exact token counts for OpenAI models via [tiktoken-rs](https://docs.rs/tiktoken-rs) (`token_counter::exact_token_count`) | Accurate `usage`, cost estimates and spend caps |
 | `metrics-server` | Prometheus `/metrics` endpoint | Grafana dashboards |
 | `tui` | Ratatui terminal dashboard | Local monitoring |
 | `mcp` | Model Context Protocol server | Claude Desktop / Claude Code |
@@ -207,7 +208,7 @@ All features are opt-in. The default build has no optional dependencies.
 - **Model and sampling.** The worker calls the provider and model given at startup (`--provider`, `--model`), and the response's `model` field reports that model. The request's `model`, `temperature`, `max_tokens`, `top_p` and other unknown fields are accepted and ignored.
 - **Deduplication.** Requests whose flattened prompt is identical share one upstream call while it is in flight, and a finished answer is reused for `ORCHESTRATOR_DEDUP_SECS` seconds (default 300; `0` keeps only in-flight sharing). The `x-orchestrator-dedup` response header is `miss` (this request called the model), `joined` (it waited on an identical call already in flight) or `cached`. If the shared call fails, every request that joined it gets the same error.
 - **Streaming.** The pipeline returns the whole answer at once, so the stream starts when the answer is ready and delivers it as word-sized chunks. Errors therefore still arrive as a normal HTTP error response, never half way through a stream.
-- **Usage.** `prompt_tokens` and `completion_tokens` are estimates (about 4 characters per token), since the pipeline does not carry the provider's own counts.
+- **Usage.** For OpenAI models (`--model gpt-4o`, `gpt-4.1`, `gpt-5`, `o3` and so on) `prompt_tokens` and `completion_tokens` are counted with the model's own tokenizer, message framing included, so they match the provider's bill. For other models (Claude, local models, `echo`) they are estimates of about 4 characters per token. The spend cap uses the same counts.
 - **Not supported:** `n` greater than 1 (400), image or audio content parts (400), tool and function calling (the `tools` field is ignored), `logprobs`.
 
 **Errors** use OpenAI's shape, `{"error": {"message", "type", "param", "code"}}`, so the SDKs raise their usual exceptions (`AuthenticationError`, `RateLimitError`, `APIStatusError`).
@@ -242,7 +243,7 @@ $ curl -s localhost:18556/v1/chat/completions -H 'Content-Type: application/json
 {"error":{"code":"invalid_api_key","message":"Missing or incorrect API key. Send the orchestrator's key (ORCHESTRATOR_API_KEY) as 'Authorization: Bearer <key>'.","param":null,"type":"invalid_request_error"}}
 ```
 
-**Spend cap.** `--max-spend <dollars>` caps estimated spend on this endpoint. Each upstream call (not dedup hits) is priced from the token estimates and the built-in price table in `cost_estimator` (models not in the table are priced at the `gpt-4o` rate; `echo` and `llama` are free) and added to the `orchestrator_inference_cost_usd_total` metric. At the cap the endpoint answers 429 and the server keeps running (with `--no-web` the program exits instead, as before). Real run with `--max-spend 0`:
+**Spend cap.** `--max-spend <dollars>` caps estimated spend on this endpoint. Each upstream call (not dedup hits) is priced from its token counts (exact for OpenAI models, estimated for others) and the built-in price table in `cost_estimator` (models not in the table are priced at the `gpt-4o` rate; `echo` and `llama` are free) and added to the `orchestrator_inference_cost_usd_total` metric. At the cap the endpoint answers 429 and the server keeps running (with `--no-web` the program exits instead, as before). Real run with `--max-spend 0`:
 
 ```text
 {"error":{"code":"insufficient_quota","message":"The orchestrator's spend cap of $0.00 is reached (estimated spend $0.0000). Restart it or raise --max-spend.","param":null,"type":"insufficient_quota"}}
@@ -266,10 +267,11 @@ The integration tests in [`tests/openai_compat_tests.rs`](../tests/openai_compat
 | `LoadBalancedWorker` | `worker` | Round-robin or least-loaded pool of workers |
 | `spawn_pipeline` | `stages` | Launch the five-stage pipeline, return channel handles |
 | `spawn_pipeline_with_config` | `stages` | Same, with a full `PipelineConfig` |
+| `spawn_pipeline_with_retry` | `stages` | `spawn_pipeline` plus retries on transient model errors (`enhanced::InferenceRetry`) |
 | `PipelineConfig` | `config` | TOML-deserialisable root configuration type |
 | `CircuitBreaker` | `enhanced` | Failure-rate circuit breaker |
-| `Deduplicator` | `enhanced` | In-flight request coalescer |
-| `RetryPolicy` | `enhanced` | Exponential backoff with jitter |
+| `Deduplicator` | `enhanced` | In-flight request coalescer and result cache, bounded in size ([moka](https://docs.rs/moka)) |
+| `RetryPolicy` | `enhanced` | Fixed, linear or exponential backoff ([backon](https://docs.rs/backon)) |
 | `CacheLayer` | `enhanced` | TTL LRU cache for inference results |
 | `PriorityQueue` | `enhanced` | Four-level priority scheduler |
 | `SmartBatcher` | `enhanced::smart_batch` | Adaptive micro-batching with prefix grouping |
@@ -281,7 +283,6 @@ The integration tests in [`tests/openai_compat_tests.rs`](../tests/openai_compat
 
 ## Known issues and roadmap
 
-- **prometheus 0.13**: Has RUSTSEC-2024-0437 (protobuf DoS). Mitigated by API key auth on `/metrics`. Migration to 0.14 blocked by `prometheus::proto` API removal, tracked internally for Q3 2026.
 - **Request replay UI**: Dead-letter queue replay works via API; a TUI panel for it is planned.
 - **Per-stage circuit breaker metrics**: Currently aggregated; per-stage breakdown is planned.
 - **PromptGuard embedding mode**: Current detection is lexical (no external deps). A future optional mode will use local embedding models for semantic similarity detection.

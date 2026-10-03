@@ -21,8 +21,9 @@
 use std::env;
 use std::io::{self, Write as _};
 use std::sync::Arc;
+use tokio_prompt_orchestrator::enhanced::InferenceRetry;
 use tokio_prompt_orchestrator::{
-    metrics, spawn_pipeline, AnthropicWorker, EchoWorker, LlamaCppWorker, ModelWorker,
+    metrics, spawn_pipeline_with_retry, AnthropicWorker, EchoWorker, LlamaCppWorker, ModelWorker,
     OpenAiWorker, PostOutput, PromptRequest, SessionId,
 };
 
@@ -123,6 +124,8 @@ struct CliArgs {
     log_level: String,
     /// Maximum USD spend before the session is terminated. `None` = unlimited.
     max_spend: Option<f64>,
+    /// Retries for a model call that fails with a 429, 5xx or network error.
+    retries: u32,
     no_web: bool,
     reset: bool,
 }
@@ -159,6 +162,9 @@ OPTIONS:
     --log-level <trace|debug|info|warn|error>  Log verbosity (default: info)
     --max-spend <dollars>                      USD spend cap: the OpenAI endpoint answers 429
                                                once reached (with --no-web, the program exits)
+    --retries <N>                              Retry a model call up to N times when the
+                                               provider fails with a 429, a 5xx or a network
+                                               error, with backoff (default: 0, max 10)
     --no-web                                   Disable web API
     --reset                                    Re-run setup wizard
     --help, -h                                 Print this help
@@ -200,6 +206,7 @@ ENVIRONMENT:
                            (API_KEY also works; unset = open, fine on 127.0.0.1)
     ORCHESTRATOR_DEDUP_SECS  reuse an identical chat completion for this many
                            seconds (default 300; 0 = only share in-flight calls)
+    ORCHESTRATOR_RETRIES   same as --retries (the flag wins when both are set)
 
 SETTINGS FILE:
     orchestrator.env  (same folder as the binary)
@@ -216,6 +223,7 @@ fn parse_args() -> Result<CliArgs, String> {
     let mut host = "127.0.0.1".to_string();
     let mut log_level = "info".to_string();
     let mut max_spend: Option<f64> = None;
+    let mut retries: Option<u32> = None;
     let mut no_web = false;
     let mut reset = false;
 
@@ -233,7 +241,7 @@ fn parse_args() -> Result<CliArgs, String> {
             "--no-web" => no_web = true,
             "--reset" => reset = true,
             flag @ ("--provider" | "--model" | "--port" | "--host" | "--log-level"
-            | "--max-spend") => {
+            | "--max-spend" | "--retries") => {
                 i += 1;
                 if i >= args.len() {
                     return Err(format!("{flag} requires a value"));
@@ -264,6 +272,7 @@ fn parse_args() -> Result<CliArgs, String> {
                                 format!("--max-spend must be a number, got: {val}")
                             })?);
                     }
+                    "--retries" => retries = Some(parse_retries(&val)?),
                     _ => {}
                 }
             }
@@ -272,6 +281,14 @@ fn parse_args() -> Result<CliArgs, String> {
         i += 1;
     }
 
+    let retries = match retries {
+        Some(n) => n,
+        None => match env::var("ORCHESTRATOR_RETRIES") {
+            Ok(v) if !v.trim().is_empty() => parse_retries(v.trim())?,
+            _ => 0,
+        },
+    };
+
     Ok(CliArgs {
         provider,
         model,
@@ -279,9 +296,18 @@ fn parse_args() -> Result<CliArgs, String> {
         host,
         log_level,
         max_spend,
+        retries,
         no_web,
         reset,
     })
+}
+
+/// Parse a `--retries` value: a whole number from 0 to 10.
+fn parse_retries(val: &str) -> Result<u32, String> {
+    match val.parse::<u32>() {
+        Ok(n) if n <= 10 => Ok(n),
+        _ => Err(format!("--retries must be a whole number from 0 to 10, got: {val}")),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -296,6 +322,8 @@ struct ResolvedConfig {
     log_level: String,
     /// Optional USD spending cap for this session.
     max_spend: Option<f64>,
+    /// Retries for transient model errors (0 = off).
+    retries: u32,
     no_web: bool,
 }
 
@@ -401,6 +429,7 @@ fn run_wizard(args: CliArgs) -> ResolvedConfig {
                     host: args.host,
                     log_level: args.log_level,
                     max_spend: args.max_spend,
+                    retries: args.retries,
                     no_web: args.no_web,
                 };
             }
@@ -566,6 +595,7 @@ fn run_wizard(args: CliArgs) -> ResolvedConfig {
         host: args.host,
         log_level: args.log_level,
         max_spend: args.max_spend,
+        retries: args.retries,
         no_web,
     }
 }
@@ -939,8 +969,15 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
 
     tracing::info!(provider = %cfg.provider, model = %cfg.model, "Worker ready");
 
-    let handles = spawn_pipeline(worker);
-    tracing::info!("Pipeline stages spawned");
+    // Exponential backoff from 200 ms, each wait capped at 10 s (a longer
+    // Retry-After from the provider fails the request instead of stalling it).
+    let retry = InferenceRetry::new(
+        cfg.retries,
+        std::time::Duration::from_millis(200),
+        std::time::Duration::from_secs(10),
+    );
+    let handles = spawn_pipeline_with_retry(worker, retry);
+    tracing::info!(retries = cfg.retries, "Pipeline stages spawned");
 
     // ── Config hot-reload: poll orchestrator.env every 5 s ──────────────────
     {
@@ -1223,6 +1260,7 @@ mod tests {
             host: "127.0.0.1".to_string(),
             log_level: "info".to_string(),
             max_spend: None,
+            retries: 0,
             no_web: false,
         };
         assert!(build_worker(&cfg).is_ok());
@@ -1243,6 +1281,7 @@ mod tests {
             host: "127.0.0.1".to_string(),
             log_level: "info".to_string(),
             max_spend: None,
+            retries: 0,
             no_web: false,
         };
         let err = build_worker(&cfg).err().unwrap();
@@ -1262,6 +1301,7 @@ mod tests {
             host: "127.0.0.1".to_string(),
             log_level: "info".to_string(),
             max_spend: None,
+            retries: 0,
             no_web: false,
         };
         let err = build_worker(&cfg).err().unwrap();
@@ -1278,6 +1318,7 @@ mod tests {
             host: "127.0.0.1".to_string(),
             log_level: "info".to_string(),
             max_spend: None,
+            retries: 0,
             no_web: false,
         };
         let err = build_worker(&cfg).err().unwrap();
@@ -1294,6 +1335,7 @@ mod tests {
             host: "127.0.0.1".to_string(),
             log_level: "info".to_string(),
             max_spend: None,
+            retries: 0,
             no_web: false,
         };
         assert!(build_worker(&cfg).is_ok());

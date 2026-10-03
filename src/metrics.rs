@@ -19,6 +19,7 @@
 //! | `orchestrator_queue_depth` | Gauge | `stage` |
 //! | `inference_time_to_first_token_seconds` | Histogram | `worker`, `model` |
 //! | `orchestrator_requests_expired_total` | Counter | (none) |
+//! | `orchestrator_inference_retries_total` | Counter | (none) |
 
 use crate::OrchestratorError;
 use prometheus::{
@@ -58,6 +59,9 @@ pub struct Metrics {
     pub dedup_waiters_unblocked_total: Counter,
     /// Total inference timeouts.
     pub inference_timeouts_total: Counter,
+    /// Inference calls retried after a transient provider error (429, 5xx,
+    /// network). Only moves when retries are enabled.
+    pub inference_retries_total: Counter,
     /// Requests dropped because their deadline had already passed at dequeue time.
     pub requests_expired_total: Counter,
     /// Incremented when a `DeadLetterQueue` mutex is recovered from a poisoned state.
@@ -224,6 +228,15 @@ pub fn init_metrics() -> Result<(), OrchestratorError> {
         .register(Box::new(inference_timeouts_total.clone()))
         .map_err(|e| OrchestratorError::Other(format!("metrics registration failed: {e}")))?;
 
+    let inference_retries_total = Counter::with_opts(Opts::new(
+        "orchestrator_inference_retries_total",
+        "Inference calls retried after a transient provider error",
+    ))
+    .map_err(|e| OrchestratorError::Other(format!("metrics init failed: {e}")))?;
+    registry
+        .register(Box::new(inference_retries_total.clone()))
+        .map_err(|e| OrchestratorError::Other(format!("metrics registration failed: {e}")))?;
+
     let requests_expired_total = Counter::with_opts(Opts::new(
         "orchestrator_requests_expired_total",
         "Requests dropped at the inference stage because their deadline had already passed",
@@ -378,6 +391,7 @@ pub fn init_metrics() -> Result<(), OrchestratorError> {
         dedup_hits_total,
         dedup_waiters_unblocked_total,
         inference_timeouts_total,
+        inference_retries_total,
         requests_expired_total,
         dlq_lock_poisoned_total,
         rag_requests_expired_total,
@@ -594,6 +608,20 @@ pub fn inc_inference_timeout() {
 pub fn inc_expired() {
     if let Some(m) = metrics() {
         m.requests_expired_total.inc();
+    }
+}
+
+/// Increment the inference-retry counter.
+///
+/// Called by the inference stage each time a transient provider error is
+/// retried. No-op if metrics have not been initialised.
+///
+/// # Panics
+///
+/// This function never panics.
+pub fn inc_inference_retry() {
+    if let Some(m) = metrics() {
+        m.inference_retries_total.inc();
     }
 }
 
@@ -878,8 +906,8 @@ pub fn get_metrics_summary() -> MetricsSummary {
             let stage = metric
                 .get_label()
                 .iter()
-                .find(|l| l.get_name() == "stage")
-                .map_or("unknown", |l| l.get_value());
+                .find(|l| l.name() == "stage")
+                .map_or("unknown", |l| l.value());
             let value = metric.get_counter().get_value() as u64;
             summary.requests_total.insert(stage.to_string(), value);
         }
@@ -890,8 +918,8 @@ pub fn get_metrics_summary() -> MetricsSummary {
             let stage = metric
                 .get_label()
                 .iter()
-                .find(|l| l.get_name() == "stage")
-                .map_or("unknown", |l| l.get_value());
+                .find(|l| l.name() == "stage")
+                .map_or("unknown", |l| l.value());
             let value = metric.get_counter().get_value() as u64;
             summary.requests_shed.insert(stage.to_string(), value);
         }
@@ -902,13 +930,13 @@ pub fn get_metrics_summary() -> MetricsSummary {
             let stage = metric
                 .get_label()
                 .iter()
-                .find(|l| l.get_name() == "stage")
-                .map_or("unknown", |l| l.get_value());
+                .find(|l| l.name() == "stage")
+                .map_or("unknown", |l| l.value());
             let err_type = metric
                 .get_label()
                 .iter()
-                .find(|l| l.get_name() == "err_type")
-                .map_or("unknown", |l| l.get_value());
+                .find(|l| l.name() == "err_type")
+                .map_or("unknown", |l| l.value());
             let key = format!("{stage}:{err_type}");
             let value = metric.get_counter().get_value() as u64;
             summary.errors_total.insert(key, value);
@@ -1012,6 +1040,13 @@ mod tests {
                 .expect("Counter construction must succeed in tests");
         registry
             .register(Box::new(inference_timeouts_total.clone()))
+            .expect("register must succeed in tests");
+
+        let inference_retries_total =
+            Counter::with_opts(Opts::new("t_inference_retries_total", "test counter"))
+                .expect("Counter construction must succeed in tests");
+        registry
+            .register(Box::new(inference_retries_total.clone()))
             .expect("register must succeed in tests");
 
         let requests_expired_total =
@@ -1135,6 +1170,7 @@ mod tests {
             dedup_hits_total,
             dedup_waiters_unblocked_total,
             inference_timeouts_total,
+        inference_retries_total,
             requests_expired_total,
             dlq_lock_poisoned_total,
             rag_requests_expired_total,
@@ -1185,7 +1221,7 @@ mod tests {
         );
         let family = families
             .iter()
-            .find(|f| f.get_name() == "t_stage_duration_seconds")
+            .find(|f| f.name() == "t_stage_duration_seconds")
             .expect("histogram family must be present");
         let count = family.get_metric()[0].get_histogram().get_sample_count();
         assert_eq!(count, 1, "one observation should have been recorded");
@@ -1206,7 +1242,7 @@ mod tests {
         let families = m.registry.gather();
         let family = families
             .iter()
-            .find(|f| f.get_name() == "t_requests_total")
+            .find(|f| f.name() == "t_requests_total")
             .expect("family must exist");
         let value = family.get_metric()[0].get_counter().get_value();
         assert!(
@@ -1226,7 +1262,7 @@ mod tests {
         let families = m.registry.gather();
         let family = families
             .iter()
-            .find(|f| f.get_name() == "t_requests_shed_total")
+            .find(|f| f.name() == "t_requests_shed_total")
             .expect("family must exist");
         let value = family.get_metric()[0].get_counter().get_value();
         assert!((value - 1.0).abs() < f64::EPSILON);
@@ -1243,7 +1279,7 @@ mod tests {
         let families = m.registry.gather();
         let family = families
             .iter()
-            .find(|f| f.get_name() == "t_errors_total")
+            .find(|f| f.name() == "t_errors_total")
             .expect("family must exist");
         let value = family.get_metric()[0].get_counter().get_value();
         assert!((value - 1.0).abs() < f64::EPSILON);
@@ -1260,7 +1296,7 @@ mod tests {
         let families = m.registry.gather();
         let family = families
             .iter()
-            .find(|f| f.get_name() == "t_queue_depth")
+            .find(|f| f.name() == "t_queue_depth")
             .expect("family must exist");
         let value = family.get_metric()[0].get_gauge().get_value();
         assert!(
@@ -1330,7 +1366,7 @@ mod tests {
         let families = m.registry.gather();
         let family = families
             .iter()
-            .find(|f| f.get_name() == "t_requests_dropped_total")
+            .find(|f| f.name() == "t_requests_dropped_total")
             .expect("dropped counter family must be present");
         let value = family.get_metric()[0].get_counter().get_value();
         assert!(
@@ -1350,7 +1386,7 @@ mod tests {
         let families = m.registry.gather();
         let family = families
             .iter()
-            .find(|f| f.get_name() == "t_ttft_seconds")
+            .find(|f| f.name() == "t_ttft_seconds")
             .expect("ttft histogram family must be present");
         let count = family.get_metric()[0].get_histogram().get_sample_count();
         assert_eq!(count, 1, "one TTFT observation should have been recorded");
@@ -1365,7 +1401,7 @@ mod tests {
         let families = m.registry.gather();
         let family = families
             .iter()
-            .find(|f| f.get_name() == "t_requests_expired_total")
+            .find(|f| f.name() == "t_requests_expired_total")
             .expect("expired counter family must be present");
         let value = family.get_metric()[0].get_counter().get_value();
         assert!(

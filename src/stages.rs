@@ -74,7 +74,7 @@
 
 use crate::{
     config::PipelineConfig,
-    enhanced::{AdaptiveTimeout, CircuitBreaker},
+    enhanced::{AdaptiveTimeout, CircuitBreaker, InferenceRetry},
     metrics, send_with_shed, AssembleOutput, DeadLetterQueue, DroppedRequest, InferenceOutput,
     ModelWorker, PipelineStage, PostOutput, PromptRequest, RagOutput, SendOutcome, SessionId,
 };
@@ -251,6 +251,22 @@ impl PipelineHandles {
 /// construct their own `tokio::runtime::Builder::new_multi_thread` runtime and
 /// pass per-thread handles in.
 pub fn spawn_pipeline(worker: Arc<dyn ModelWorker>) -> PipelineHandles {
+    spawn_pipeline_with_retry(worker, InferenceRetry::disabled())
+}
+
+/// Spawn the default 5-stage pipeline with retries on transient model errors.
+///
+/// Identical to [`spawn_pipeline`] except that a model call failing with a
+/// 429, a 5xx or a network error is retried according to `retry` before the
+/// request goes to the dead-letter queue. See [`InferenceRetry`].
+///
+/// # Panics
+///
+/// This function never panics.
+pub fn spawn_pipeline_with_retry(
+    worker: Arc<dyn ModelWorker>,
+    retry: InferenceRetry,
+) -> PipelineHandles {
     // Channel creation with specified buffer sizes
     let (input_tx, input_rx) = mpsc::channel::<PromptRequest>(512);
     let (rag_tx, rag_rx) = mpsc::channel::<RagOutput>(512);
@@ -278,6 +294,7 @@ pub fn spawn_pipeline(worker: Arc<dyn ModelWorker>) -> PipelineHandles {
         DEFAULT_INFERENCE_TIMEOUT_SECS,
         Arc::clone(&dlq),
         None, // adaptive timeout not used in the simple spawn_pipeline path
+        retry,
         cancel.child_token(),
     ));
     let post = tokio::spawn(post_stage(inference_rx, post_tx, Arc::clone(&dlq), cancel.child_token()));
@@ -393,6 +410,8 @@ pub fn spawn_pipeline_with_config(
         std::time::Duration::from_secs(r.circuit_breaker_timeout_s),
     );
     let dlq = Arc::new(DeadLetterQueue::new(1000));
+    // `[resilience] retry_attempts / retry_base_ms / retry_max_ms`.
+    let retry = InferenceRetry::from_resilience(r);
     let inference_timeout_secs = config
         .stages
         .inference
@@ -430,6 +449,7 @@ pub fn spawn_pipeline_with_config(
             inference_timeout_secs,
             Arc::clone(&dlq),
             adaptive_timeout,
+            retry,
             cancel2.child_token(),
         ))
     } else {
@@ -450,6 +470,7 @@ pub fn spawn_pipeline_with_config(
                 Arc::clone(&dlq),
                 id,
                 adaptive_timeout.as_ref().map(Arc::clone),
+                retry,
                 cancel2.child_token(),
             )));
         }
@@ -741,6 +762,7 @@ async fn inference_stage(
     timeout_secs: u64,
     dlq: Arc<DeadLetterQueue>,
     adaptive_timeout: Option<Arc<std::sync::Mutex<AdaptiveTimeout>>>,
+    retry: InferenceRetry,
     cancel: CancellationToken,
 ) {
     info!(target: "orchestrator::pipeline", "Inference stage started");
@@ -802,7 +824,10 @@ async fn inference_stage(
             .unwrap_or_else(|| std::time::Duration::from_secs(timeout_secs));
         let prompt = assemble_output.prompt.clone();
         let w = Arc::clone(&worker);
-        let infer_fut = breaker.call(|| async move { w.infer(&prompt).await });
+        // Retries (if enabled) happen inside one breaker call, so a request
+        // that recovers on a retry counts as one success, not N failures.
+        let infer_fut =
+            breaker.call(|| async move { retry.run(|| w.infer(&prompt)).await });
         let cb_result = match tokio::time::timeout(effective_timeout, infer_fut).await {
             Ok(result) => result,
             Err(_elapsed) => {
@@ -946,6 +971,7 @@ async fn inference_stage_pool_worker(
     dlq: Arc<DeadLetterQueue>,
     worker_id: usize,
     adaptive_timeout: Option<Arc<std::sync::Mutex<AdaptiveTimeout>>>,
+    retry: InferenceRetry,
     cancel: CancellationToken,
 ) {
     info!(
@@ -1014,7 +1040,10 @@ async fn inference_stage_pool_worker(
             .unwrap_or_else(|| std::time::Duration::from_secs(timeout_secs));
         let prompt = assemble_output.prompt.clone();
         let w = Arc::clone(&worker);
-        let infer_fut = breaker.call(|| async move { w.infer(&prompt).await });
+        // Retries (if enabled) happen inside one breaker call, so a request
+        // that recovers on a retry counts as one success, not N failures.
+        let infer_fut =
+            breaker.call(|| async move { retry.run(|| w.infer(&prompt)).await });
         let cb_result = match tokio::time::timeout(effective_timeout, infer_fut).await {
             Ok(result) => result,
             Err(_elapsed) => {

@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-10-02
+
+This release swaps several hand-written parts for well-known open-source
+crates and adds the features those crates make easy.
+
+### Added
+
+- **Retries for brief provider failures.** `orchestrator --retries N` (or
+  `ORCHESTRATOR_RETRIES`) retries a model call up to N times (0 to 10) when the
+  provider answers 429 or 5xx or the connection fails. The wait starts at
+  200 ms and doubles each time, with random jitter, capped at 10 s. A
+  provider's `Retry-After` is respected; if it asks for more than the cap, the
+  request fails at once instead of stalling. A bad key or a budget error is
+  never retried. Off by default.
+- In the library: `spawn_pipeline_with_retry(worker, InferenceRetry)`, and
+  `spawn_pipeline_with_config` now applies `[resilience] retry_attempts`,
+  `retry_base_ms` and `retry_max_ms`. These fields used to be parsed and then
+  ignored. All attempts of one request count as one call for the circuit
+  breaker, and together they must fit in the inference timeout.
+- New metric `orchestrator_inference_retries_total`.
+- **Exact token counts for OpenAI models** with
+  [tiktoken-rs](https://crates.io/crates/tiktoken-rs) (new `tiktoken`
+  feature, turned on by `web-api`). The OpenAI proxy's `usage` is now counted
+  with the model's own tokenizer, including message framing, so it matches
+  the provider's bill, and the spend cap uses the same numbers.
+  `CostEstimator::estimate_cost` counts exactly too. Other models keep the
+  estimate. New functions: `token_counter::exact_token_count`,
+  `exact_chat_prompt_tokens`, `count_for_model` and
+  `TokenizerFamily::from_model`.
+- `Deduplicator::with_max_entries`, `Deduplicator::cache_duration` and
+  `enhanced::dedup::DEFAULT_DEDUP_MAX_ENTRIES`.
+
+### Changed
+
+- **The deduplicator now has a size limit.** It stores its entries in a
+  [moka](https://crates.io/crates/moka) cache (100,000 keys by default)
+  instead of an unbounded map swept by a background task every 60 s, so a
+  flood of different prompts can no longer grow memory without limit.
+  Expired answers are never served, the sweeper task is gone, and
+  `Deduplicator::new` no longer has to be called inside a Tokio runtime.
+  `shutdown()` and `signal_shutdown()` remain and do nothing.
+- The deduplicator is safer under races: a finished or cancelled call only
+  clears its own entry, never a newer one for the same key, and waiters are
+  always woken even if the entry was evicted.
+- `dedup_key` uses a 128-bit SHA-256 prefix instead of a 64-bit FNV hash, so
+  two different prompts cannot share a cached answer by a hash collision.
+  Keys change format (`dedup:g:` plus 32 hex characters), which only matters
+  if you stored them.
+- `RetryPolicy`, `retry_if` and `retry_inference` run on
+  [backon](https://crates.io/crates/backon) instead of hand-written loops.
+  Same API and same delays. `retry_inference` no longer retries
+  `AuthFailed`, `ConfigError` or `Other` errors (it used to retry everything
+  except `BudgetExceeded`).
+- [prometheus](https://crates.io/crates/prometheus) 0.13 to 0.14, built
+  without its protobuf support. `/metrics` output is unchanged, and the
+  protobuf dependency with advisory RUSTSEC-2024-0437 is gone (so is the
+  `deny.toml` ignore for it).
+- `lazy_static` replaced by `std::sync::LazyLock`.
+
 ## [1.5.0] - 2026-09-30
 
 ### Added

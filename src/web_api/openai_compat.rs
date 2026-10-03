@@ -12,6 +12,10 @@
 //! - **Spend cap.** With [`ServerConfig::max_spend_usd`] set, estimated spend
 //!   is tracked per upstream call and the endpoint answers 429
 //!   `insufficient_quota` once the cap is reached.
+//! - **Token usage.** `usage` is counted with the model's own tokenizer for
+//!   OpenAI models (feature `tiktoken`, on with `web-api`), so it matches the
+//!   provider's bill; other models get an estimate of about 4 characters per
+//!   token. The spend cap uses the same counts.
 //! - **Errors in OpenAI's shape.** A request the pipeline drops into the
 //!   dead-letter queue is answered at once with a status that matches the
 //!   reason (503 circuit open, 504 timeout, 502 provider error, 429 busy).
@@ -59,7 +63,7 @@ pub(super) struct OpenAiState {
 }
 
 impl OpenAiState {
-    /// Must be called inside a Tokio runtime (the deduplicator spawns a sweeper).
+    /// Builds the proxy state; the dedup window comes from `config.dedup_window_secs`.
     pub(super) fn new(config: &ServerConfig) -> Self {
         Self {
             dedup: Deduplicator::new(Duration::from_secs(config.dedup_window_secs)),
@@ -476,6 +480,23 @@ fn approx_tokens(text: &str) -> usize {
     }
 }
 
+/// Prompt tokens of the upstream call. The worker sends the flattened prompt
+/// as one user message, so for OpenAI models this is exactly what the
+/// provider bills (content plus message framing, counted with the model's
+/// own tokenizer); other models get the 4-characters-per-token estimate.
+fn prompt_tokens(model: &str, prompt: &str) -> usize {
+    if prompt.is_empty() {
+        return 0;
+    }
+    crate::token_counter::exact_chat_prompt_tokens(model, &[("user", prompt)])
+        .unwrap_or_else(|| approx_tokens(prompt))
+}
+
+/// Completion tokens of an answer: exact for OpenAI models, else estimated.
+fn completion_tokens(model: &str, text: &str) -> usize {
+    crate::token_counter::exact_token_count(model, text).unwrap_or_else(|| approx_tokens(text))
+}
+
 /// Answer `prompt`, sharing identical in-flight or recent requests.
 async fn complete(
     state: &Arc<AppState>,
@@ -506,14 +527,14 @@ async fn complete(
                 let task_state = Arc::clone(state);
                 let rid = request_id.to_string();
                 let task = tokio::spawn(async move {
-                    let prompt_tokens = approx_tokens(&prompt);
+                    let prompt_tokens = prompt_tokens(&task_state.config.model, &prompt);
                     let result = run_pipeline(&task_state, &rid, session, prompt).await;
                     match &result {
                         Ok(text) => {
                             let cost = estimate_cost(
                                 &task_state.config,
                                 prompt_tokens,
-                                approx_tokens(text),
+                                completion_tokens(&task_state.config.model, text),
                             );
                             if cost > 0.0 {
                                 *task_state.openai.spent_usd.lock() += cost;
@@ -612,9 +633,9 @@ async fn chat_completions(state: Arc<AppState>, body: axum::body::Bytes) -> Resu
         "POST /v1/chat/completions"
     );
 
-    let prompt_tokens = approx_tokens(&prompt);
+    let prompt_tokens = prompt_tokens(&state.config.model, &prompt);
     let (text, outcome) = complete(&state, &id, session, prompt).await?;
-    let completion_tokens = approx_tokens(&text);
+    let completion_tokens = completion_tokens(&state.config.model, &text);
     let usage = serde_json::json!({
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,

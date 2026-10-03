@@ -51,10 +51,9 @@
 //! ```
 
 use crate::{PromptRequest, SessionId};
-use lazy_static::lazy_static;
 use prometheus::{Counter, Opts, Registry};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::mpsc::Sender;
 use tracing::{debug, info, warn};
@@ -63,39 +62,37 @@ use tracing::{debug, info, warn};
 // Prometheus counters
 // ---------------------------------------------------------------------------
 
-lazy_static! {
-    static ref DLQ_REGISTRY: Registry = Registry::new();
+static DLQ_REGISTRY: LazyLock<Registry> = LazyLock::new(Registry::new);
 
-    /// Total DLQ entries successfully replayed into the pipeline.
-    static ref DLQ_REPLAYED: Counter = {
-        #[allow(clippy::expect_used)] // constant metric definition; cannot fail at runtime
-        let c = Counter::with_opts(Opts::new(
-            "dlq_replayed_total",
-            "Total dead-letter queue entries successfully re-injected into the pipeline",
-        ))
-        .expect("dlq_replayed_total metric construction");
-        #[allow(clippy::expect_used)]
-        DLQ_REGISTRY
-            .register(Box::new(c.clone()))
-            .expect("dlq_replayed_total registration");
-        c
-    };
+/// Total DLQ entries successfully replayed into the pipeline.
+static DLQ_REPLAYED: LazyLock<Counter> = LazyLock::new(|| {
+    #[allow(clippy::expect_used)] // constant metric definition; cannot fail at runtime
+    let c = Counter::with_opts(Opts::new(
+        "dlq_replayed_total",
+        "Total dead-letter queue entries successfully re-injected into the pipeline",
+    ))
+    .expect("dlq_replayed_total metric construction");
+    #[allow(clippy::expect_used)]
+    DLQ_REGISTRY
+        .register(Box::new(c.clone()))
+        .expect("dlq_replayed_total registration");
+    c
+});
 
-    /// Total DLQ entries removed by age_out().
-    static ref DLQ_AGED_OUT: Counter = {
-        #[allow(clippy::expect_used)] // constant metric definition; cannot fail at runtime
-        let c = Counter::with_opts(Opts::new(
-            "dlq_aged_out_total",
-            "Total dead-letter queue entries evicted because they exceeded max_age",
-        ))
-        .expect("dlq_aged_out_total metric construction");
-        #[allow(clippy::expect_used)]
-        DLQ_REGISTRY
-            .register(Box::new(c.clone()))
-            .expect("dlq_aged_out_total registration");
-        c
-    };
-}
+/// Total DLQ entries removed by age_out().
+static DLQ_AGED_OUT: LazyLock<Counter> = LazyLock::new(|| {
+    #[allow(clippy::expect_used)] // constant metric definition; cannot fail at runtime
+    let c = Counter::with_opts(Opts::new(
+        "dlq_aged_out_total",
+        "Total dead-letter queue entries evicted because they exceeded max_age",
+    ))
+    .expect("dlq_aged_out_total metric construction");
+    #[allow(clippy::expect_used)]
+    DLQ_REGISTRY
+        .register(Box::new(c.clone()))
+        .expect("dlq_aged_out_total registration");
+    c
+});
 
 // ---------------------------------------------------------------------------
 // ReplayEntry

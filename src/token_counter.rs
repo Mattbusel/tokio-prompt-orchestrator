@@ -1,9 +1,14 @@
-//! Multi-Model Token Counting with BPE Approximation
+//! Multi-Model Token Counting
 //!
-//! Provides heuristic token counting for all major LLM families without
-//! requiring a full tokeniser dependency. Counts are BPE approximations
-//! tuned per-family and are accurate to within ~5–10 % for typical English
-//! prose and code.
+//! Two ways to count:
+//!
+//! - **Exact**, for OpenAI models: [`exact_token_count`],
+//!   [`exact_chat_prompt_tokens`] and [`count_for_model`] use the model's own
+//!   BPE tokenizer through [`tiktoken-rs`](https://docs.rs/tiktoken-rs)
+//!   (feature `tiktoken`, on with `web-api`).
+//! - **Estimated**, for everything else: [`BpeApproxTokenizer`] and
+//!   [`TokenCounter`] use per-family heuristics, accurate to within about
+//!   5 to 10 % for typical English prose and code.
 //!
 //! ## Quick Start
 //!
@@ -37,7 +42,7 @@ pub enum TokenizerFamily {
 /// How the token count was derived.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CountMethod {
-    /// Counted by the model's actual tokeniser (not yet implemented here).
+    /// Counted by the model's actual tokeniser (see [`exact_token_count`]).
     Exact,
     /// Approximated via BPE character-ratio heuristic.
     BpeApprox,
@@ -241,6 +246,118 @@ fn build_overlap(chunk: &str, overlap_tokens: usize, family: &TokenizerFamily) -
     }
     buf.reverse();
     buf
+}
+
+// ── Exact counting for known models ───────────────────────────────────────────
+
+impl TokenizerFamily {
+    /// Guess the tokenizer family from a model name (`gpt-4o`, `claude-...`,
+    /// `gemini-...`, `llama-...`), or [`TokenizerFamily::Generic`].
+    pub fn from_model(model: &str) -> Self {
+        let m = model.to_ascii_lowercase();
+        if m.starts_with("gpt-") || m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4") {
+            Self::GPT4
+        } else if m.starts_with("claude") {
+            Self::Claude
+        } else if m.starts_with("gemini") {
+            Self::Gemini
+        } else if m.contains("llama") {
+            Self::Llama
+        } else {
+            Self::Generic
+        }
+    }
+}
+
+/// Exact token count of `text` with `model`'s own tokenizer.
+///
+/// Returns `Some` for OpenAI models that [`tiktoken-rs`](https://docs.rs/tiktoken-rs)
+/// knows (GPT-5, GPT-4.1, GPT-4o, GPT-4, GPT-3.5, the `o` series and
+/// fine-tunes of them) when the crate is built with the `tiktoken` feature
+/// (on with `web-api`). Returns `None` for any other model, or without the
+/// feature, so the caller can fall back to an estimate.
+///
+/// ```
+/// use tokio_prompt_orchestrator::token_counter::exact_token_count;
+///
+/// if let Some(n) = exact_token_count("gpt-4o", "Hello, world!") {
+///     assert_eq!(n, 4); // "Hello", ",", " world", "!"
+/// }
+/// assert_eq!(exact_token_count("my-local-model", "Hello"), None);
+/// ```
+pub fn exact_token_count(model: &str, text: &str) -> Option<usize> {
+    #[cfg(feature = "tiktoken")]
+    {
+        let bpe = tiktoken_rs::bpe_for_model(model).ok()?;
+        Some(bpe.encode_with_special_tokens(text).len())
+    }
+    #[cfg(not(feature = "tiktoken"))]
+    {
+        let _ = (model, text);
+        None
+    }
+}
+
+/// Exact prompt tokens of a chat request, as the provider bills them:
+/// message contents plus the per-message framing tokens.
+///
+/// `messages` are `(role, content)` pairs. Returns `None` when `model` is
+/// not a chat model `tiktoken-rs` knows, or without the `tiktoken` feature.
+///
+/// ```
+/// use tokio_prompt_orchestrator::token_counter::exact_chat_prompt_tokens;
+///
+/// if let Some(n) = exact_chat_prompt_tokens("gpt-4o-mini", &[("user", "Hello, world!")]) {
+///     // 4 content tokens + 1 for the role + 3 framing + 3 reply priming
+///     assert_eq!(n, 11);
+/// }
+/// ```
+pub fn exact_chat_prompt_tokens(model: &str, messages: &[(&str, &str)]) -> Option<usize> {
+    #[cfg(feature = "tiktoken")]
+    {
+        let messages: Vec<_> = messages
+            .iter()
+            .map(|(role, content)| tiktoken_rs::ChatCompletionRequestMessage {
+                role: (*role).to_string(),
+                content: Some((*content).to_string()),
+                ..Default::default()
+            })
+            .collect();
+        tiktoken_rs::num_tokens_from_messages(model, &messages).ok()
+    }
+    #[cfg(not(feature = "tiktoken"))]
+    {
+        let _ = (model, messages);
+        None
+    }
+}
+
+/// Count `text` for `model`: exactly when [`exact_token_count`] knows the
+/// model, otherwise with the [`BpeApproxTokenizer`] estimate for its family.
+/// [`TokenCount::method`] says which one was used.
+///
+/// ```
+/// use tokio_prompt_orchestrator::token_counter::{count_for_model, CountMethod};
+///
+/// let local = count_for_model("my-local-model", "Hello, world!");
+/// assert_eq!(local.method, CountMethod::BpeApprox);
+/// assert!(local.total_tokens > 0);
+/// ```
+pub fn count_for_model(model: &str, text: &str) -> TokenCount {
+    let (n, method) = match exact_token_count(model, text) {
+        Some(n) => (n, CountMethod::Exact),
+        None => (
+            BpeApproxTokenizer::count_tokens(text, &TokenizerFamily::from_model(model)),
+            CountMethod::BpeApprox,
+        ),
+    };
+    TokenCount {
+        input_tokens: n,
+        output_tokens: 0,
+        total_tokens: n,
+        model: model.to_string(),
+        method,
+    }
 }
 
 // ── TokenCounter ──────────────────────────────────────────────────────────────
@@ -496,5 +613,54 @@ mod tests {
         let texts = ["hello", "world", "foo bar baz"];
         let results = counter.batch_count(&texts);
         assert_eq!(results.len(), 3);
+    }
+    #[test]
+    fn family_from_model_name() {
+        assert_eq!(TokenizerFamily::from_model("gpt-4o-mini"), TokenizerFamily::GPT4);
+        assert_eq!(TokenizerFamily::from_model("claude-sonnet-4-6"), TokenizerFamily::Claude);
+        assert_eq!(TokenizerFamily::from_model("gemini-2.0-flash"), TokenizerFamily::Gemini);
+        assert_eq!(TokenizerFamily::from_model("meta-llama-3"), TokenizerFamily::Llama);
+        assert_eq!(TokenizerFamily::from_model("echo"), TokenizerFamily::Generic);
+    }
+
+    #[test]
+    fn unknown_model_falls_back_to_estimate() {
+        assert_eq!(exact_token_count("claude-sonnet-4-6", "hello"), None);
+        let c = count_for_model("claude-sonnet-4-6", "hello there, friend");
+        assert_eq!(c.method, CountMethod::BpeApprox);
+        assert_eq!(c.model, "claude-sonnet-4-6");
+        assert!(c.total_tokens > 0);
+    }
+
+    #[cfg(feature = "tiktoken")]
+    #[test]
+    fn exact_counts_match_openai_tokenizers() {
+        // Reference values from OpenAI's tiktoken: o200k_base for gpt-4o,
+        // cl100k_base for gpt-4.
+        assert_eq!(exact_token_count("gpt-4o", "Hello, world!"), Some(4));
+        assert_eq!(exact_token_count("gpt-4", "Hello, world!"), Some(4));
+        assert_eq!(exact_token_count("gpt-4o", ""), Some(0));
+        // The two encodings disagree on less common text; both are exact.
+        let text = "tokio-prompt-orchestrator deduplicates prompts";
+        let o200k = exact_token_count("gpt-4o", text);
+        let cl100k = exact_token_count("gpt-4", text);
+        assert!(o200k.is_some() && cl100k.is_some());
+        let c = count_for_model("gpt-4o-mini", "Hello, world!");
+        assert_eq!((c.total_tokens, c.method), (4, CountMethod::Exact));
+    }
+
+    #[cfg(feature = "tiktoken")]
+    #[test]
+    fn exact_chat_prompt_includes_message_framing() {
+        // One user message: content + role + 3 framing + 3 reply priming.
+        assert_eq!(exact_chat_prompt_tokens("gpt-4o", &[("user", "Hello, world!")]), Some(11));
+        assert_eq!(exact_chat_prompt_tokens("claude-sonnet-4-6", &[("user", "hi")]), None);
+    }
+
+    #[cfg(not(feature = "tiktoken"))]
+    #[test]
+    fn without_tiktoken_nothing_is_exact() {
+        assert_eq!(exact_token_count("gpt-4o", "Hello"), None);
+        assert_eq!(exact_chat_prompt_tokens("gpt-4o", &[("user", "Hello")]), None);
     }
 }

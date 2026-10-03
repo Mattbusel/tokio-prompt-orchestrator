@@ -200,13 +200,13 @@ pub struct OrchestratorMcp {
 fn read_queue_depths() -> HashMap<String, i64> {
     let mut depths: HashMap<String, i64> = HashMap::new();
     for family in metrics::gather() {
-        if family.get_name() == "orchestrator_queue_depth" {
+        if family.name() == "orchestrator_queue_depth" {
             for metric in family.get_metric() {
                 let stage = metric
                     .get_label()
                     .iter()
-                    .find(|l| l.get_name() == "stage")
-                    .map_or("unknown", |l| l.get_value())
+                    .find(|l| l.name() == "stage")
+                    .map_or("unknown", |l| l.value())
                     .to_string();
                 let value = metric.get_gauge().get_value() as i64;
                 depths.insert(stage, value);

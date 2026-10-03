@@ -933,12 +933,12 @@ pub async fn build_snapshot(state: &DashboardState) -> DashboardEvent {
     let stage_latency_ms = |stage: &str| -> f64 {
         let families = metrics::gather();
         for family in &families {
-            if family.get_name() == "orchestrator_stage_duration_seconds" {
+            if family.name() == "orchestrator_stage_duration_seconds" {
                 for metric in family.get_metric() {
                     let labels = metric.get_label();
                     let matches = labels
                         .iter()
-                        .any(|l| l.get_name() == "stage" && l.get_value() == stage);
+                        .any(|l| l.name() == "stage" && l.value() == stage);
                     if matches {
                         let h = metric.get_histogram();
                         let count = h.get_sample_count();

@@ -234,7 +234,7 @@ pub use conversation::{
     ConversationConfig, ConversationManager, PromptFormat, Role, Turn,
 };
 pub use stages::{
-    spawn_pipeline, spawn_pipeline_with_config, LogSink, OutputSink, PipelineHandles, SinkError,
+    spawn_pipeline, spawn_pipeline_with_config, spawn_pipeline_with_retry, LogSink, OutputSink, PipelineHandles, SinkError,
 };
 pub use templates::{
     AbExperiment, ExperimentReport, ExperimentVariant, PromptTemplate, TemplateError,

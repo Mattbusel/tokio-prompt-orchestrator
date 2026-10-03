@@ -33,11 +33,10 @@
 
 use crate::config::WorkerKind;
 use crate::enhanced::CircuitBreaker;
-use lazy_static::lazy_static;
 use prometheus::{CounterVec, Opts, Registry};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::Instant;
 use tracing::{debug, info, warn};
 
@@ -45,39 +44,37 @@ use tracing::{debug, info, warn};
 // Cascade-specific Prometheus counters
 // ---------------------------------------------------------------------------
 
-lazy_static! {
-    static ref CASCADE_REGISTRY: Registry = Registry::new();
+static CASCADE_REGISTRY: LazyLock<Registry> = LazyLock::new(Registry::new);
 
-    /// Total attempts per provider label, incremented each time a provider is tried.
-    static ref CASCADE_ATTEMPTS: CounterVec = {
-        #[allow(clippy::expect_used)] // constant metric definition; cannot fail at runtime
-        let cv = CounterVec::new(
-            Opts::new("cascade_attempts_total", "Total cascade attempts per provider"),
-            &["provider"],
-        )
-        .expect("cascade_attempts_total metric construction");
-        #[allow(clippy::expect_used)]
-        CASCADE_REGISTRY
-            .register(Box::new(cv.clone()))
-            .expect("cascade_attempts_total registration");
-        cv
-    };
+/// Total attempts per provider label, incremented each time a provider is tried.
+static CASCADE_ATTEMPTS: LazyLock<CounterVec> = LazyLock::new(|| {
+    #[allow(clippy::expect_used)] // constant metric definition; cannot fail at runtime
+    let cv = CounterVec::new(
+        Opts::new("cascade_attempts_total", "Total cascade attempts per provider"),
+        &["provider"],
+    )
+    .expect("cascade_attempts_total metric construction");
+    #[allow(clippy::expect_used)]
+    CASCADE_REGISTRY
+        .register(Box::new(cv.clone()))
+        .expect("cascade_attempts_total registration");
+    cv
+});
 
-    /// Total failures per provider label, incremented when a provider call errors.
-    static ref CASCADE_FAILURES: CounterVec = {
-        #[allow(clippy::expect_used)] // constant metric definition; cannot fail at runtime
-        let cv = CounterVec::new(
-            Opts::new("cascade_failures_total", "Total cascade failures per provider"),
-            &["provider"],
-        )
-        .expect("cascade_failures_total metric construction");
-        #[allow(clippy::expect_used)]
-        CASCADE_REGISTRY
-            .register(Box::new(cv.clone()))
-            .expect("cascade_failures_total registration");
-        cv
-    };
-}
+/// Total failures per provider label, incremented when a provider call errors.
+static CASCADE_FAILURES: LazyLock<CounterVec> = LazyLock::new(|| {
+    #[allow(clippy::expect_used)] // constant metric definition; cannot fail at runtime
+    let cv = CounterVec::new(
+        Opts::new("cascade_failures_total", "Total cascade failures per provider"),
+        &["provider"],
+    )
+    .expect("cascade_failures_total metric construction");
+    #[allow(clippy::expect_used)]
+    CASCADE_REGISTRY
+        .register(Box::new(cv.clone()))
+        .expect("cascade_failures_total registration");
+    cv
+});
 
 // ---------------------------------------------------------------------------
 // Public configuration types
