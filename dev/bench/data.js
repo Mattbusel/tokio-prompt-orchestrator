@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790384754569,
+  "lastUpdate": 1791000727848,
   "repoUrl": "https://github.com/Mattbusel/tokio-prompt-orchestrator",
   "entries": {
     "Pipeline Benchmarks": [
@@ -502,6 +502,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "session_id_creation",
             "value": 16,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "committer": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "distinct": true,
+          "id": "11069edbdabf896e96697e9e5d06bbcc71d574e4",
+          "message": "1.6.0: retries that actually happen, a bounded dedup cache, exact OpenAI token counts\n\n- backon: transient model errors (429, 5xx, network) are retried with jittered exponential\n  backoff, honouring Retry-After up to the cap; auth, config and budget errors never retry, and\n  all tries of one request count once for the circuit breaker. Before this, the [resilience]\n  retry_attempts / retry_base_ms / retry_max_ms settings were read and ignored. New CLI flag\n  --retries N (ORCHESTRATOR_RETRIES), spawn_pipeline_with_retry, InferenceRetry, and the\n  orchestrator_inference_retries_total metric. Retries stay off by default in the CLI.\n- moka: the deduplicator was an unbounded map swept once a minute, so a flood of distinct\n  prompts could grow memory without limit. Now at most 100,000 keys, expired entries never\n  served, no sweeper task, two race bugs fixed; dedup keys move from 64-bit FNV to 128-bit\n  SHA-256 so different prompts cannot collide.\n- tiktoken-rs: exact OpenAI token counts for the proxy's usage, the spend cap and\n  CostEstimator (new tiktoken feature, on with web-api); other models keep the estimate.\n- prometheus 0.14 without protobuf, which clears RUSTSEC-2024-0437; std LazyLock replaces\n  lazy_static.\n\nBehaviour changes are in the CHANGELOG: config files that set retry_attempts now really retry,\ndedup key format changed, retry_inference no longer retries AuthFailed/ConfigError/Other.\nTests: 1386 lib tests pass (2356 with full, tui, mcp, self-improving, schema, dashboard,\nzipkin, datadog), 132 doc tests, all previously compiling integration suites pass.",
+          "timestamp": "2026-10-03T00:07:49-04:00",
+          "tree_id": "9a58c807f888f90dee9e997140f056d7c2c5087e",
+          "url": "https://github.com/Mattbusel/tokio-prompt-orchestrator/commit/11069edbdabf896e96697e9e5d06bbcc71d574e4"
+        },
+        "date": 1791000726446,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "full_pipeline_echo_worker",
+            "value": 11188778,
+            "range": "± 107058",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/10",
+            "value": 51249266,
+            "range": "± 129239",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/50",
+            "value": 51131763,
+            "range": "± 133449",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/100",
+            "value": 51111903,
+            "range": "± 139931",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/512",
+            "value": 32915,
+            "range": "± 373",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/1024",
+            "value": 32771,
+            "range": "± 808",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/2048",
+            "value": 32881,
+            "range": "± 328",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "send_with_shed_normal",
+            "value": 176,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "shard_session",
+            "value": 12,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "session_id_creation",
+            "value": 15,
             "range": "± 0",
             "unit": "ns/iter"
           }
