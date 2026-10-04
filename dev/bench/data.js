@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791086691893,
+  "lastUpdate": 1791087064371,
   "repoUrl": "https://github.com/Mattbusel/tokio-prompt-orchestrator",
   "entries": {
     "Pipeline Benchmarks": [
@@ -659,6 +659,90 @@ window.BENCHMARK_DATA = {
             "name": "send_with_shed_normal",
             "value": 148,
             "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "shard_session",
+            "value": 12,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "session_id_creation",
+            "value": 16,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "committer": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "distinct": true,
+          "id": "d86c02869f805eb38cc014629835f6dff120aea2",
+          "message": "CI: build test binaries without debug info so the full-feature test job fits on the runner\n\nThe 2.0.0 test job linked ~60 test binaries with every feature and the\nrunner's linker died with SIGBUS (disk full). No test had run; the suite\npasses locally (3069 tests, 0 failed).",
+          "timestamp": "2026-10-04T00:06:59-04:00",
+          "tree_id": "51e79886a2f984e27effdabd397bec32ec6ee15e",
+          "url": "https://github.com/Mattbusel/tokio-prompt-orchestrator/commit/d86c02869f805eb38cc014629835f6dff120aea2"
+        },
+        "date": 1791087062621,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "full_pipeline_echo_worker",
+            "value": 11195074,
+            "range": "± 140333",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/10",
+            "value": 51286058,
+            "range": "± 143581",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/50",
+            "value": 51154352,
+            "range": "± 154791",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/100",
+            "value": 51198914,
+            "range": "± 162308",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/512",
+            "value": 32122,
+            "range": "± 655",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/1024",
+            "value": 31924,
+            "range": "± 530",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/2048",
+            "value": 31811,
+            "range": "± 397",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "send_with_shed_normal",
+            "value": 171,
+            "range": "± 2",
             "unit": "ns/iter"
           },
           {
