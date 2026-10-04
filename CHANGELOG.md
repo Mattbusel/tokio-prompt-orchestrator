@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-10-04
+
+### Fixed
+
+- `cargo binstall tokio-prompt-orchestrator` works on Linux and Windows. It
+  refused to install because the package declared `coordinator` and
+  `validate` as always-built binaries while the release archive ships only
+  `orchestrator`, and the Windows single-file asset mapped every binary to
+  one path. Both tools now need the `cli` feature (with `replay`), and
+  Windows releases add a `.zip` with the same layout as the Linux archive.
+  Checked with `cargo binstall --dry-run` against the real release assets.
+
 ## [2.0.0] - 2026-10-04
 
 A leaner library that works with the Rust LLM clients people already use.

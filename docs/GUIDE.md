@@ -112,7 +112,7 @@ node_id   = "node-1"
 All nodes share Redis for cross-node deduplication and leader election. Work distributes via NATS subjects. The coordinator binary manages cluster membership:
 
 ```bash
-cargo run --bin coordinator
+cargo run --features cli --bin coordinator
 ```
 
 ## Performance tuning

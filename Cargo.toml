@@ -1,6 +1,6 @@
 [package]
 name = "tokio-prompt-orchestrator"
-version = "2.0.0"
+version = "2.0.1"
 edition = "2021"
 rust-version = "1.88"
 default-run = "orchestrator"
@@ -32,8 +32,9 @@ pkg-url = "{ repo }/-/releases/v{ version }/downloads/orchestrator-linux-x86_64.
 bin-dir = "orchestrator-v{ version }-x86_64-unknown-linux-gnu/{ bin }"
 
 [package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
-pkg-url = "{ repo }/-/releases/v{ version }/downloads/orchestrator-windows-x86_64.exe"
-pkg-fmt = "bin"
+pkg-url = "{ repo }/-/releases/v{ version }/downloads/orchestrator-windows-x86_64.zip"
+pkg-fmt = "zip"
+bin-dir = "orchestrator-v{ version }-x86_64-pc-windows-msvc/{ bin }{ binary-ext }"
 
 [package.metadata.docs.rs]
 features = ["full", "tui", "mcp", "self-improving", "distributed", "schema", "core-pinning", "tower", "async-openai", "genai", "rig", "tantivy"]
@@ -145,7 +146,10 @@ metrics-server = ["axum", "tower", "tower-http"]
 # Required by: mcp, dashboard.
 web-api = ["axum", "tower", "tower-http", "tokio-stream", "tiktoken"]
 
-# cli: the `replay` binary (replays a recorded request log against a provider).
+# cli: the extra command-line tools `replay` (replays a recorded request log),
+# `coordinator` (agent fleet launcher) and `validate` (pipeline.toml checker).
+# The `orchestrator` binary needs no feature. Keeping these opt-in means
+# `cargo install` and `cargo binstall` install exactly what the release ships.
 cli = ["clap"]
 
 # hot-reload: config::watcher, which re-reads a pipeline TOML file when it
@@ -299,6 +303,7 @@ required-features = ["mcp"]
 [[bin]]
 name = "coordinator"
 path = "src/bin/coordinator.rs"
+required-features = ["cli"]
 
 [[bin]]
 name = "dashboard"
@@ -313,6 +318,7 @@ required-features = ["self-improving"]
 [[bin]]
 name = "validate"
 path = "src/bin/validate.rs"
+required-features = ["cli"]
 
 [[bin]]
 name = "gen_schema"
