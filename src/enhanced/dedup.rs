@@ -32,7 +32,6 @@
 //! # }
 //! ```
 
-use dashmap::DashMap;
 use moka::ops::compute::Op;
 use moka::sync::Cache;
 use moka::Expiry;
@@ -41,7 +40,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 /// Outcome of a [`Deduplicator::check_and_register`] call.
@@ -247,6 +246,34 @@ pub const DEFAULT_DEDUP_MAX_ENTRIES: u64 = 100_000;
 /// sooner than this, so a zero-length window still shares in-flight calls.
 const MIN_IN_PROGRESS_TTL: Duration = Duration::from_secs(600);
 
+/// Most prompt embeddings kept for semantic matching. Each lookup compares
+/// against all of them, so this bounds both memory (about 15 MB for
+/// 384-dimension models) and the time a lookup takes.
+pub const DEFAULT_SEMANTIC_MAX_ENTRIES: u64 = 10_000;
+
+/// A cache hit found by meaning rather than exact text.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SemanticMatch {
+    /// Dedup key of the earlier prompt whose answer was reused.
+    pub matched_key: String,
+    /// Cosine similarity between the two prompts' embeddings.
+    pub similarity: f32,
+}
+
+/// A prompt in the semantic index: its embedding and, when known, its text
+/// (for [`same_specifics`]).
+struct IndexedPrompt {
+    embedding: Vec<f32>,
+    text: Option<String>,
+}
+
+/// Embedder plus the threshold it is used with.
+#[derive(Clone)]
+struct SemanticConfig {
+    embedder: Arc<dyn crate::embedding::Embedder>,
+    threshold: f32,
+}
+
 /// In-process request deduplicator that coalesces identical concurrent
 /// requests and caches recently completed results.
 ///
@@ -305,10 +332,13 @@ const MIN_IN_PROGRESS_TTL: Duration = Duration::from_secs(600);
 pub struct Deduplicator {
     requests: Cache<String, RequestState>,
     cache_duration: Duration,
-    /// Optional embedding store for semantic (cosine-similarity) deduplication.
-    embeddings: Arc<DashMap<String, Vec<f32>>>,
+    /// Prompt embeddings by dedup key, for semantic matching. Bounded and
+    /// expiring with the answer cache, so it cannot grow without limit.
+    embeddings: Cache<String, Arc<IndexedPrompt>>,
     /// Minimum cosine similarity score to treat a new prompt as a duplicate.
     similarity_threshold: f32,
+    /// Set by [`Deduplicator::with_embedder`].
+    semantic: Option<SemanticConfig>,
 }
 
 impl Deduplicator {
@@ -357,8 +387,12 @@ impl Deduplicator {
         Self {
             requests,
             cache_duration,
-            embeddings: Arc::new(DashMap::new()),
+            embeddings: Cache::builder()
+                .max_capacity(DEFAULT_SEMANTIC_MAX_ENTRIES)
+                .time_to_live(cache_duration.max(Duration::from_millis(1)))
+                .build(),
             similarity_threshold: 1.0, // disabled by default: exact match only
+            semantic: None,
         }
     }
 
@@ -548,65 +582,251 @@ impl Deduplicator {
         self
     }
 
-    /// Like [`check_and_register`](Self::check_and_register) but also performs
-    /// a semantic similarity scan against previously registered embeddings.
+    /// Like [`check_and_register`](Self::check_and_register), but a new
+    /// prompt whose `embedding` is close enough (see
+    /// [`with_semantic`](Self::with_semantic)) to an earlier prompt that has
+    /// already been answered gets that answer as
+    /// [`DeduplicationResult::Cached`].
     ///
-    /// If `embedding` is `Some` and semantic deduplication is enabled (threshold < 1.0),
-    /// all stored embeddings are scanned.  The first match whose cosine similarity
-    /// meets the threshold is returned as [`DeduplicationResult::Cached`] with an
-    /// empty string (the caller should use `wait_for_result` with the matched key
-    /// to obtain the actual cached value).
-    ///
-    /// Falls back to exact-key lookup when `embedding` is `None` or the threshold
-    /// equals `1.0`.
+    /// Only completed answers are reused; a similar prompt that is still in
+    /// flight does not count. Falls back to exact-key lookup when `embedding`
+    /// is `None` or the threshold is `1.0`.
     pub async fn check_and_register_with_embedding(
         &self,
         key: &str,
         embedding: Option<Vec<f32>>,
     ) -> DeduplicationResult {
-        // Semantic scan first (only when an embedding is provided and threshold < 1.0)
-        if let Some(ref emb) = embedding {
-            if self.similarity_threshold < 1.0 {
-                for entry in self.embeddings.iter() {
-                    let sim = cosine_similarity(emb, entry.value());
-                    if sim >= self.similarity_threshold {
-                        debug!(
-                            key = key,
-                            matched_key = entry.key().as_str(),
-                            similarity = sim,
-                            "semantic duplicate detected"
-                        );
-                        crate::metrics::inc_dedup_hit();
-                        return DeduplicationResult::Cached(String::new());
-                    }
+        let threshold = self.similarity_threshold;
+        match embedding {
+            Some(embedding) if threshold < 1.0 => {
+                self.register_semantic(key, embedding, threshold).await.0
+            }
+            _ => self.check_and_register(key).await,
+        }
+    }
+
+    /// Turn on semantic deduplication with `embedder`: a prompt that means the
+    /// same as one answered within the cache window is answered from the
+    /// cache, even when the wording differs.
+    ///
+    /// `threshold` is the minimum cosine similarity between the two prompts'
+    /// embeddings, and a match must also pass [`same_specifics`] (same
+    /// numbers, shared words in the same order), because embeddings alone
+    /// confuse questions like "convert 10 miles to km" and "convert 10 km to
+    /// miles".
+    ///
+    /// Measured with BGE-small-en-v1.5 (`FastEmbedder::try_default`) in
+    /// `tests/semantic_dedup_tests.rs`:
+    ///
+    /// | Pair | Similarity | Reused at 0.93 |
+    /// |---|---|---|
+    /// | "What is the capital of France?" / "Which city is the capital of France?" | 0.959 | yes |
+    /// | "What time zone is Tokyo in?" / "Which time zone does Tokyo use?" | 0.963 | yes |
+    /// | "How many ounces are in a pound?" / "How many oz in one lb?" | 0.931 | yes |
+    /// | "How do I reverse a list in Python?" / "What's the way to reverse a Python list?" | 0.985 | no (word order) |
+    /// | "Convert 10 miles to kilometers" / "Convert 10 kilometers to miles" | 0.992 | no (guard) |
+    /// | "Is 17 a prime number?" / "Is 21 a prime number?" | 0.845 | no |
+    /// | "What is the capital of France?" / "What is the capital of Germany?" | 0.795 | no |
+    ///
+    /// Other models need their own threshold: measure a few of your own
+    /// pairs the same way before relying on it.
+    ///
+    /// Use [`check_and_register_semantic`](Self::check_and_register_semantic)
+    /// to dedup with it; [`check_and_register`](Self::check_and_register)
+    /// stays exact-match only.
+    #[must_use]
+    pub fn with_embedder(
+        mut self,
+        embedder: Arc<dyn crate::embedding::Embedder>,
+        threshold: f32,
+    ) -> Self {
+        self.semantic = Some(SemanticConfig {
+            embedder,
+            threshold: threshold.clamp(-1.0, 1.0),
+        });
+        self
+    }
+
+    /// `true` when [`with_embedder`](Self::with_embedder) was used.
+    pub fn is_semantic(&self) -> bool {
+        self.semantic.is_some()
+    }
+
+    /// Exact dedup first, then (with [`with_embedder`](Self::with_embedder))
+    /// a search for an earlier, already answered prompt with the same
+    /// meaning.
+    ///
+    /// Returns the usual [`DeduplicationResult`] plus, for a semantic hit,
+    /// which prompt matched and how closely. A semantic hit is also cached
+    /// under `key`, so repeating this exact prompt later is an exact hit.
+    ///
+    /// If the embedder fails, the error is logged and the request is treated
+    /// as new: a broken embedder costs a model call, never an answer.
+    pub async fn check_and_register_semantic(
+        &self,
+        key: &str,
+        text: &str,
+    ) -> (DeduplicationResult, Option<SemanticMatch>) {
+        let Some(semantic) = self.semantic.clone() else {
+            return (self.check_and_register(key).await, None);
+        };
+        // An exact hit, or an identical call in flight, needs no embedding.
+        let exact = self.check_and_register(key).await;
+        let DeduplicationResult::New(token) = exact else {
+            return (exact, None);
+        };
+        let embedding = match semantic.embedder.embed(text).await {
+            Ok(embedding) => embedding,
+            Err(e) => {
+                warn!(key = key, error = %e, "embedding failed; treating the request as new");
+                return (DeduplicationResult::New(token), None);
+            }
+        };
+        let found = self.best_completed_match(key, &embedding, Some(text), semantic.threshold);
+        self.embeddings.insert(
+            key.to_string(),
+            Arc::new(IndexedPrompt { embedding, text: Some(text.to_string()) }),
+        );
+        match found {
+            Some((matched, result)) => {
+                crate::metrics::inc_dedup_hit();
+                info!(
+                    key = key,
+                    matched_key = matched.matched_key.as_str(),
+                    similarity = matched.similarity,
+                    "semantic duplicate answered from cache"
+                );
+                self.complete(token, result.clone()).await;
+                (DeduplicationResult::Cached(result), Some(matched))
+            }
+            None => (DeduplicationResult::New(token), None),
+        }
+    }
+
+    /// Exact check, then a similarity search, for a caller-supplied embedding.
+    async fn register_semantic(
+        &self,
+        key: &str,
+        embedding: Vec<f32>,
+        threshold: f32,
+    ) -> (DeduplicationResult, Option<SemanticMatch>) {
+        let exact = self.check_and_register(key).await;
+        let DeduplicationResult::New(token) = exact else {
+            return (exact, None);
+        };
+        let found = self.best_completed_match(key, &embedding, None, threshold);
+        self.embeddings.insert(key.to_string(), Arc::new(IndexedPrompt { embedding, text: None }));
+        match found {
+            Some((matched, result)) => {
+                crate::metrics::inc_dedup_hit();
+                self.complete(token, result.clone()).await;
+                (DeduplicationResult::Cached(result), Some(matched))
+            }
+            None => (DeduplicationResult::New(token), None),
+        }
+    }
+
+    /// The most similar earlier prompt at or above `threshold` whose answer
+    /// is still cached, with that answer.
+    fn best_completed_match(
+        &self,
+        key: &str,
+        embedding: &[f32],
+        text: Option<&str>,
+        threshold: f32,
+    ) -> Option<(SemanticMatch, String)> {
+        let mut best: Option<(SemanticMatch, String)> = None;
+        for (other_key, other) in self.embeddings.iter() {
+            if other_key.as_str() == key {
+                continue;
+            }
+            let similarity = cosine_similarity(embedding, &other.embedding);
+            if similarity < threshold
+                || best.as_ref().is_some_and(|(b, _)| b.similarity >= similarity)
+            {
+                continue;
+            }
+            // Embeddings barely see numbers and word order ("10 miles to km"
+            // vs "10 km to miles" score 0.99 with BGE-small), so a close
+            // vector is not enough: the specifics must agree too.
+            if let (Some(a), Some(b)) = (text, other.text.as_deref()) {
+                if !same_specifics(a, b) {
+                    continue;
                 }
-                // No semantic match: store embedding for future lookups.
-                self.embeddings.insert(key.to_string(), emb.clone());
+            }
+            if let Some(RequestState::Completed { result }) = self.requests.get(other_key.as_str())
+            {
+                best = Some((
+                    SemanticMatch {
+                        matched_key: other_key.to_string(),
+                        similarity,
+                    },
+                    result.to_string(),
+                ));
             }
         }
-
-        self.check_and_register(key).await
+        best
     }
 }
 
-/// Compute the cosine similarity between two dense vectors.
-///
-/// Returns a value in `[-1.0, 1.0]`.  Returns `0.0` if either vector has zero norm
-/// so that zero-length embeddings never falsely match.
-///
-/// # Panics
-///
-/// Does not panic.  Mismatched lengths are handled by iterating the shorter vector.
-pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm_a == 0.0 || norm_b == 0.0 {
-        0.0
-    } else {
-        dot / (norm_a * norm_b)
-    }
+/// Words that carry no specifics; ignored by [`same_specifics`].
+const GUARD_STOPWORDS: &[&str] = &[
+    "a", "an", "the", "of", "in", "on", "at", "to", "for", "from", "by", "with", "and", "or",
+    "is", "are", "was", "were", "be", "been", "do", "does", "did", "can", "could", "would",
+    "should", "will", "what", "which", "who", "whom", "whose", "when", "where", "why", "how",
+    "i", "me", "my", "we", "our", "you", "your", "it", "its", "this", "that", "these", "those",
+    "please", "tell", "give", "show", "way", "there", "s", "whats", "what's",
+];
+
+fn guard_tokens(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric() && c != '.')
+        .map(|t| t.trim_matches('.').to_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect()
 }
+
+/// `true` when two prompts agree on their specifics, the things embeddings
+/// are known to blur: every number is the same, in the same order, and the
+/// content words they share appear in the same order.
+///
+/// So "Convert 10 miles to kilometers" and "Convert 10 kilometers to miles"
+/// disagree (shared words in a different order), as do "Is 17 prime?" and
+/// "Is 71 prime?" (different numbers), while "What is the capital of
+/// France?" and "Which city is the capital of France?" agree. It errs on the
+/// side of "different": a wrong "different" costs one model call, a wrong
+/// "same" returns someone else's answer.
+pub fn same_specifics(a: &str, b: &str) -> bool {
+    let (ta, tb) = (guard_tokens(a), guard_tokens(b));
+    let is_number = |t: &String| t.chars().any(|c| c.is_ascii_digit());
+    let numbers_a: Vec<&String> = ta.iter().filter(|t| is_number(t)).collect();
+    let numbers_b: Vec<&String> = tb.iter().filter(|t| is_number(t)).collect();
+    if numbers_a != numbers_b {
+        return false;
+    }
+    let content = |tokens: &[String]| -> Vec<String> {
+        tokens
+            .iter()
+            .filter(|t| !is_number(t) && !GUARD_STOPWORDS.contains(&t.as_str()))
+            .cloned()
+            .collect()
+    };
+    let (ca, cb) = (content(&ta), content(&tb));
+    let shared_a: Vec<&String> = ca.iter().filter(|t| cb.contains(t)).collect();
+    let shared_b: Vec<&String> = cb.iter().filter(|t| ca.contains(t)).collect();
+    // Repeated words make the order ambiguous; compare first occurrences.
+    let first = |v: Vec<&String>| -> Vec<String> {
+        let mut seen: Vec<String> = Vec::new();
+        for t in v {
+            if !seen.contains(t) {
+                seen.push(t.clone());
+            }
+        }
+        seen
+    };
+    first(shared_a) == first(shared_b)
+}
+
+pub use crate::embedding::cosine_similarity;
 
 /// A point-in-time snapshot of [`Deduplicator`] state.
 ///
@@ -687,9 +907,214 @@ pub fn dedup_key(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    // ── specifics guard ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_guard_rejects_swapped_conversion() {
+        // BGE-small scores this pair 0.99: only the guard tells them apart.
+        assert!(!same_specifics(
+            "Convert 10 miles to kilometers",
+            "Convert 10 kilometers to miles"
+        ));
+    }
+
+    #[test]
+    fn test_guard_rejects_different_numbers() {
+        assert!(!same_specifics("Is 17 a prime number?", "Is 71 a prime number?"));
+        assert!(!same_specifics("Is 17 a prime number?", "Is 17.5 a prime number?"));
+        assert!(!same_specifics("Top 5 tips", "Top 10 tips"));
+    }
+
+    #[test]
+    fn test_guard_accepts_paraphrases() {
+        for (a, b) in [
+            ("What is the capital of France?", "Which city is the capital of France?"),
+            ("What time zone is Tokyo in?", "Which time zone does Tokyo use?"),
+            ("How many ounces are in a pound?", "How many oz in one lb?"),
+            (
+                "Summarize this ticket: login fails after password reset",
+                "Give me a summary of this ticket: login fails after password reset",
+            ),
+        ] {
+            assert!(same_specifics(a, b), "{a:?} vs {b:?}");
+        }
+    }
+
+    #[test]
+    fn test_guard_is_conservative_on_reordered_words() {
+        // Same meaning, different order: refused, which costs one model call.
+        assert!(!same_specifics(
+            "How do I reverse a list in Python?",
+            "What's the way to reverse a Python list?"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_semantic_guard_blocks_a_close_vector_with_different_specifics() {
+        #[derive(Debug)]
+        struct SameVector;
+        #[async_trait::async_trait]
+        impl crate::embedding::Embedder for SameVector {
+            async fn embed(&self, _: &str) -> Result<Vec<f32>, crate::OrchestratorError> {
+                Ok(vec![1.0, 0.0])
+            }
+        }
+        let dedup = Deduplicator::new(Duration::from_secs(60)).with_embedder(Arc::new(SameVector), 0.9);
+        let a = "Convert 10 miles to kilometers";
+        if let DeduplicationResult::New(t) = dedup.check_and_register_semantic("a", a).await.0 {
+            dedup.complete(t, "16.09 km".into()).await;
+        }
+        let b = "Convert 10 kilometers to miles";
+        let (result, _) = dedup.check_and_register_semantic("b", b).await;
+        assert!(matches!(result, DeduplicationResult::New(_)), "must not reuse the miles answer");
+    }
+
+    // ── semantic dedup ──────────────────────────────────────────────────
+
+    /// Deterministic embedder: known texts map to fixed vectors, anything
+    /// else to an orthogonal one. Counts calls; "boom" fails.
+    #[derive(Debug, Default)]
+    struct TableEmbedder {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::embedding::Embedder for TableEmbedder {
+        async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::OrchestratorError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(match text {
+                "What is the capital of France?" => vec![1.0, 0.0, 0.0],
+                "Which city is the capital of France?" => vec![0.98, 0.199, 0.0],
+                "How do I bake bread?" => vec![0.0, 0.0, 1.0],
+                "boom" => return Err(crate::OrchestratorError::Other("embedder down".into())),
+                _ => vec![0.0, 1.0, 0.0],
+            })
+        }
+    }
+
+    fn key(text: &str) -> String {
+        format!("test:{text}")
+    }
+
+    fn semantic(threshold: f32) -> (Deduplicator, Arc<TableEmbedder>) {
+        let embedder = Arc::new(TableEmbedder::default());
+        let dedup = Deduplicator::new(Duration::from_secs(60))
+            .with_embedder(Arc::clone(&embedder) as Arc<dyn crate::embedding::Embedder>, threshold);
+        (dedup, embedder)
+    }
+
+    async fn answer(dedup: &Deduplicator, text: &str, reply: &str) {
+        match dedup.check_and_register_semantic(&key(text), text).await.0 {
+            DeduplicationResult::New(token) => dedup.complete(token, reply.to_string()).await,
+            other => panic!("expected a new request for {text:?}, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_semantic_paraphrase_gets_the_real_cached_answer() {
+        let (dedup, _) = semantic(0.95);
+        answer(&dedup, "What is the capital of France?", "Paris.").await;
+
+        let q = "Which city is the capital of France?";
+        let (result, matched) = dedup.check_and_register_semantic(&key(q), q).await;
+        match result {
+            DeduplicationResult::Cached(text) => assert_eq!(text, "Paris."),
+            other => panic!("expected a semantic hit, got {other:?}"),
+        }
+        let matched = matched.expect("semantic match details");
+        assert_eq!(matched.matched_key, key("What is the capital of France?"));
+        assert!(matched.similarity > 0.97 && matched.similarity < 1.0, "{}", matched.similarity);
+    }
+
+    #[tokio::test]
+    async fn test_semantic_unrelated_prompt_is_new() {
+        let (dedup, _) = semantic(0.95);
+        answer(&dedup, "What is the capital of France?", "Paris.").await;
+        let q = "How do I bake bread?";
+        let (result, matched) = dedup.check_and_register_semantic(&key(q), q).await;
+        assert!(matches!(result, DeduplicationResult::New(_)));
+        assert!(matched.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_semantic_threshold_is_respected() {
+        // The paraphrase scores about 0.98: a 0.99 threshold must not match.
+        let (dedup, _) = semantic(0.99);
+        answer(&dedup, "What is the capital of France?", "Paris.").await;
+        let q = "Which city is the capital of France?";
+        let (result, _) = dedup.check_and_register_semantic(&key(q), q).await;
+        assert!(matches!(result, DeduplicationResult::New(_)));
+    }
+
+    #[tokio::test]
+    async fn test_semantic_ignores_answers_still_in_flight() {
+        let (dedup, _) = semantic(0.95);
+        let first = "What is the capital of France?";
+        let (pending, _) = dedup.check_and_register_semantic(&key(first), first).await;
+        assert!(matches!(pending, DeduplicationResult::New(_)));
+        // No answer yet, so a paraphrase cannot reuse one.
+        let q = "Which city is the capital of France?";
+        let (result, _) = dedup.check_and_register_semantic(&key(q), q).await;
+        assert!(matches!(result, DeduplicationResult::New(_)));
+        drop(pending);
+    }
+
+    #[tokio::test]
+    async fn test_semantic_hit_is_cached_under_the_new_key() {
+        let (dedup, embedder) = semantic(0.95);
+        answer(&dedup, "What is the capital of France?", "Paris.").await;
+        let q = "Which city is the capital of France?";
+        let _ = dedup.check_and_register_semantic(&key(q), q).await;
+        let calls = embedder.calls.load(Ordering::SeqCst);
+        // Asking the paraphrase again is now an exact hit: no embedding call.
+        let (again, matched) = dedup.check_and_register_semantic(&key(q), q).await;
+        assert!(matches!(again, DeduplicationResult::Cached(ref t) if t == "Paris."));
+        assert!(matched.is_none(), "an exact hit reports no semantic match");
+        assert_eq!(embedder.calls.load(Ordering::SeqCst), calls);
+    }
+
+    #[tokio::test]
+    async fn test_semantic_embedder_failure_costs_a_call_not_an_answer() {
+        let (dedup, _) = semantic(0.95);
+        let (result, matched) = dedup.check_and_register_semantic(&key("boom"), "boom").await;
+        assert!(matches!(result, DeduplicationResult::New(_)));
+        assert!(matched.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_without_embedder_semantic_check_is_exact_only() {
+        let dedup = Deduplicator::new(Duration::from_secs(60));
+        assert!(!dedup.is_semantic());
+        answer(&dedup, "What is the capital of France?", "Paris.").await;
+        let q = "Which city is the capital of France?";
+        let (result, _) = dedup.check_and_register_semantic(&key(q), q).await;
+        assert!(matches!(result, DeduplicationResult::New(_)));
+    }
+
+    #[tokio::test]
+    async fn test_caller_supplied_embedding_returns_the_cached_answer() {
+        // Regression: a semantic hit used to return Cached(""), an empty answer.
+        let dedup = Deduplicator::new(Duration::from_secs(60)).with_semantic(0.95);
+        match dedup
+            .check_and_register_with_embedding("k1", Some(vec![1.0, 0.0]))
+            .await
+        {
+            DeduplicationResult::New(token) => dedup.complete(token, "Paris.".to_string()).await,
+            other => panic!("expected new, got {other:?}"),
+        }
+        match dedup
+            .check_and_register_with_embedding("k2", Some(vec![0.99, 0.05]))
+            .await
+        {
+            DeduplicationResult::Cached(text) => assert_eq!(text, "Paris."),
+            other => panic!("expected the cached answer, got {other:?}"),
+        }
+    }
 
     #[tokio::test]
     async fn test_new_request() {

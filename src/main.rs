@@ -23,7 +23,7 @@ use std::io::{self, Write as _};
 use std::sync::Arc;
 use tokio_prompt_orchestrator::enhanced::InferenceRetry;
 use tokio_prompt_orchestrator::{
-    metrics, spawn_pipeline_with_retry, AnthropicWorker, EchoWorker, LlamaCppWorker, ModelWorker,
+    metrics, spawn_pipeline_with, PipelineOptions, AnthropicWorker, EchoWorker, LlamaCppWorker, ModelWorker,
     OpenAiWorker, PostOutput, PromptRequest, SessionId,
 };
 
@@ -126,6 +126,10 @@ struct CliArgs {
     max_spend: Option<f64>,
     /// Retries for a model call that fails with a 429, 5xx or network error.
     retries: u32,
+    /// Folder of documents to ground answers in (`--docs`).
+    docs: Option<std::path::PathBuf>,
+    /// Semantic dedup threshold (`--semantic-dedup`), local embeddings.
+    semantic_dedup: Option<f32>,
     no_web: bool,
     reset: bool,
 }
@@ -165,6 +169,13 @@ OPTIONS:
     --retries <N>                              Retry a model call up to N times when the
                                                provider fails with a 429, a 5xx or a network
                                                error, with backoff (default: 0, max 10)
+    --docs <folder>                            Answer from your own documents: Markdown and
+                                               text files in <folder> are searched for each
+                                               prompt and the best passages sent with it
+    --semantic-dedup [0.5-1.0]                 Also reuse answers to differently worded
+                                               questions that mean the same thing (OpenAI
+                                               endpoint; local embedding model, downloaded
+                                               once; needs a build with --features fastembed)
     --no-web                                   Disable web API
     --reset                                    Re-run setup wizard
     --help, -h                                 Print this help
@@ -224,6 +235,8 @@ fn parse_args() -> Result<CliArgs, String> {
     let mut log_level = "info".to_string();
     let mut max_spend: Option<f64> = None;
     let mut retries: Option<u32> = None;
+    let mut docs: Option<std::path::PathBuf> = None;
+    let mut semantic_dedup: Option<f32> = None;
     let mut no_web = false;
     let mut reset = false;
 
@@ -239,9 +252,23 @@ fn parse_args() -> Result<CliArgs, String> {
                 std::process::exit(0);
             }
             "--no-web" => no_web = true,
+            "--semantic-dedup" => {
+                // Optional value: `--semantic-dedup` or `--semantic-dedup 0.95`.
+                let next = args.get(i + 1).and_then(|v| v.parse::<f32>().ok());
+                match next {
+                    Some(t) if (0.5..=1.0).contains(&t) => {
+                        semantic_dedup = Some(t);
+                        i += 1;
+                    }
+                    Some(t) => {
+                        return Err(format!("--semantic-dedup must be between 0.5 and 1.0, got: {t}"))
+                    }
+                    None => semantic_dedup = Some(0.93),
+                }
+            }
             "--reset" => reset = true,
             flag @ ("--provider" | "--model" | "--port" | "--host" | "--log-level"
-            | "--max-spend" | "--retries") => {
+            | "--max-spend" | "--retries" | "--docs") => {
                 i += 1;
                 if i >= args.len() {
                     return Err(format!("{flag} requires a value"));
@@ -273,6 +300,13 @@ fn parse_args() -> Result<CliArgs, String> {
                             })?);
                     }
                     "--retries" => retries = Some(parse_retries(&val)?),
+                    "--docs" => {
+                        let path = std::path::PathBuf::from(&val);
+                        if !path.is_dir() {
+                            return Err(format!("--docs needs a folder, and '{val}' is not one"));
+                        }
+                        docs = Some(path);
+                    }
                     _ => {}
                 }
             }
@@ -297,6 +331,8 @@ fn parse_args() -> Result<CliArgs, String> {
         log_level,
         max_spend,
         retries,
+        docs,
+        semantic_dedup,
         no_web,
         reset,
     })
@@ -324,6 +360,8 @@ struct ResolvedConfig {
     max_spend: Option<f64>,
     /// Retries for transient model errors (0 = off).
     retries: u32,
+    docs: Option<std::path::PathBuf>,
+    semantic_dedup: Option<f32>,
     no_web: bool,
 }
 
@@ -430,6 +468,8 @@ fn run_wizard(args: CliArgs) -> ResolvedConfig {
                     log_level: args.log_level,
                     max_spend: args.max_spend,
                     retries: args.retries,
+        docs: args.docs.clone(),
+        semantic_dedup: args.semantic_dedup,
                     no_web: args.no_web,
                 };
             }
@@ -596,6 +636,8 @@ fn run_wizard(args: CliArgs) -> ResolvedConfig {
         log_level: args.log_level,
         max_spend: args.max_spend,
         retries: args.retries,
+        docs: args.docs.clone(),
+        semantic_dedup: args.semantic_dedup,
         no_web,
     }
 }
@@ -916,6 +958,45 @@ fn init_tracing(level: &str) {
 // Entry point
 // ---------------------------------------------------------------------------
 
+/// Index `--docs` for retrieval.
+#[cfg(feature = "tantivy")]
+fn load_docs(
+    dir: &std::path::Path,
+) -> Result<std::sync::Arc<dyn tokio_prompt_orchestrator::Retriever>, String> {
+    let retriever = tokio_prompt_orchestrator::integrations::TantivyRetriever::index_dir(dir)
+        .map_err(|e| format!("Could not index --docs {}: {e}", dir.display()))?;
+    if retriever.passage_count() == 0 {
+        return Err(format!(
+            "--docs {}: no Markdown or text files found (looked for {})",
+            dir.display(),
+            tokio_prompt_orchestrator::integrations::INDEXED_EXTENSIONS.join(", ")
+        ));
+    }
+    println!("  Answering from {} passages in {}", retriever.passage_count(), dir.display());
+    Ok(std::sync::Arc::new(retriever))
+}
+
+#[cfg(not(feature = "tantivy"))]
+fn load_docs(
+    _dir: &std::path::Path,
+) -> Result<std::sync::Arc<dyn tokio_prompt_orchestrator::Retriever>, String> {
+    Err("This build has no --docs support. Install with: cargo install tokio-prompt-orchestrator --features web-api,tantivy".to_string())
+}
+
+/// Load the local embedding model for `--semantic-dedup`.
+#[cfg(feature = "fastembed")]
+fn load_embedder() -> Result<std::sync::Arc<dyn tokio_prompt_orchestrator::Embedder>, String> {
+    println!("  Loading the embedding model for --semantic-dedup (128 MB, downloaded once)...");
+    tokio_prompt_orchestrator::integrations::FastEmbedder::try_default()
+        .map(|e| std::sync::Arc::new(e) as std::sync::Arc<dyn tokio_prompt_orchestrator::Embedder>)
+        .map_err(|e| format!("Could not load the embedding model: {e}"))
+}
+
+#[cfg(not(feature = "fastembed"))]
+fn load_embedder() -> Result<std::sync::Arc<dyn tokio_prompt_orchestrator::Embedder>, String> {
+    Err("This build has no --semantic-dedup support. Install with: cargo install tokio-prompt-orchestrator --features web-api,fastembed".to_string())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // All env mutation happens here, before the Tokio runtime starts,
     // so plain (non-unsafe) env::set_var / env::remove_var are sound.
@@ -976,8 +1057,19 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
         std::time::Duration::from_millis(200),
         std::time::Duration::from_secs(10),
     );
-    let handles = spawn_pipeline_with_retry(worker, retry);
-    tracing::info!(retries = cfg.retries, "Pipeline stages spawned");
+    let mut options = PipelineOptions::default();
+    options.retry = retry;
+    if let Some(dir) = &cfg.docs {
+        match load_docs(dir) {
+            Ok(retriever) => options.retriever = Some(retriever),
+            Err(e) => {
+                eprintln!("\n  ✗ {e}\n");
+                std::process::exit(1);
+            }
+        }
+    }
+    let handles = spawn_pipeline_with(worker, options);
+    tracing::info!(retries = cfg.retries, docs = cfg.docs.is_some(), "Pipeline stages spawned");
 
     // ── Config hot-reload: poll orchestrator.env every 5 s ──────────────────
     {
@@ -1140,9 +1232,29 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
                 }),
                 Err(_) => defaults.dedup_window_secs,
             };
+            // Debug endpoints stay on for local use, and off whenever the
+            // server is reachable from other machines.
+            let debug_mode = cfg
+                .host
+                .parse::<std::net::IpAddr>()
+                .map(|ip| ip.is_loopback())
+                .unwrap_or(cfg.host == "localhost");
+            let embedder = match cfg.semantic_dedup {
+                Some(_) => match load_embedder() {
+                    Ok(e) => Some(e),
+                    Err(e) => {
+                        eprintln!("\n  ✗ {e}\n");
+                        std::process::exit(1);
+                    }
+                },
+                None => None,
+            };
             let config = ServerConfig {
                 host: cfg.host.clone(),
                 port: cfg.port,
+                debug_mode,
+                embedder,
+                semantic_threshold: cfg.semantic_dedup.unwrap_or(defaults.semantic_threshold),
                 provider: cfg.provider.clone(),
                 model: cfg.model.clone(),
                 max_spend_usd: cfg.max_spend,
@@ -1261,6 +1373,8 @@ mod tests {
             log_level: "info".to_string(),
             max_spend: None,
             retries: 0,
+            docs: None,
+            semantic_dedup: None,
             no_web: false,
         };
         assert!(build_worker(&cfg).is_ok());
@@ -1282,6 +1396,8 @@ mod tests {
             log_level: "info".to_string(),
             max_spend: None,
             retries: 0,
+            docs: None,
+            semantic_dedup: None,
             no_web: false,
         };
         let err = build_worker(&cfg).err().unwrap();
@@ -1302,6 +1418,8 @@ mod tests {
             log_level: "info".to_string(),
             max_spend: None,
             retries: 0,
+            docs: None,
+            semantic_dedup: None,
             no_web: false,
         };
         let err = build_worker(&cfg).err().unwrap();
@@ -1319,6 +1437,8 @@ mod tests {
             log_level: "info".to_string(),
             max_spend: None,
             retries: 0,
+            docs: None,
+            semantic_dedup: None,
             no_web: false,
         };
         let err = build_worker(&cfg).err().unwrap();
@@ -1336,6 +1456,8 @@ mod tests {
             log_level: "info".to_string(),
             max_spend: None,
             retries: 0,
+            docs: None,
+            semantic_dedup: None,
             no_web: false,
         };
         assert!(build_worker(&cfg).is_ok());

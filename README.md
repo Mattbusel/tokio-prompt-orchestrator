@@ -26,7 +26,7 @@ mkdir -p ~/.local/bin && curl -fsSL https://gitlab.com/mattbusel/tokio-prompt-or
 | Other systems | |
 |---|---|
 | **Windows** | [Download orchestrator-windows-x86_64.exe](https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/releases/permalink/latest/downloads/orchestrator-windows-x86_64.exe) and run it. (Unsigned, so SmartScreen may ask: *More info*, then *Run anyway*.) |
-| **macOS, or from source** | `cargo install --locked tokio-prompt-orchestrator --features web-api` |
+| **macOS, or from source** | `cargo install --locked tokio-prompt-orchestrator --features web-api,tantivy` (add `fastembed` for `--semantic-dedup`) |
 
 Every method installs the same `orchestrator` command. Every release, with SHA-256 checksums: [Releases](https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/releases).
 
@@ -80,6 +80,60 @@ The orchestrator answers with the provider and model it was started with (`--pro
 
 For OpenAI models the token counts in `usage` (and so the spend cap) come from the model's own tokenizer, so they match your OpenAI bill. Other models get an estimate of about 4 characters per token, which is what you see from `echo` above.
 
+## Drop-in Anthropic proxy
+
+The same for Anthropic clients: point the base URL at the orchestrator and `POST /v1/messages` gets the same deduplication, circuit breaker and spend cap. The official Python SDK, unchanged, against `orchestrator --provider echo`:
+
+```python
+import anthropic
+
+client = anthropic.Anthropic(base_url="http://127.0.0.1:8080", api_key="local")
+msg = client.messages.create(
+    model="claude-sonnet-4-6",
+    max_tokens=200,
+    messages=[{"role": "user", "content": "Summarize this ticket"}],
+)
+print(msg.content[0].text, msg.stop_reason)
+
+with client.messages.stream(model="claude-sonnet-4-6", max_tokens=200,
+                            messages=[{"role": "user", "content": "Now stream it"}]) as s:
+    print("".join(s.text_stream))
+```
+```text
+Summarize this ticket end_turn
+Now stream it
+```
+
+Text conversations, system prompts and streaming are supported; image and tool blocks are rejected with a clear `invalid_request_error`. The key goes in `x-api-key` (as the Anthropic SDKs send it) or `Authorization: Bearer`.
+
+## Answer from your own documents
+
+`orchestrator --docs ./my-docs` indexes the Markdown and text files in a folder ([tantivy](https://crates.io/crates/tantivy) BM25 search with English stemming, in memory) and sends the best passages, with their file names, in front of each question. Real run with `--provider echo`, which shows exactly what the model receives:
+
+```text
+  Answering from 2 passages in ./demo-docs
+> How long do refunds take?
+Use the following excerpts to answer. If they do not contain the answer, say so. [1] (policies/refunds.md) # Refunds Refunds are issued to the original card within 14 days of us receiving the return. Gift cards cannot be refunded. Question: How long do refunds take?
+```
+
+If search fails or takes longer than 2 seconds, the prompt is sent without context; a request is never dropped because of retrieval. In Rust: `spawn_pipeline_with(worker, PipelineOptions::with_retriever(Arc::new(TantivyRetriever::index_dir("./docs")?)))`, or implement the `Retriever` trait over your own search (a vector database, Elasticsearch, Postgres).
+
+## Semantic dedup: same question, different words
+
+Exact dedup only catches identical prompts. With an embedder, the OpenAI and Anthropic endpoints also answer a reworded question from the cache (`x-orchestrator-dedup: semantic`, with the similarity in `x-orchestrator-similarity`). `orchestrator --semantic-dedup` uses a local model ([fastembed](https://crates.io/crates/fastembed), BGE-small, no API key, 128 MB downloaded once to your cache directory); in Rust, `Deduplicator::with_embedder` takes it or an OpenAI/genai embedder.
+
+Embeddings alone are not safe for this. Measured with BGE-small, "Convert 10 miles to kilometers" and "Convert 10 kilometers to miles" score 0.99, higher than any real paraphrase we tried. So a match must also have the same numbers and its shared words in the same order. On our test pairs (`tests/semantic_dedup_tests.rs`), at the default threshold of 0.93:
+
+| Pair | Similarity | Answer reused |
+|---|---|---|
+| "What is the capital of France?" / "Which city is the capital of France?" | 0.959 | yes |
+| "How many ounces are in a pound?" / "How many oz in one lb?" | 0.931 | yes |
+| "How do I reverse a list in Python?" / "What's the way to reverse a Python list?" | 0.985 | no (word order; costs one call) |
+| "Convert 10 miles to kilometers" / "Convert 10 kilometers to miles" | 0.992 | no |
+| "Is 17 a prime number?" / "Is 21 a prime number?" | 0.845 | no |
+
+It errs toward a second model call, never toward someone else's answer. Check the hits on your own traffic before lowering the threshold.
+
 ## How it works
 
 <img alt="Animated diagram of the real pipeline. A request enters through input_tx.send() or POST /api/v1/infer and passes five stages joined by bounded channels of 512, 512, 512, 1024, 512 and 256: Retrieve, Assemble, Inference, Post-process, Stream. Inside stage 3 every request goes through a deadline check, the circuit breaker (5 failures open it, it refuses calls for 60 s, then lets one probe through), a 120 s timeout, and then your ModelWorker. Deduplicator, RetryPolicy and RateLimiter are optional wrappers around the worker. Dropped requests land in a 1000-entry dead-letter queue with a reason such as backpressure, deadline_expired, circuit_breaker_open, inference_timeout or inference_failure. The animation shows healthy traffic, then an outage where the breaker opens and calls fail fast into the dead-letter queue." src="assets/how-it-works.svg" width="100%">
@@ -119,25 +173,25 @@ Each stage is its own Tokio task. A full channel never grows memory: the request
 
 Set `PROVIDER=anthropic ANTHROPIC_API_KEY=...` or `PROVIDER=openai OPENAI_API_KEY=...` to make the same 3 calls against a real model. The source, [`examples/llm_pipeline.rs`](examples/llm_pipeline.rs), is a good template for your own backend.
 
-**2. Any tool can use it over HTTP.** With `orchestrator --provider echo` running (echo mode answers with the prompt the pipeline built):
+**2. Any tool can use it over HTTP.** With `orchestrator --provider echo` running (echo mode answers with the prompt exactly as the model would receive it):
 
 ```bash
 curl -s -X POST localhost:8080/api/v1/infer -H 'Content-Type: application/json' -d '{"prompt": "Summarize this ticket"}'
 ```
 ```json
-{"request_id":"83d3b470-887f-4243-bea7-46a21276b930","status":"processing"}
+{"request_id":"d6a70800-99ef-4f2b-9b27-63b02af7d972","status":"processing"}
 ```
 ```bash
-curl -s localhost:8080/api/v1/result/83d3b470-887f-4243-bea7-46a21276b930
+curl -s localhost:8080/api/v1/result/d6a70800-99ef-4f2b-9b27-63b02af7d972
 ```
 ```json
-{"request_id":"83d3b470-887f-4243-bea7-46a21276b930","status":"completed","result":"CONTEXT: Retrieved documents for 'Summarize this ticket' User Query: Summarize this ticket Assistant:"}
+{"request_id":"d6a70800-99ef-4f2b-9b27-63b02af7d972","status":"completed","result":"Summarize this ticket"}
 ```
 ```bash
 curl -s localhost:8080/health
 ```
 ```json
-{"memory":{"rss_bytes":0,"rss_mb":0.0},"pipeline":{"circuit_breaker":{"is_open":false,"state":"closed"},"dead_letter_queue_depth":0,"inbound_queue":{"capacity":512,"depth_pct":0.0,"used":0}},"shutting_down":false,"status":"healthy","uptime_secs":4,"version":"1.4.3","worker_pool":{"pending_requests":0,"tracker_capacity":100000,"tracker_depth_pct":0.0,"tracker_used":1}}
+{"memory":{"rss_bytes":0,"rss_mb":0.0},"pipeline":{"circuit_breaker":{"is_open":false,"state":"closed"},"dead_letter_queue_depth":0,"inbound_queue":{"capacity":512,"depth_pct":0.0,"used":0}},"shutting_down":false,"status":"healthy","uptime_secs":2,"version":"2.0.0","worker_pool":{"pending_requests":0,"tracker_capacity":100000,"tracker_depth_pct":0.0,"tracker_used":1}}
 ```
 
 **3. In your own Rust code.** [`examples/quickstart.rs`](examples/quickstart.rs), `cargo run --example quickstart`:
@@ -148,7 +202,8 @@ use tokio_prompt_orchestrator::{spawn_pipeline, EchoWorker, ModelWorker, PromptR
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Swap EchoWorker for AnthropicWorker, OpenAiWorker, LlamaCppWorker or VllmWorker.
+    // Swap EchoWorker for AnthropicWorker, OpenAiWorker, LlamaCppWorker, VllmWorker,
+    // or a worker over the client you already use (next section).
     let worker: Arc<dyn ModelWorker> = Arc::new(EchoWorker::new());
     let handles = spawn_pipeline(worker);
     let mut output = handles.take_output_rx().await.ok_or("output already taken")?;
@@ -169,10 +224,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 ```text
-CONTEXT: Retrieved documents for 'Hello, pipeline!' User Query: Hello, pipeline! Assistant:
+Hello, pipeline!
 ```
 
-Needs `tokio-prompt-orchestrator = "1.4"` and `tokio = { version = "1", features = ["rt-multi-thread", "macros"] }` in `Cargo.toml`.
+Needs `tokio-prompt-orchestrator = "2"` and `tokio = { version = "1", features = ["rt-multi-thread", "macros"] }` in `Cargo.toml`.
+
+## Already using async-openai, genai, rig or tower?
+
+Keep your client. Each of these is a cargo feature that turns it into a worker, so deduplication, the circuit breaker, retries, timeouts and the dead-letter queue sit in front of the code you already have.
+
+| You use | Add | Then |
+|---|---|---|
+| [async-openai](https://crates.io/crates/async-openai) | `features = ["async-openai"]` | `AsyncOpenAiWorker::new(client, "gpt-4o-mini")`: OpenAI, Azure, or any OpenAI-compatible server (Ollama, vLLM, llama.cpp, LM Studio) |
+| [genai](https://crates.io/crates/genai) | `features = ["genai"]` | `GenaiWorker::new(genai::Client::default(), "claude-sonnet-4-6")`: OpenAI, Anthropic, Gemini, Ollama, Groq, DeepSeek, xAI and more, picked by model name |
+| [rig](https://crates.io/crates/rig-core) | `features = ["rig"]` | `RigWorker::new(OpenAI::from_env()?.completion("gpt-5.2"))`: any rig completion model (needs Rust 1.95+) |
+| [tower](https://crates.io/crates/tower) | `features = ["tower"]` | `ServiceWorker::new(svc)` runs any `Service<String>` (with your tower layers) as a worker; `WorkerService::new(worker)` goes the other way |
+
+```rust,ignore
+use std::sync::Arc;
+use async_openai::{config::OpenAIConfig, Client};
+use tokio_prompt_orchestrator::{integrations::AsyncOpenAiWorker, spawn_pipeline};
+
+// The client you already have, here pointed at a local Ollama.
+let client = Client::with_config(
+    OpenAIConfig::new().with_api_base("http://localhost:11434/v1").with_api_key("ollama"),
+);
+let handles = spawn_pipeline(Arc::new(AsyncOpenAiWorker::new(client, "llama3.2")));
+```
+
+All four are tested end to end against a mock OpenAI server ([`tests/integrations_tests.rs`](tests/integrations_tests.rs)): replies, streaming, and that a rejected key is never retried while a 429 backs off.
+
+### Feature flags
+
+With no features the library is the pipeline, the workers and the resilience parts: 167 crates in the dependency tree. Everything else is opt-in.
+
+| Feature | Adds |
+|---|---|
+| `web-api` | HTTP server: REST, SSE, WebSocket and the OpenAI-compatible `/v1/chat/completions` |
+| `otel` | OpenTelemetry span export over OTLP/HTTP when `OTEL_EXPORTER_OTLP_ENDPOINT` is set |
+| `tiktoken` | Exact OpenAI token counts (on with `web-api`) |
+| `metrics-server`, `caching`, `rate-limiting` | `/metrics` endpoint, Redis result cache, token-bucket limiter |
+| `full` | All of the above plus `cli` and `hot-reload` |
+| `async-openai`, `genai`, `rig`, `tower` | The integrations above |
+| `tantivy` | `TantivyRetriever` and `--docs`: answers grounded in a folder of documents (Rust 1.90+) |
+| `fastembed` | `FastEmbedder` and `--semantic-dedup`: local embeddings for semantic dedup (Rust 1.88+; on Windows it needs the dynamic C runtime, so not with `+crt-static`) |
+| `tui`, `mcp`, `dashboard` | Terminal dashboard, MCP server for Claude Desktop and Claude Code, web dashboard |
+| `distributed` | Cross-node dedup over Redis, NATS work queues, leader election |
+| `hot-reload`, `cli`, `schema`, `core-pinning` | Config file watcher, the `replay` binary, JSON Schema export, CPU pinning |
+| `self-tune`, `self-modify`, `intelligence`, `evolution`, `self-improving` | Experimental self-tuning tiers |
 
 ## Use it in 3 steps
 

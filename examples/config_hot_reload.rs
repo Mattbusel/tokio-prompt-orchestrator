@@ -11,6 +11,7 @@
 //!   2. After 2 seconds the example writes a new config (name = "hot-reloaded").
 //!   3. The ConfigWatcher detects the file change and broadcasts the new config.
 //!   4. The pipeline reads the new config and logs the change.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::io::Write as _;
 use std::path::PathBuf;

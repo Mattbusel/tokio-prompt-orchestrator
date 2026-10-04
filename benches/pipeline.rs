@@ -7,6 +7,7 @@
 //! - Stream stage:    P50 <1ms,  P99 <3ms
 //! - Full pipeline (excl. inference): P50 <15ms, P99 <40ms
 //! - Channel send:    P99 <10μs
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::collections::HashMap;

@@ -38,8 +38,8 @@ mod self_tune_tier {
         let controller = TuningController::new(150.0, 20.0);
         // get() should return a valid value for any parameter
         use tokio_prompt_orchestrator::self_tune::controller::ParameterId;
-        let val = controller.get(ParameterId::Concurrency);
-        assert!(val >= 0.0, "concurrency param must be non-negative");
+        let val = controller.get(ParameterId::CircuitBreakerFailureThreshold);
+        assert!(val > 0.0, "the breaker's failure threshold starts positive");
     }
 
     #[test]
@@ -60,7 +60,7 @@ mod self_tune_tier {
         bus.start();
 
         // Wait for at least one broadcast (50ms interval, 300ms budget)
-        let result = tokio::time::timeout(Duration::from_millis(300), rx.changed()).await;
+        let result = tokio::time::timeout(Duration::from_millis(300), rx.recv()).await;
         assert!(result.is_ok(), "telemetry bus must broadcast within 300ms");
     }
 }
@@ -223,17 +223,18 @@ mod evolution_tier {
     }
 
     #[test]
-    fn test_evolution_consensus_brain_starts_with_no_nodes() {
+    fn test_evolution_consensus_brain_starts_with_only_itself() {
         let brain = ConsensusBrain::new(ConsensusConfig::default())
             .expect("ConsensusBrain::new with default config");
-        assert_eq!(brain.node_count(), 0);
+        // The local node counts toward quorum, so a new brain knows one node.
+        assert_eq!(brain.node_count(), 1);
     }
 
     #[test]
     fn test_evolution_consensus_brain_register_node() {
         let brain = ConsensusBrain::new(ConsensusConfig::default()).expect("ConsensusBrain::new");
         brain.register_node("node-1").expect("register node-1");
-        assert_eq!(brain.node_count(), 1);
+        assert_eq!(brain.node_count(), 2, "itself plus node-1");
     }
 
     #[test]

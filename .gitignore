@@ -39,3 +39,6 @@ HIGH_IMPACT.md
 Screenshot*.png
 dist/
 releases/
+
+# fastembed model downloads (FastEmbedder default cache dir)
+.fastembed_cache/

@@ -5,6 +5,7 @@
 //! 2. Crash recovery: crashed agent's tasks reclaimed by healthy agents
 //! 3. Priority ordering: priority=1 tasks complete before priority=2
 //! 4. Status output: summary shows correct counts
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::HashSet;
 use std::path::PathBuf;

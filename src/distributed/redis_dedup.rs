@@ -455,9 +455,9 @@ mod tests {
         let client = redis::Client::open("redis://localhost:6379");
         if let Ok(c) = client {
             let dedup = RedisDedup::from_client(Arc::new(c), "node-refresh", 60);
-            // refresh returns Result — ensure it compiles and type-checks
-            let _: fn(&RedisDedup, &str) -> _ = |d: &RedisDedup, k: &str| d.refresh(k);
-            let _ = dedup.ttl_seconds(); // keep dedup in scope
+            // With or without a Redis server, refresh returns a Result and never panics.
+            let _ = dedup.refresh("some-key").await;
+            assert_eq!(dedup.ttl_seconds(), 60);
         }
     }
 

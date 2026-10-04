@@ -17,6 +17,7 @@
 //! instead separate the "with origins" tests onto their own ports and ensure
 //! `ALLOWED_ORIGINS` is set synchronously before the server is spawned and
 //! before the await that lets the scheduler run.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 #![cfg(feature = "web-api")]
 
@@ -60,10 +61,11 @@ async fn spawn_server_on(port: u16) -> (String, mpsc::Receiver<PromptRequest>) {
         port,
         max_request_size: 1024 * 1024,
         timeout_seconds: 2,
+        ..ServerConfig::default()
     };
     let (_, out_rx) = mpsc::channel::<tokio_prompt_orchestrator::PostOutput>(1);
     tokio::spawn(async move {
-        let _ = tokio_prompt_orchestrator::web_api::start_server(config, tx, out_rx).await;
+        let _ = tokio_prompt_orchestrator::web_api::start_server(config, tx, out_rx, std::sync::Arc::new(tokio_prompt_orchestrator::DeadLetterQueue::new(100)), tokio_prompt_orchestrator::enhanced::CircuitBreaker::new(5, 0.8, std::time::Duration::from_secs(60)), None).await;
     });
     tokio::time::sleep(Duration::from_millis(400)).await;
     (format!("http://127.0.0.1:{port}"), rx)

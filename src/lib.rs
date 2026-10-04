@@ -8,7 +8,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! tokio-prompt-orchestrator = "1.4"
+//! tokio-prompt-orchestrator = "2"
 //! tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 //! ```
 //!
@@ -109,6 +109,8 @@
 //! [`PoolSizer`]: routing::PoolSizer
 //! [`PromptGuard`]: security::PromptGuard
 
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -152,6 +154,11 @@ pub mod stream_agg;
 pub mod stages;
 pub mod token_budget;
 pub mod worker;
+pub mod integrations;
+pub mod embedding;
+pub use embedding::Embedder;
+pub mod retrieval;
+pub use retrieval::{Passage, Retriever};
 
 #[cfg(feature = "metrics-server")]
 pub mod metrics_server;
@@ -234,7 +241,7 @@ pub use conversation::{
     ConversationConfig, ConversationManager, PromptFormat, Role, Turn,
 };
 pub use stages::{
-    spawn_pipeline, spawn_pipeline_with_config, spawn_pipeline_with_retry, LogSink, OutputSink, PipelineHandles, SinkError,
+    spawn_pipeline, spawn_pipeline_with, spawn_pipeline_with_config, spawn_pipeline_with_retry, LogSink, OutputSink, PipelineHandles, PipelineOptions, SinkError,
 };
 pub use templates::{
     AbExperiment, ExperimentReport, ExperimentVariant, PromptTemplate, TemplateError,
@@ -263,6 +270,7 @@ pub use audit::{AuditEntry, AuditFilter, AuditLog, AuditQueryResponse, AuditStat
 /// All variants are non-panicking. Callers should match on the variant to
 /// decide whether to retry, shed, or propagate the error.
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum OrchestratorError {
     /// A pipeline channel was closed before the request could be delivered.
     ///
@@ -713,6 +721,28 @@ impl DeadLetterQueue {
         guard.drain(..).collect()
     }
 
+    /// Copy the queued entries, oldest first, without removing them.
+    ///
+    /// Unlike draining and pushing back, this leaves the queue untouched and
+    /// sends nothing to [`subscribe`](Self::subscribe)rs.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic. If the internal mutex is poisoned it is
+    /// recovered automatically and a warning is logged.
+    pub fn snapshot(&self) -> Vec<DroppedRequest> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| {
+                tracing::warn!("DeadLetterQueue: recovering from poisoned mutex");
+                crate::metrics::inc_dlq_lock_poisoned();
+                p.into_inner()
+            })
+            .iter()
+            .cloned()
+            .collect()
+    }
+
     /// Return the number of entries currently in the queue.
     ///
     /// # Panics
@@ -773,10 +803,12 @@ impl DeadLetterQueue {
     }
 }
 
-/// Type alias for the optional OpenTelemetry tracing layer used in main.rs.
+/// Type alias for the optional OpenTelemetry tracing layer.
 ///
 /// Exported so binary crates can declare `Option<OtelLayer>` without spelling
-/// out the full generic type.
+/// out the full generic type. Requires the `otel` feature.
+#[cfg(feature = "otel")]
+#[cfg_attr(docsrs, doc(cfg(feature = "otel")))]
 pub type OtelLayer = tracing_opentelemetry::OpenTelemetryLayer<
     tracing_subscriber::Registry,
     opentelemetry_sdk::trace::Tracer,
@@ -794,9 +826,9 @@ pub type OtelLayer = tracing_opentelemetry::OpenTelemetryLayer<
 /// JSON suitable for log aggregation pipelines.  Otherwise the human-readable
 /// `fmt` pretty format is used for local development.
 ///
-/// ## OpenTelemetry OTLP export
+/// ## OpenTelemetry OTLP export (feature `otel`)
 ///
-/// If the environment variable `OTEL_EXPORTER_OTLP_ENDPOINT` (or the legacy
+/// Built with the `otel` feature: if the environment variable `OTEL_EXPORTER_OTLP_ENDPOINT` (or the legacy
 /// `JAEGER_ENDPOINT`) is set to a valid OTLP collector URL (e.g.
 /// `http://localhost:4318`), spans are exported via OTLP HTTP to that endpoint
 /// using a batch exporter on the Tokio runtime.
@@ -810,6 +842,9 @@ pub type OtelLayer = tracing_opentelemetry::OpenTelemetryLayer<
 ///
 /// - `"OpenTelemetry OTLP export enabled, sending to <endpoint>"`
 /// - `"OpenTelemetry OTLP disabled (set OTEL_EXPORTER_OTLP_ENDPOINT to enable)"`
+///
+/// Built without `otel`, an endpoint in the environment is reported with a
+/// warning (so a missing feature is never silent) and logging works as usual.
 ///
 /// ## Calling requirement
 ///
@@ -826,8 +861,11 @@ pub fn init_tracing() {
 
     // Build the OTel layer if an endpoint is configured, boxing it so the
     // concrete type does not propagate into the subscriber stack.
+    #[cfg(feature = "otel")]
     let otel_layer: Option<Box<dyn Layer<Registry> + Send + Sync>> =
         try_build_otel_layer().map(|l| l.boxed());
+    #[cfg(not(feature = "otel"))]
+    let otel_layer: Option<Box<dyn Layer<Registry> + Send + Sync>> = None;
 
     if use_json {
         let subscriber = Registry::default()
@@ -842,6 +880,23 @@ pub fn init_tracing() {
             .with(fmt::layer().with_target(false));
         let _ = tracing::subscriber::set_global_default(subscriber);
     }
+
+    #[cfg(not(feature = "otel"))]
+    if let Some(ep) = otel_endpoint_from_env() {
+        tracing::warn!(
+            endpoint = ep.as_str(),
+            "OTEL_EXPORTER_OTLP_ENDPOINT is set but this build has no `otel` feature; spans are not exported"
+        );
+    }
+}
+
+/// The OTLP endpoint from `OTEL_EXPORTER_OTLP_ENDPOINT`, or the legacy
+/// `JAEGER_ENDPOINT`. Empty values count as unset.
+fn otel_endpoint_from_env() -> Option<String> {
+    std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .or_else(|_| std::env::var("JAEGER_ENDPOINT"))
+        .ok()
+        .filter(|ep| !ep.trim().is_empty())
 }
 
 /// Attempt to build an OpenTelemetry tracing layer, returning `None` on error.
@@ -857,6 +912,8 @@ pub fn init_tracing() {
 /// # Panics
 ///
 /// This function never panics.
+#[cfg(feature = "otel")]
+#[cfg_attr(docsrs, doc(cfg(feature = "otel")))]
 pub fn try_build_otel_layer() -> Option<
     tracing_opentelemetry::OpenTelemetryLayer<
         tracing_subscriber::Registry,
@@ -866,11 +923,7 @@ pub fn try_build_otel_layer() -> Option<
     use opentelemetry::global;
     use opentelemetry_otlp::WithExportConfig;
 
-    let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
-        .or_else(|_| std::env::var("JAEGER_ENDPOINT"))
-        .ok();
-
-    let endpoint = match endpoint {
+    let endpoint = match otel_endpoint_from_env() {
         Some(ep) => {
             tracing::info!(
                 endpoint = ep.as_str(),
@@ -1132,6 +1185,7 @@ mod tests {
     /// single request (OTel context propagation).  Without a live collector the
     /// test only checks that the tracing infrastructure works without panicking;
     /// the trace_id field is non-zero within a span.
+    #[cfg(feature = "otel")]
     #[test]
     fn test_trace_id_is_non_zero_within_span() {
         use opentelemetry::trace::{SpanContext, TraceContextExt};

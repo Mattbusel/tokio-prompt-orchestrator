@@ -26,7 +26,7 @@ build-linux:
     CARGO_TARGET_DIR: "${CI_PROJECT_DIR}/target"
   script:
     # web-api: the HTTP server (including the OpenAI-compatible /v1 endpoints)
-    - cargo build --release --locked --features web-api --bin "$BIN"
+    - cargo build --release --locked --features web-api,tantivy --bin "$BIN"
     - ./target/release/$BIN --version
     - sh -c "$SMOKE"
     # Serve for real and answer an OpenAI-style request before publishing.
@@ -88,4 +88,8 @@ test:
     key: cargo-test
     paths: [target/, .cargo-home/]
   script:
-    - cargo test --locked --lib
+    # The lean default build, then every test target and example with the
+    # features they need (rig needs Rust 1.95+, which rust:1 has).
+    - cargo check --locked --lib
+    - cargo test --locked --no-fail-fast --lib --tests --examples --features "full tui mcp self-improving distributed schema tower async-openai genai rig tantivy"
+    - cargo test --locked --doc --features "full tower async-openai genai"

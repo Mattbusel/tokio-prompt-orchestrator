@@ -21,6 +21,8 @@
 
 pub mod loader;
 pub mod validation;
+#[cfg(feature = "hot-reload")]
+#[cfg_attr(docsrs, doc(cfg(feature = "hot-reload")))]
 pub mod watcher;
 
 #[cfg(feature = "schema")]

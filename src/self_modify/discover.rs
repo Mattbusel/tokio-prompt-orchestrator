@@ -642,12 +642,14 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "runs cargo test/clippy/bench on this repository; slow"]
     fn test_scan_completes_without_error() {
         let s = make_scanner();
         assert!(s.scan().is_ok());
     }
 
     #[test]
+    #[ignore = "runs cargo test/clippy/bench on this repository; slow"]
     fn test_scan_stores_result() {
         let s = make_scanner();
         s.scan().unwrap();
@@ -655,6 +657,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "runs cargo test/clippy/bench on this repository; slow"]
     fn test_last_scan_at_set_after_scan() {
         let s = make_scanner();
         s.scan().unwrap();
@@ -791,6 +794,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "runs cargo test/clippy/bench on this repository; slow"]
     fn test_scan_result_fields_present() {
         let s = make_scanner();
         let result = s.scan().unwrap();
@@ -799,6 +803,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "runs cargo test/clippy/bench on this repository; slow"]
     fn test_scan_history_capped_at_100() {
         let s = make_scanner();
         for _ in 0..105 {

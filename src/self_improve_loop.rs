@@ -683,6 +683,7 @@ fn severity_rank(s: &Severity) -> u8 {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::self_tune::telemetry_bus::{PipelineCounters, TelemetryBusConfig};

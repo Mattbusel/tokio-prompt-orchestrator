@@ -66,7 +66,11 @@ impl OpenAiState {
     /// Builds the proxy state; the dedup window comes from `config.dedup_window_secs`.
     pub(super) fn new(config: &ServerConfig) -> Self {
         Self {
-            dedup: Deduplicator::new(Duration::from_secs(config.dedup_window_secs)),
+            dedup: match &config.embedder {
+                Some(embedder) => Deduplicator::new(Duration::from_secs(config.dedup_window_secs))
+                    .with_embedder(std::sync::Arc::clone(embedder), config.semantic_threshold),
+                None => Deduplicator::new(Duration::from_secs(config.dedup_window_secs)),
+            },
             waiters: DashMap::new(),
             failures: DashMap::new(),
             spent_usd: parking_lot::Mutex::new(0.0),
@@ -361,6 +365,9 @@ enum DedupOutcome {
     Joined,
     /// Reused a completed answer from the dedup window.
     Cached,
+    /// Reused the answer to a differently worded prompt with the same
+    /// meaning (semantic dedup), at this cosine similarity.
+    Semantic(f32),
 }
 
 impl DedupOutcome {
@@ -369,6 +376,7 @@ impl DedupOutcome {
             DedupOutcome::Miss => "miss",
             DedupOutcome::Joined => "joined",
             DedupOutcome::Cached => "cached",
+            DedupOutcome::Semantic(_) => "semantic",
         }
     }
 }
@@ -507,8 +515,15 @@ async fn complete(
     let key = hex::encode(Sha256::digest(prompt.as_bytes()));
 
     for _ in 0..MAX_JOIN_ATTEMPTS {
-        match state.openai.dedup.check_and_register(&key).await {
-            DeduplicationResult::Cached(text) => return Ok((text, DedupOutcome::Cached)),
+        let (found, similar) = state.openai.dedup.check_and_register_semantic(&key, &prompt).await;
+        match found {
+            DeduplicationResult::Cached(text) => {
+                let outcome = match similar {
+                    Some(m) => DedupOutcome::Semantic(m.similarity),
+                    None => DedupOutcome::Cached,
+                };
+                return Ok((text, outcome));
+            }
             DeduplicationResult::InProgress => match state.openai.dedup.wait_for_result(&key).await {
                 Some(text) if !crate::enhanced::dedup::is_cancelled_result(&text) => {
                     return Ok((text, DedupOutcome::Joined));
@@ -705,6 +720,231 @@ async fn chat_completions(state: Arc<AppState>, body: axum::body::Bytes) -> Resu
         "x-orchestrator-dedup",
         HeaderValue::from_static(outcome.as_str()),
     );
+    if let DedupOutcome::Semantic(similarity) = outcome {
+        if let Ok(v) = HeaderValue::from_str(&format!("{similarity:.4}")) {
+            resp.headers_mut().insert("x-orchestrator-similarity", v);
+        }
+    }
+    Ok(resp)
+}
+
+// ============================================================================
+// Anthropic Messages API: POST /v1/messages
+// ============================================================================
+
+/// `true` for the Anthropic-compatible path (auth errors use Anthropic's shape).
+pub(super) fn is_anthropic_path(path: &str) -> bool {
+    path == "/v1/messages"
+}
+
+/// The 401 an Anthropic client expects for a missing or wrong key.
+pub(super) fn anthropic_unauthorized() -> Response {
+    anthropic_error(&ApiError::new(
+        StatusCode::UNAUTHORIZED,
+        "authentication_error",
+        "invalid_api_key",
+        "Missing or incorrect API key. Send the orchestrator's key (ORCHESTRATOR_API_KEY) \
+         as 'x-api-key: <key>' or 'Authorization: Bearer <key>'.",
+    ))
+}
+
+/// Render an error in Anthropic's shape:
+/// `{"type": "error", "error": {"type", "message"}}`.
+fn anthropic_error(err: &ApiError) -> Response {
+    let kind = match err.status.as_u16() {
+        400 | 413 | 422 => "invalid_request_error",
+        401 => "authentication_error",
+        403 => "permission_error",
+        404 => "not_found_error",
+        429 => "rate_limit_error",
+        503 | 529 => "overloaded_error",
+        _ => "api_error",
+    };
+    let body = serde_json::json!({
+        "type": "error",
+        "error": {"type": kind, "message": err.message},
+    });
+    let mut resp = (err.status, Json(body)).into_response();
+    if let Some(secs) = err.retry_after_secs {
+        if let Ok(v) = HeaderValue::from_str(&secs.to_string()) {
+            resp.headers_mut().insert(header::RETRY_AFTER, v);
+        }
+    }
+    resp
+}
+
+#[derive(Debug, Deserialize)]
+struct MessagesRequest {
+    #[serde(default)]
+    model: Option<String>,
+    messages: Vec<ChatMessage>,
+    /// A string or an array of text blocks.
+    #[serde(default)]
+    system: Option<serde_json::Value>,
+    #[serde(default)]
+    stream: Option<bool>,
+    #[serde(default)]
+    metadata: Option<MessagesMetadata>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct MessagesMetadata {
+    #[serde(default)]
+    user_id: Option<String>,
+}
+
+/// `POST /v1/messages`: the Anthropic Messages API, answered by the pipeline
+/// with the same dedup, circuit breaker and spend cap as the OpenAI endpoint.
+pub(super) async fn messages_handler(
+    State(state): State<Arc<AppState>>,
+    body: axum::body::Bytes,
+) -> Response {
+    match messages(state, body).await {
+        Ok(resp) => resp,
+        Err(err) => anthropic_error(&err),
+    }
+}
+
+async fn messages(state: Arc<AppState>, body: axum::body::Bytes) -> Result<Response, ApiError> {
+    if state.shutting_down.load(AtomicOrdering::Relaxed) {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "overloaded_error",
+            "shutting_down",
+            "The orchestrator is shutting down.",
+        ));
+    }
+    let req: MessagesRequest = serde_json::from_slice(&body).map_err(|e| {
+        ApiError::invalid(None, format!("Could not parse the request body as a Messages API request: {e}"))
+    })?;
+    for m in &req.messages {
+        if m.role != "user" && m.role != "assistant" {
+            return Err(ApiError::invalid(
+                Some("messages"),
+                format!("Message role must be 'user' or 'assistant', got '{}'.", m.role),
+            ));
+        }
+    }
+    // The system prompt goes first, as a system turn.
+    let mut turns = Vec::with_capacity(req.messages.len() + 1);
+    if let Some(system) = req.system.clone().filter(|s| !s.is_null()) {
+        turns.push(ChatMessage {
+            role: "system".to_string(),
+            content: Some(system),
+        });
+    }
+    turns.extend(req.messages);
+    let prompt = render_prompt(&turns)?;
+
+    if let Some(cap) = state.config.max_spend_usd {
+        let spent = *state.openai.spent_usd.lock();
+        if spent >= cap {
+            return Err(ApiError::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limit_error",
+                "insufficient_quota",
+                format!(
+                    "The orchestrator's spend cap of ${cap:.2} is reached (estimated spend ${spent:.4}). \
+                     Restart it or raise --max-spend."
+                ),
+            ));
+        }
+    }
+
+    let id = format!("msg_{}", Uuid::new_v4().simple());
+    let session = req
+        .metadata
+        .and_then(|m| m.user_id)
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| format!("anthropic-{id}"));
+    debug!(
+        request_id = %id,
+        requested_model = req.model.as_deref().unwrap_or(""),
+        "POST /v1/messages"
+    );
+
+    let input_tokens = prompt_tokens(&state.config.model, &prompt);
+    let (text, outcome) = complete(&state, &id, session, prompt).await?;
+    let output_tokens = completion_tokens(&state.config.model, &text);
+    let model = state.config.model.clone();
+
+    let mut resp = if req.stream.unwrap_or(false) {
+        let mut events: Vec<(&'static str, serde_json::Value)> = vec![
+            (
+                "message_start",
+                serde_json::json!({
+                    "type": "message_start",
+                    "message": {
+                        "id": id,
+                        "type": "message",
+                        "role": "assistant",
+                        "model": model,
+                        "content": [],
+                        "stop_reason": null,
+                        "stop_sequence": null,
+                        "usage": {"input_tokens": input_tokens, "output_tokens": 0},
+                    },
+                }),
+            ),
+            (
+                "content_block_start",
+                serde_json::json!({
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "text", "text": ""},
+                }),
+            ),
+            ("ping", serde_json::json!({"type": "ping"})),
+        ];
+        for piece in text.split_inclusive(' ') {
+            events.push((
+                "content_block_delta",
+                serde_json::json!({
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": piece},
+                }),
+            ));
+        }
+        events.push((
+            "content_block_stop",
+            serde_json::json!({"type": "content_block_stop", "index": 0}),
+        ));
+        events.push((
+            "message_delta",
+            serde_json::json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn", "stop_sequence": null},
+                "usage": {"output_tokens": output_tokens},
+            }),
+        ));
+        events.push(("message_stop", serde_json::json!({"type": "message_stop"})));
+        let frames = events
+            .into_iter()
+            .map(|(name, data)| Ok::<_, std::convert::Infallible>(Event::default().event(name).data(data.to_string())));
+        Sse::new(stream::iter(frames)).into_response()
+    } else {
+        Json(serde_json::json!({
+            "id": id,
+            "type": "message",
+            "role": "assistant",
+            "model": model,
+            "content": [{"type": "text", "text": text}],
+            "stop_reason": "end_turn",
+            "stop_sequence": null,
+            "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+        }))
+        .into_response()
+    };
+    resp.headers_mut().insert(
+        "x-orchestrator-dedup",
+        HeaderValue::from_static(outcome.as_str()),
+    );
+    if let DedupOutcome::Semantic(similarity) = outcome {
+        if let Ok(v) = HeaderValue::from_str(&format!("{similarity:.4}")) {
+            resp.headers_mut().insert("x-orchestrator-similarity", v);
+        }
+    }
     Ok(resp)
 }
 

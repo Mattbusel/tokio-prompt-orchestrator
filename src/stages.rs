@@ -84,7 +84,7 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn, Span};
+use tracing::{info, warn, Instrument};
 
 /// Default timeout for a single inference call (seconds).
 const DEFAULT_INFERENCE_TIMEOUT_SECS: u64 = 120;
@@ -267,6 +267,120 @@ pub fn spawn_pipeline_with_retry(
     worker: Arc<dyn ModelWorker>,
     retry: InferenceRetry,
 ) -> PipelineHandles {
+    spawn_pipeline_with(
+        worker,
+        PipelineOptions {
+            retry,
+            ..PipelineOptions::default()
+        },
+    )
+}
+
+/// Options for [`spawn_pipeline_with`].
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct PipelineOptions {
+    /// Retries for transient model errors. Off by default.
+    pub retry: InferenceRetry,
+    /// Ground prompts in your documents: the Retrieve stage asks this for
+    /// the passages most relevant to each prompt. `None` (the default) sends
+    /// prompts as written.
+    pub retriever: Option<Arc<dyn crate::retrieval::Retriever>>,
+    /// Most passages put in front of a question. Default 4.
+    pub retrieval_limit: usize,
+    /// Longest the Retrieve stage waits for the retriever before sending
+    /// the prompt without context. Default 2 seconds.
+    pub retrieval_timeout: std::time::Duration,
+}
+
+impl Default for PipelineOptions {
+    fn default() -> Self {
+        Self {
+            retry: InferenceRetry::disabled(),
+            retriever: None,
+            retrieval_limit: 4,
+            retrieval_timeout: std::time::Duration::from_secs(2),
+        }
+    }
+}
+
+impl PipelineOptions {
+    /// Default options with `retriever` set.
+    pub fn with_retriever(retriever: Arc<dyn crate::retrieval::Retriever>) -> Self {
+        Self {
+            retriever: Some(retriever),
+            ..Self::default()
+        }
+    }
+}
+
+/// What the Retrieve stage needs from [`PipelineOptions`].
+#[derive(Clone)]
+struct RetrievalOptions {
+    retriever: Arc<dyn crate::retrieval::Retriever>,
+    limit: usize,
+    timeout: std::time::Duration,
+}
+
+impl RetrievalOptions {
+    fn from_options(options: &PipelineOptions) -> Option<Self> {
+        options.retriever.as_ref().map(|retriever| Self {
+            retriever: Arc::clone(retriever),
+            limit: options.retrieval_limit.max(1),
+            timeout: options.retrieval_timeout,
+        })
+    }
+
+    /// Formatted context for `query`, or empty when nothing relevant was
+    /// found or the retriever failed or timed out. Retrieval problems never
+    /// drop a request.
+    async fn context_for(&self, query: &str) -> String {
+        match tokio::time::timeout(self.timeout, self.retriever.retrieve(query, self.limit)).await {
+            Ok(Ok(passages)) => {
+                metrics::inc_request("retrieval");
+                crate::retrieval::format_context(&passages)
+            }
+            Ok(Err(e)) => {
+                warn!(target: "orchestrator::pipeline", error = %e, "retrieval failed; sending the prompt without context");
+                metrics::inc_error("rag", "retrieval_failed");
+                String::new()
+            }
+            Err(_) => {
+                warn!(target: "orchestrator::pipeline", timeout_ms = self.timeout.as_millis() as u64, "retrieval timed out; sending the prompt without context");
+                metrics::inc_error("rag", "retrieval_timeout");
+                String::new()
+            }
+        }
+    }
+}
+
+/// Spawn the default 5-stage pipeline with [`PipelineOptions`]: retries,
+/// and a [`Retriever`](crate::retrieval::Retriever) that grounds prompts in
+/// your documents.
+///
+/// ```no_run
+/// # #[cfg(feature = "tantivy")]
+/// # async fn run() -> Result<(), tokio_prompt_orchestrator::OrchestratorError> {
+/// use std::sync::Arc;
+/// use tokio_prompt_orchestrator::{
+///     integrations::TantivyRetriever, spawn_pipeline_with, EchoWorker, PipelineOptions,
+/// };
+///
+/// let docs = TantivyRetriever::index_dir("./docs")?;
+/// let handles = spawn_pipeline_with(
+///     Arc::new(EchoWorker::new()),
+///     PipelineOptions::with_retriever(Arc::new(docs)),
+/// );
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # Panics
+///
+/// This function never panics.
+pub fn spawn_pipeline_with(worker: Arc<dyn ModelWorker>, options: PipelineOptions) -> PipelineHandles {
+    let retrieval = RetrievalOptions::from_options(&options);
+    let retry = options.retry;
     // Channel creation with specified buffer sizes
     let (input_tx, input_rx) = mpsc::channel::<PromptRequest>(512);
     let (rag_tx, rag_rx) = mpsc::channel::<RagOutput>(512);
@@ -284,7 +398,7 @@ pub fn spawn_pipeline_with_retry(
 
     // Spawn each stage
     let cancel = CancellationToken::new();
-    let rag = tokio::spawn(rag_stage(input_rx, rag_tx, Arc::clone(&dlq), cancel.child_token()));
+    let rag = tokio::spawn(rag_stage(input_rx, rag_tx, Arc::clone(&dlq), cancel.child_token(), retrieval));
     let assemble = tokio::spawn(assemble_stage(rag_rx, assemble_tx, Arc::clone(&dlq), cancel.child_token()));
     let inference = tokio::spawn(inference_stage(
         assemble_rx,
@@ -433,7 +547,8 @@ pub fn spawn_pipeline_with_config(
         };
 
     let cancel2 = CancellationToken::new();
-    let rag = tokio::spawn(rag_stage(input_rx, rag_tx, Arc::clone(&dlq), cancel2.child_token()));
+    let retrieval: Option<RetrievalOptions> = None;
+    let rag = tokio::spawn(rag_stage(input_rx, rag_tx, Arc::clone(&dlq), cancel2.child_token(), retrieval));
     let assemble = tokio::spawn(assemble_stage(rag_rx, assemble_tx, Arc::clone(&dlq), cancel2.child_token()));
 
     // Multi-worker pool: spawn N inference tasks that all read from the same
@@ -518,6 +633,7 @@ async fn rag_stage(
     tx: mpsc::Sender<RagOutput>,
     dlq: Arc<DeadLetterQueue>,
     cancel: CancellationToken,
+    retrieval: Option<RetrievalOptions>,
 ) {
     info!(target: "orchestrator::pipeline", "RAG stage started");
 
@@ -543,7 +659,6 @@ async fn rag_stage(
             outcome = tracing::field::Empty,
             error_kind = tracing::field::Empty,
         );
-        let _enter = span.enter();
 
         tracing::info!(
             target: "orchestrator::pipeline",
@@ -568,31 +683,30 @@ async fn rag_stage(
             }
         }
 
-        // Simulate RAG work (DB query, embedding search, etc.)
-        tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
 
         let session = request.session.clone();
         let deadline = request.deadline;
+        // Context only from a configured retriever; without one, nothing is
+        // invented and the prompt reaches the model as the caller wrote it.
+        let context = match &retrieval {
+            Some(r) if !request.is_raw_prompt() => {
+                r.context_for(&request.input).instrument(span.clone()).await
+            }
+            _ => String::new(),
+        };
         let output = RagOutput {
             session: session.clone(),
-            context: if request.is_raw_prompt() {
-                String::new()
-            } else {
-                format!(
-                    "CONTEXT: Retrieved documents for '{}'",
-                    request.input.chars().take(50).collect::<String>()
-                )
-            },
+            context,
             original: request,
             deadline,
         };
 
         let elapsed = start.elapsed();
         metrics::record_stage_latency("rag", elapsed);
-        Span::current().record("duration_ms", elapsed.as_millis() as u64);
-        Span::current().record("outcome", "ok");
+        span.record("duration_ms", elapsed.as_millis() as u64);
+        span.record("outcome", "ok");
 
-        match send_with_shed(&tx, output, PipelineStage::Rag).await {
+        match send_with_shed(&tx, output, PipelineStage::Rag).instrument(span.clone()).await {
             Ok(SendOutcome::Queued) => {}
             Ok(SendOutcome::Shed) => {
                 tracing::trace!(
@@ -665,23 +779,15 @@ async fn assemble_stage(
             outcome = tracing::field::Empty,
             error_kind = tracing::field::Empty,
         );
-        let _enter = span.enter();
 
         metrics::inc_request("assemble");
 
         // Construct prompt from context + user input
         // NOTE: prompt content is NOT logged  -  it is sensitive data
-        let prompt = if rag_output.original.is_raw_prompt() {
+        let prompt = if rag_output.original.is_raw_prompt() || rag_output.context.is_empty() {
             rag_output.original.input.clone()
         } else {
-            format!(
-                "{}
-
-User Query: {}
-
-Assistant:",
-                rag_output.context, rag_output.original.input
-            )
+            crate::retrieval::grounded_prompt(&rag_output.context, &rag_output.original.input)
         };
 
         let output = AssembleOutput {
@@ -693,10 +799,10 @@ Assistant:",
 
         let elapsed = start.elapsed();
         metrics::record_stage_latency("assemble", elapsed);
-        Span::current().record("duration_ms", elapsed.as_millis() as u64);
-        Span::current().record("outcome", "ok");
+        span.record("duration_ms", elapsed.as_millis() as u64);
+        span.record("outcome", "ok");
 
-        match send_with_shed(&tx, output, PipelineStage::Assemble).await {
+        match send_with_shed(&tx, output, PipelineStage::Assemble).instrument(span.clone()).await {
             Ok(SendOutcome::Queued) => {}
             Ok(SendOutcome::Shed) => {
                 tracing::trace!(
@@ -789,7 +895,6 @@ async fn inference_stage(
             outcome = tracing::field::Empty,
             error_kind = tracing::field::Empty,
         );
-        let _enter = span.enter();
 
         metrics::inc_request("inference");
 
@@ -828,7 +933,7 @@ async fn inference_stage(
         // that recovers on a retry counts as one success, not N failures.
         let infer_fut =
             breaker.call(|| async move { retry.run(|| w.infer(&prompt)).await });
-        let cb_result = match tokio::time::timeout(effective_timeout, infer_fut).await {
+        let cb_result = match tokio::time::timeout(effective_timeout, infer_fut.instrument(span.clone())).await {
             Ok(result) => result,
             Err(_elapsed) => {
                 metrics::inc_inference_timeout();
@@ -864,8 +969,8 @@ async fn inference_stage(
                     }
                 }
                 metrics::record_stage_latency("inference", elapsed);
-                Span::current().record("duration_ms", elapsed.as_millis() as u64);
-                Span::current().record("outcome", "ok");
+                span.record("duration_ms", elapsed.as_millis() as u64);
+                span.record("outcome", "ok");
 
                 let output = InferenceOutput {
                     session: assemble_output.session,
@@ -873,7 +978,7 @@ async fn inference_stage(
                     tokens,
                 };
 
-                match send_with_shed(&tx, output, PipelineStage::Inference).await {
+                match send_with_shed(&tx, output, PipelineStage::Inference).instrument(span.clone()).await {
                     Ok(SendOutcome::Queued) => {}
                     Ok(SendOutcome::Shed) => {
                         tracing::trace!(
@@ -907,9 +1012,9 @@ async fn inference_stage(
             Err(crate::enhanced::circuit_breaker::CircuitBreakerError::Open) => {
                 let elapsed = start.elapsed();
                 metrics::record_stage_latency("inference", elapsed);
-                Span::current().record("duration_ms", elapsed.as_millis() as u64);
-                Span::current().record("outcome", "err");
-                Span::current().record("error_kind", "circuit_open");
+                span.record("duration_ms", elapsed.as_millis() as u64);
+                span.record("outcome", "err");
+                span.record("error_kind", "circuit_open");
 
                 warn!(
                     target: "orchestrator::pipeline",
@@ -930,9 +1035,9 @@ async fn inference_stage(
             Err(crate::enhanced::circuit_breaker::CircuitBreakerError::Failed(e)) => {
                 let elapsed = start.elapsed();
                 metrics::record_stage_latency("inference", elapsed);
-                Span::current().record("duration_ms", elapsed.as_millis() as u64);
-                Span::current().record("outcome", "err");
-                Span::current().record("error_kind", "inference_failure");
+                span.record("duration_ms", elapsed.as_millis() as u64);
+                span.record("outcome", "err");
+                span.record("error_kind", "inference_failure");
 
                 warn!(
                     target: "orchestrator::pipeline",
@@ -1010,7 +1115,6 @@ async fn inference_stage_pool_worker(
             outcome = tracing::field::Empty,
             error_kind = tracing::field::Empty,
         );
-        let _enter = span.enter();
 
         metrics::inc_request("inference");
 
@@ -1044,7 +1148,7 @@ async fn inference_stage_pool_worker(
         // that recovers on a retry counts as one success, not N failures.
         let infer_fut =
             breaker.call(|| async move { retry.run(|| w.infer(&prompt)).await });
-        let cb_result = match tokio::time::timeout(effective_timeout, infer_fut).await {
+        let cb_result = match tokio::time::timeout(effective_timeout, infer_fut.instrument(span.clone())).await {
             Ok(result) => result,
             Err(_elapsed) => {
                 metrics::inc_inference_timeout();
@@ -1078,8 +1182,8 @@ async fn inference_stage_pool_worker(
                     }
                 }
                 metrics::record_stage_latency("inference", elapsed);
-                tracing::Span::current().record("duration_ms", elapsed.as_millis() as u64);
-                tracing::Span::current().record("outcome", "ok");
+                span.record("duration_ms", elapsed.as_millis() as u64);
+                span.record("outcome", "ok");
 
                 let output = InferenceOutput {
                     session: assemble_output.session,
@@ -1087,7 +1191,7 @@ async fn inference_stage_pool_worker(
                     tokens,
                 };
 
-                match send_with_shed(&tx, output, PipelineStage::Inference).await {
+                match send_with_shed(&tx, output, PipelineStage::Inference).instrument(span.clone()).await {
                     Ok(SendOutcome::Queued) => {}
                     Ok(SendOutcome::Shed) => {
                         metrics::inc_shed("inference");
@@ -1115,9 +1219,9 @@ async fn inference_stage_pool_worker(
             Err(crate::enhanced::circuit_breaker::CircuitBreakerError::Open) => {
                 let elapsed = start.elapsed();
                 metrics::record_stage_latency("inference", elapsed);
-                tracing::Span::current().record("duration_ms", elapsed.as_millis() as u64);
-                tracing::Span::current().record("outcome", "err");
-                tracing::Span::current().record("error_kind", "circuit_open");
+                span.record("duration_ms", elapsed.as_millis() as u64);
+                span.record("outcome", "err");
+                span.record("error_kind", "circuit_open");
                 warn!(
                     target: "orchestrator::pipeline",
                     session_id = %session_id,
@@ -1137,9 +1241,9 @@ async fn inference_stage_pool_worker(
             Err(crate::enhanced::circuit_breaker::CircuitBreakerError::Failed(e)) => {
                 let elapsed = start.elapsed();
                 metrics::record_stage_latency("inference", elapsed);
-                tracing::Span::current().record("duration_ms", elapsed.as_millis() as u64);
-                tracing::Span::current().record("outcome", "err");
-                tracing::Span::current().record("error_kind", "inference_failure");
+                span.record("duration_ms", elapsed.as_millis() as u64);
+                span.record("outcome", "err");
+                span.record("error_kind", "inference_failure");
                 warn!(
                     target: "orchestrator::pipeline",
                     session_id = %session_id,
@@ -1204,7 +1308,6 @@ async fn post_stage(
             outcome = tracing::field::Empty,
             error_kind = tracing::field::Empty,
         );
-        let _enter = span.enter();
 
         metrics::inc_request("post");
 
@@ -1219,10 +1322,10 @@ async fn post_stage(
 
         let elapsed = start.elapsed();
         metrics::record_stage_latency("post", elapsed);
-        Span::current().record("duration_ms", elapsed.as_millis() as u64);
-        Span::current().record("outcome", "ok");
+        span.record("duration_ms", elapsed.as_millis() as u64);
+        span.record("outcome", "ok");
 
-        match send_with_shed(&tx, output, PipelineStage::Post).await {
+        match send_with_shed(&tx, output, PipelineStage::Post).instrument(span.clone()).await {
             Ok(SendOutcome::Queued) => {}
             Ok(SendOutcome::Shed) => {
                 tracing::trace!(
@@ -1297,12 +1400,11 @@ async fn stream_stage(
             outcome = tracing::field::Empty,
             error_kind = tracing::field::Empty,
         );
-        let _enter = span.enter();
 
         metrics::inc_request("stream");
 
         // Delegate to the pluggable sink — Transient errors are logged, Fatal errors break the loop.
-        match sink.emit(&post_output.session, &post_output.text).await {
+        match sink.emit(&post_output.session, &post_output.text).instrument(span.clone()).await {
             Ok(()) => {}
             Err(SinkError::Transient(ref msg)) => {
                 warn!(
@@ -1312,7 +1414,7 @@ async fn stream_stage(
                     error = %msg,
                     "OutputSink::emit transient error, continuing"
                 );
-                Span::current().record("error_kind", "sink_error_transient");
+                span.record("error_kind", "sink_error_transient");
             }
             Err(SinkError::Fatal(ref msg)) => {
                 tracing::error!(
@@ -1322,15 +1424,15 @@ async fn stream_stage(
                     error = %msg,
                     "OutputSink::emit fatal error — stopping stream stage"
                 );
-                Span::current().record("error_kind", "sink_error_fatal");
+                span.record("error_kind", "sink_error_fatal");
                 break;
             }
         }
 
         let elapsed = start.elapsed();
         metrics::record_stage_latency("stream", elapsed);
-        Span::current().record("duration_ms", elapsed.as_millis() as u64);
-        Span::current().record("outcome", "ok");
+        span.record("duration_ms", elapsed.as_millis() as u64);
+        span.record("outcome", "ok");
 
         // Forward to output channel (best-effort, non-blocking)
         if output_tx.try_send(post_output).is_err() {
@@ -1438,7 +1540,6 @@ async fn rag_stage_tracked(
     cancel: CancellationToken,
 ) {
     use std::sync::atomic::Ordering;
-    use std::time::Duration;
 
     info!(target: "orchestrator::pipeline", "RAG stage (intelligence-tracked) started");
 
@@ -1466,7 +1567,6 @@ async fn rag_stage_tracked(
             duration_ms = tracing::field::Empty,
             outcome = tracing::field::Empty,
         );
-        let _enter = span.enter();
 
         metrics::inc_request("rag");
 
@@ -1476,30 +1576,23 @@ async fn rag_stage_tracked(
         let rps = count as f64 / elapsed_secs;
         bridge.notify_request(rps);
 
-        tokio::time::sleep(Duration::from_millis(5)).await;
 
         let session = request.session.clone();
         let deadline = request.deadline;
         let output = RagOutput {
             session: session.clone(),
-            context: if request.is_raw_prompt() {
-                String::new()
-            } else {
-                format!(
-                    "CONTEXT: Retrieved documents for '{}'",
-                    request.input.chars().take(50).collect::<String>()
-                )
-            },
+            // No retriever on this path: the prompt is sent as written.
+            context: String::new(),
             original: request,
             deadline,
         };
 
         let elapsed = start.elapsed();
         metrics::record_stage_latency("rag", elapsed);
-        Span::current().record("duration_ms", elapsed.as_millis() as u64);
-        Span::current().record("outcome", "ok");
+        span.record("duration_ms", elapsed.as_millis() as u64);
+        span.record("outcome", "ok");
 
-        match send_with_shed(&tx, output, PipelineStage::Rag).await {
+        match send_with_shed(&tx, output, PipelineStage::Rag).instrument(span.clone()).await {
             Ok(SendOutcome::Queued) => {}
             Ok(SendOutcome::Shed) => {
                 tracing::trace!(
@@ -1569,13 +1662,15 @@ async fn inference_stage_with_intelligence(
             outcome = tracing::field::Empty,
             error_kind = tracing::field::Empty,
         );
-        let _enter = span.enter();
 
         metrics::inc_request("inference");
 
         let prompt = assemble_output.prompt.clone();
         let w = Arc::clone(&worker);
-        let cb_result = breaker.call(|| async move { w.infer(&prompt).await }).await;
+        let cb_result = breaker
+            .call(|| async move { w.infer(&prompt).await })
+            .instrument(span.clone())
+            .await;
 
         let elapsed = start.elapsed();
         let latency_ms = elapsed.as_secs_f64() * 1000.0;
@@ -1583,8 +1678,8 @@ async fn inference_stage_with_intelligence(
         match cb_result {
             Ok(tokens) => {
                 metrics::record_stage_latency("inference", elapsed);
-                Span::current().record("duration_ms", elapsed.as_millis() as u64);
-                Span::current().record("outcome", "ok");
+                span.record("duration_ms", elapsed.as_millis() as u64);
+                span.record("outcome", "ok");
 
                 // Notify bridge: quality estimation + bandit update.
                 let response_text = tokens.join(" ");
@@ -1603,7 +1698,7 @@ async fn inference_stage_with_intelligence(
                     tokens,
                 };
 
-                match send_with_shed(&tx, output, PipelineStage::Inference).await {
+                match send_with_shed(&tx, output, PipelineStage::Inference).instrument(span.clone()).await {
                     Ok(SendOutcome::Queued) => {}
                     Ok(SendOutcome::Shed) => {
                         tracing::trace!(
@@ -1629,9 +1724,9 @@ async fn inference_stage_with_intelligence(
             }
             Err(crate::enhanced::circuit_breaker::CircuitBreakerError::Open) => {
                 metrics::record_stage_latency("inference", elapsed);
-                Span::current().record("duration_ms", elapsed.as_millis() as u64);
-                Span::current().record("outcome", "err");
-                Span::current().record("error_kind", "circuit_open");
+                span.record("duration_ms", elapsed.as_millis() as u64);
+                span.record("outcome", "err");
+                span.record("error_kind", "circuit_open");
                 bridge.notify_completion(
                     &worker_name,
                     "pipeline",
@@ -1652,9 +1747,9 @@ async fn inference_stage_with_intelligence(
             }
             Err(crate::enhanced::circuit_breaker::CircuitBreakerError::Failed(e)) => {
                 metrics::record_stage_latency("inference", elapsed);
-                Span::current().record("duration_ms", elapsed.as_millis() as u64);
-                Span::current().record("outcome", "err");
-                Span::current().record("error_kind", "inference_failure");
+                span.record("duration_ms", elapsed.as_millis() as u64);
+                span.record("outcome", "err");
+                span.record("error_kind", "inference_failure");
                 bridge.notify_completion(
                     &worker_name,
                     "pipeline",
@@ -1680,11 +1775,123 @@ async fn inference_stage_with_intelligence(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::{EchoWorker, SessionId};
     use std::collections::HashMap;
     use std::sync::Mutex;
+
+    /// Worker that records the exact prompt it was given.
+    struct RecordingWorker(Arc<Mutex<Vec<String>>>);
+
+    #[async_trait::async_trait]
+    impl ModelWorker for RecordingWorker {
+        async fn infer(&self, prompt: &str) -> Result<Vec<String>, crate::OrchestratorError> {
+            if let Ok(mut seen) = self.0.lock() {
+                seen.push(prompt.to_string());
+            }
+            Ok(vec!["ok".to_string()])
+        }
+    }
+
+    #[tokio::test]
+    async fn test_prompt_reaches_the_worker_verbatim() {
+        // The default pipeline has no retrieval step, so it must not wrap the
+        // caller's prompt in invented context: providers bill for every token.
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let handles = spawn_pipeline(Arc::new(RecordingWorker(Arc::clone(&seen))));
+        let mut out = handles.take_output_rx().await.expect("output receiver");
+        let request = PromptRequest {
+            session: SessionId::new("s"),
+            request_id: "r-verbatim".to_string(),
+            input: "What is 2+2?".to_string(),
+            meta: HashMap::new(),
+            deadline: None,
+        };
+        handles.input_tx.send(request).await.expect("send");
+        tokio::time::timeout(std::time::Duration::from_secs(5), out.recv())
+            .await
+            .expect("pipeline answers")
+            .expect("output");
+        let seen = seen.lock().expect("lock").clone();
+        assert_eq!(seen, vec!["What is 2+2?".to_string()]);
+    }
+
+    #[derive(Debug)]
+    enum FixedRetriever {
+        Found,
+        Fails,
+        Hangs,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::retrieval::Retriever for FixedRetriever {
+        async fn retrieve(
+            &self,
+            _query: &str,
+            _limit: usize,
+        ) -> Result<Vec<crate::retrieval::Passage>, crate::OrchestratorError> {
+            match self {
+                Self::Found => Ok(vec![crate::retrieval::Passage {
+                    text: "Refunds are issued within 14 days.".into(),
+                    source: Some("policy.md".into()),
+                    score: 1.0,
+                }]),
+                Self::Fails => Err(crate::OrchestratorError::Other("index offline".into())),
+                Self::Hangs => {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    Ok(vec![])
+                }
+            }
+        }
+    }
+
+    async fn prompt_seen_with(retriever: FixedRetriever) -> String {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let options = PipelineOptions {
+            retrieval_timeout: std::time::Duration::from_millis(100),
+            ..PipelineOptions::with_retriever(Arc::new(retriever))
+        };
+        let handles = spawn_pipeline_with(Arc::new(RecordingWorker(Arc::clone(&seen))), options);
+        let mut out = handles.take_output_rx().await.expect("output receiver");
+        handles
+            .input_tx
+            .send(PromptRequest {
+                session: SessionId::new("s"),
+                request_id: "r".into(),
+                input: "How long do refunds take?".into(),
+                meta: HashMap::new(),
+                deadline: None,
+            })
+            .await
+            .expect("send");
+        tokio::time::timeout(std::time::Duration::from_secs(5), out.recv())
+            .await
+            .expect("pipeline answers")
+            .expect("output");
+        let seen = seen.lock().expect("lock");
+        seen[0].clone()
+    }
+
+    #[tokio::test]
+    async fn test_retrieved_passages_reach_the_model_with_their_source() {
+        let prompt = prompt_seen_with(FixedRetriever::Found).await;
+        assert!(prompt.contains("[1] (policy.md) Refunds are issued within 14 days."), "{prompt}");
+        assert!(prompt.ends_with("Question: How long do refunds take?"), "{prompt}");
+    }
+
+    #[tokio::test]
+    async fn test_failing_retriever_sends_the_prompt_unchanged() {
+        assert_eq!(prompt_seen_with(FixedRetriever::Fails).await, "How long do refunds take?");
+    }
+
+    #[tokio::test]
+    async fn test_slow_retriever_times_out_and_sends_the_prompt_unchanged() {
+        let started = std::time::Instant::now();
+        assert_eq!(prompt_seen_with(FixedRetriever::Hangs).await, "How long do refunds take?");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
 
     //  OutputSink helpers
 

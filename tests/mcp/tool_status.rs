@@ -2,6 +2,7 @@
 //!
 //! Verifies that metrics collection and status reporting work correctly
 //! through the pipeline lifecycle.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use tokio_prompt_orchestrator::metrics;
 

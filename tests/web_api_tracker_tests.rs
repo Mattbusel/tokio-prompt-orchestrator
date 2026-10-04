@@ -16,6 +16,7 @@
 //!   4. Verifying 404 for a completely unknown ID (which is the same code path
 //!      that runs after eviction).
 //!   5. Verifying the server stays healthy after repeated 404 polls (no panic).
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 #![cfg(feature = "web-api")]
 
@@ -59,11 +60,12 @@ async fn spawn_server_with_output() -> (
         port,
         max_request_size: 1024 * 1024,
         timeout_seconds: 2,
+        ..ServerConfig::default()
     };
 
     tokio::spawn(async move {
         let _ =
-            tokio_prompt_orchestrator::web_api::start_server(config, pipeline_tx, output_rx).await;
+            tokio_prompt_orchestrator::web_api::start_server(config, pipeline_tx, output_rx, std::sync::Arc::new(tokio_prompt_orchestrator::DeadLetterQueue::new(100)), tokio_prompt_orchestrator::enhanced::CircuitBreaker::new(5, 0.8, std::time::Duration::from_secs(60)), None).await;
     });
 
     tokio::time::sleep(Duration::from_millis(300)).await;

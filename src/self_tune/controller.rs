@@ -44,39 +44,27 @@ use crate::self_tune::telemetry_bus::{StageMetrics, TelemetrySnapshot};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ParameterId {
     /// Buffer capacity for pipeline stage 1 (RAG).
-    /// Buffer capacity for pipeline stage 1 (RAG).
     ChannelBufStage1,
-    /// Buffer capacity for pipeline stage 2 (Assemble).
     /// Buffer capacity for pipeline stage 2 (Assemble).
     ChannelBufStage2,
     /// Buffer capacity for pipeline stage 3 (Inference).
-    /// Buffer capacity for pipeline stage 3 (Inference).
     ChannelBufStage3,
-    /// Buffer capacity for pipeline stage 4 (Post-process).
     /// Buffer capacity for pipeline stage 4 (Post-process).
     ChannelBufStage4,
     /// Buffer capacity for pipeline stage 5 (Stream).
-    /// Buffer capacity for pipeline stage 5 (Stream).
     ChannelBufStage5,
-    /// Fraction of queue capacity at which load shedding activates.
     /// Fraction of queue capacity at which load shedding activates.
     BackpressureShedThreshold,
     /// Number of consecutive failures before the circuit breaker opens.
-    /// Number of consecutive failures before the circuit breaker opens.
     CircuitBreakerFailureThreshold,
-    /// Minimum success rate required to keep the circuit breaker closed.
     /// Minimum success rate required to keep the circuit breaker closed.
     CircuitBreakerSuccessRate,
     /// Per-request timeout in milliseconds enforced by the circuit breaker.
-    /// Per-request timeout in milliseconds enforced by the circuit breaker.
     CircuitBreakerTimeoutMs,
-    /// Time-to-live in milliseconds for deduplication cache entries.
     /// Time-to-live in milliseconds for deduplication cache entries.
     DedupTtlMs,
     /// Token refill rate (tokens per second) for the rate limiter.
-    /// Token refill rate (tokens per second) for the rate limiter.
     RateLimiterRefillRate,
-    /// Interval in milliseconds between priority-queue promotion sweeps.
     /// Interval in milliseconds between priority-queue promotion sweeps.
     PriorityQueuePromotionIntervalMs,
     /// Maximum number of local autoscaler instances.
@@ -103,7 +91,6 @@ impl ParameterId {
         ]
     }
 
-    /// Return the canonical snake_case name for this parameter.
     /// Return the canonical snake_case name for this parameter.
     pub fn name(self) -> &'static str {
         match self {

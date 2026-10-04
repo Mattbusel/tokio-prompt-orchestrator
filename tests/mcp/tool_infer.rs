@@ -48,6 +48,7 @@ async fn test_pipeline_accepts_multiple_sequential_requests() {
             request_id: format!("req-{i}"),
             input: format!("prompt number {i}"),
             meta: HashMap::new(),
+            deadline: None,
         };
         let result = handles.input_tx.send(request).await;
         assert!(result.is_ok(), "request {i} should be accepted");

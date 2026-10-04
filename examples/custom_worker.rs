@@ -9,6 +9,7 @@
 //! word in the input prompt and returns the result as tokens.  It shows every
 //! method you may need to override when building a real custom backend
 //! (e.g. a local model server, a proprietary API, or a mock for testing).
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use async_trait::async_trait;
 use futures::stream;

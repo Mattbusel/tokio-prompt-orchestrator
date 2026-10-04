@@ -548,9 +548,9 @@ impl OrchestratorMcp {
     async fn dump_dlq(&self, Parameters(params): Parameters<DumpDlqParams>) -> String {
         let limit = params.limit.unwrap_or(10).min(1000);
 
-        // Peek at the DLQ by draining then re-inserting (DLQ drain is destructive;
-        // we drain, take what we need, and push remaining back).
-        let all = self.dlq.drain();
+        // Read without draining, so concurrent drops are never lost or reordered
+        // and DLQ subscribers are not sent every entry again.
+        let all = self.dlq.snapshot();
         let total = all.len();
         let entries: Vec<_> = all.iter().rev().take(limit).collect();
 
@@ -570,10 +570,6 @@ impl OrchestratorMcp {
             })
             .collect();
 
-        // Re-populate the DLQ with the entries we drained (maintaining capacity).
-        for req in all {
-            self.dlq.push(req);
-        }
 
         serde_json::to_string_pretty(&serde_json::json!({
             "total_in_dlq": total,

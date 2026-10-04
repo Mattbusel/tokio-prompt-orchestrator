@@ -403,7 +403,7 @@ mod tests {
         let p = HelixFeedbackPusher::new(cfg);
 
         // First high-pressure call: will attempt push and fail.
-        let first = p.maybe_push(0.9).await;
+        let _ = p.maybe_push(0.9).await;
         // May be Ok or Err depending on whether port 1 refuses or times out.
         // Either way: the tier is now recorded as High.
 

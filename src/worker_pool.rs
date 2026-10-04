@@ -389,13 +389,9 @@ mod tests {
     #[tokio::test]
     async fn stats_track_completed_count() {
         let pool = make_pool(1, 4);
-        let rxs: Vec<_> = (0u32..5).map(|_| {
-            let pool_ref = &pool;
-            async move { pool_ref.submit(1, 0).await }
-        }).collect();
         let mut receivers = Vec::new();
-        for f in rxs {
-            receivers.push(f.await);
+        for _ in 0u32..5 {
+            receivers.push(pool.submit(1, 0).await);
         }
         for rx in receivers {
             rx.await.expect("receiver dropped");

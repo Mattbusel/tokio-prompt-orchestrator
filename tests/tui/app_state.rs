@@ -2,7 +2,8 @@
 
 use std::time::Duration;
 use tokio_prompt_orchestrator::tui::app::{
-    App, CircuitState, LOG_ENTRIES_CAP, STAGE_BUDGETS_MS, STAGE_NAMES, THROUGHPUT_HISTORY_CAP,
+    App, CircuitState, DEFAULT_STAGE_BUDGETS_MS, LOG_ENTRIES_CAP, STAGE_NAMES,
+    THROUGHPUT_HISTORY_CAP,
 };
 use tokio_prompt_orchestrator::tui::events::{apply_event, InputEvent};
 use tokio_prompt_orchestrator::tui::metrics::MockMetrics;
@@ -126,7 +127,7 @@ fn test_app_help_toggle() {
 
 #[test]
 fn test_stage_budgets_are_positive() {
-    for (i, &budget) in STAGE_BUDGETS_MS.iter().enumerate() {
+    for (i, &budget) in DEFAULT_STAGE_BUDGETS_MS.iter().enumerate() {
         assert!(
             budget > 0.0,
             "Stage {} budget must be positive, got {}",
@@ -138,7 +139,7 @@ fn test_stage_budgets_are_positive() {
 
 #[test]
 fn test_stage_names_and_budgets_aligned() {
-    assert_eq!(STAGE_NAMES.len(), STAGE_BUDGETS_MS.len());
+    assert_eq!(STAGE_NAMES.len(), DEFAULT_STAGE_BUDGETS_MS.len());
     assert_eq!(STAGE_NAMES.len(), 5);
 }
 

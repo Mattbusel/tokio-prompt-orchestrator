@@ -293,8 +293,8 @@ mod tests {
 
     #[test]
     fn test_atomic_f64_roundtrip_negative() {
-        let a = AtomicF64::new(-3.14);
-        assert!((a.load() - (-3.14)).abs() < f64::EPSILON);
+        let a = AtomicF64::new(-2.5);
+        assert!((a.load() - (-2.5)).abs() < f64::EPSILON);
     }
 
     #[test]

@@ -7,6 +7,7 @@
 //! - Empty API key construction
 //! - Multiple sequential requests through mocked backends
 //! - Builder pattern edge cases (Default trait, temperature, top_p)
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::sync::Mutex;
 use std::time::Duration;

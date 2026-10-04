@@ -629,6 +629,7 @@ pub fn compute_latency_stats(samples: &mut [u64]) -> LatencyStats {
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;

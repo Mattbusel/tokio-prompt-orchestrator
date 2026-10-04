@@ -36,7 +36,10 @@ pub use adaptive_timeout::AdaptiveTimeout;
 pub use bulkhead::{Bulkhead, BulkheadPermit};
 pub use cache::{cache_key, CacheLayer};
 pub use circuit_breaker::{CircuitBreaker, CircuitStatus};
-pub use dedup::{dedup_key, DeduplicationResult, DeduplicationToken, Deduplicator, DEDUP_CANCELLED_SENTINEL};
+pub use dedup::{
+    dedup_key, same_specifics, DeduplicationResult, DeduplicationToken, Deduplicator, SemanticMatch,
+    DEDUP_CANCELLED_SENTINEL, DEFAULT_SEMANTIC_MAX_ENTRIES,
+};
 pub use dlq_replay::{DlqReplayScheduler, ReplayEntry};
 pub use priority::{Priority, PriorityQueue, QueueStats};
 pub use rate_limit::RateLimiter;

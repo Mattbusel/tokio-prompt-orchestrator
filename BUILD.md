@@ -72,7 +72,7 @@ INFO tokio_prompt_orchestrator::stages: Inference stage started
 INFO tokio_prompt_orchestrator::stages: Post stage started
 INFO tokio_prompt_orchestrator::stages: Stream stage started
 INFO tokio_prompt_orchestrator: 📨 Sending 10 demo requests
-INFO tokio_prompt_orchestrator::stages: 📤 STREAM OUTPUT: CONTEXT: Retrieved documents for 'What is the capital of France?' User Query: What is the capital of France? Assistant: What is the capital of France?
+INFO tokio_prompt_orchestrator::stages: 📤 STREAM OUTPUT: What is the capital of France?
 ...
 INFO tokio_prompt_orchestrator: ✅ All requests sent
 INFO tokio_prompt_orchestrator: ⏳ Waiting for pipeline to drain...

@@ -6,6 +6,7 @@
 //! over HTTP the way an OpenAI client would.
 //!
 //! Run with: `cargo test --features web-api --test openai_compat_tests`
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 #![cfg(feature = "web-api")]
 
@@ -536,4 +537,225 @@ async fn infer_status_reports_failed_when_the_pipeline_drops_the_request() {
     }
     assert_eq!(last["status"], "failed", "{last}");
     assert_eq!(last["error"], "circuit_breaker_open");
+}
+
+// ============================================================================
+// Semantic dedup
+// ============================================================================
+
+/// Embeds by topic: anything about France points one way, everything else
+/// another. Enough to drive the proxy's semantic path deterministically.
+#[derive(Debug)]
+struct TopicEmbedder;
+
+#[async_trait]
+impl tokio_prompt_orchestrator::Embedder for TopicEmbedder {
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, OrchestratorError> {
+        Ok(if text.contains("France") { vec![1.0, 0.0] } else { vec![0.0, 1.0] })
+    }
+}
+
+#[tokio::test]
+async fn semantic_dedup_answers_a_reworded_question_from_the_cache() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let worker = Arc::new(CountingEcho {
+        inner: EchoWorker::new(),
+        calls: Arc::clone(&calls),
+    });
+    let s = start(worker, |c| c.embedder = Some(Arc::new(TopicEmbedder))).await;
+
+    let first = post_chat(&s.base, &chat_body("What is the capital of France?")).await;
+    assert_eq!(first.headers()["x-orchestrator-dedup"], "miss");
+    let first: Value = first.json().await.expect("json");
+
+    // Different words, same meaning: answered from the cache, no upstream call.
+    let reworded = post_chat(&s.base, &chat_body("Which city is the capital of France?")).await;
+    assert_eq!(reworded.status(), StatusCode::OK);
+    assert_eq!(reworded.headers()["x-orchestrator-dedup"], "semantic");
+    let similarity: f32 = reworded.headers()["x-orchestrator-similarity"]
+        .to_str()
+        .expect("ascii")
+        .parse()
+        .expect("number");
+    assert!(similarity > 0.99, "{similarity}");
+    let reworded: Value = reworded.json().await.expect("json");
+    assert_eq!(
+        reworded["choices"][0]["message"]["content"],
+        first["choices"][0]["message"]["content"]
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    // A different question is still a new call.
+    let other = post_chat(&s.base, &chat_body("What is the capital of Germany?")).await;
+    assert_eq!(other.headers()["x-orchestrator-dedup"], "miss");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn without_an_embedder_reworded_questions_are_new_calls() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let worker = Arc::new(CountingEcho {
+        inner: EchoWorker::new(),
+        calls: Arc::clone(&calls),
+    });
+    let s = start(worker, |_| {}).await;
+    let _ = post_chat(&s.base, &chat_body("What is the capital of France?")).await;
+    let r = post_chat(&s.base, &chat_body("Which city is the capital of France?")).await;
+    assert_eq!(r.headers()["x-orchestrator-dedup"], "miss");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+// ============================================================================
+// Anthropic Messages API (POST /v1/messages)
+// ============================================================================
+
+async fn post_messages(base: &str, body: &Value) -> reqwest::Response {
+    client()
+        .post(format!("{base}/v1/messages"))
+        .header("x-api-key", "anything")
+        .header("anthropic-version", "2023-06-01")
+        .json(body)
+        .send()
+        .await
+        .expect("request sent")
+}
+
+#[tokio::test]
+async fn anthropic_messages_returns_a_message_object() {
+    let s = start_echo().await;
+    let r = post_messages(
+        &s.base,
+        &json!({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 256,
+            "messages": [{"role": "user", "content": "Summarize this ticket"}]
+        }),
+    )
+    .await;
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(r.headers()["x-orchestrator-dedup"], "miss");
+    let v: Value = r.json().await.expect("json");
+    assert_eq!(v["type"], "message");
+    assert_eq!(v["role"], "assistant");
+    assert!(v["id"].as_str().is_some_and(|id| id.starts_with("msg_")));
+    assert_eq!(v["content"][0]["type"], "text");
+    assert_eq!(v["content"][0]["text"], "Summarize this ticket");
+    assert_eq!(v["stop_reason"], "end_turn");
+    assert!(v["usage"]["input_tokens"].as_u64().is_some_and(|n| n > 0));
+    assert!(v["usage"]["output_tokens"].as_u64().is_some_and(|n| n > 0));
+}
+
+#[tokio::test]
+async fn anthropic_system_prompt_and_content_blocks_reach_the_model() {
+    let s = start_echo().await;
+    let v: Value = post_messages(
+        &s.base,
+        &json!({
+            "model": "m",
+            "max_tokens": 64,
+            "system": [{"type": "text", "text": "Answer briefly."}],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "Hi there"}]}]
+        }),
+    )
+    .await
+    .json()
+    .await
+    .expect("json");
+    let text = v["content"][0]["text"].as_str().expect("text");
+    assert!(text.contains("Answer briefly.") && text.contains("Hi there"), "{text}");
+}
+
+#[tokio::test]
+async fn anthropic_stream_follows_the_event_sequence() {
+    let s = start_echo().await;
+    let r = post_messages(
+        &s.base,
+        &json!({
+            "model": "m",
+            "max_tokens": 64,
+            "stream": true,
+            "messages": [{"role": "user", "content": "one two three"}]
+        }),
+    )
+    .await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let body = r.text().await.expect("body");
+    let names: Vec<&str> = body
+        .lines()
+        .filter_map(|l| l.strip_prefix("event: "))
+        .collect();
+    assert_eq!(names.first(), Some(&"message_start"));
+    assert_eq!(names.last(), Some(&"message_stop"));
+    let order = ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"];
+    let mut at = 0;
+    for name in &names {
+        if let Some(i) = order.iter().position(|o| o == name) {
+            assert!(i >= at, "{name} out of order in {names:?}");
+            at = i;
+        }
+    }
+    let text: String = body
+        .lines()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .filter_map(|d| serde_json::from_str::<Value>(d).ok())
+        .filter(|v| v["type"] == "content_block_delta")
+        .map(|v| v["delta"]["text"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(text, "one two three");
+}
+
+#[tokio::test]
+async fn anthropic_errors_use_anthropic_shape() {
+    let s = start_echo().await;
+    let r = post_messages(
+        &s.base,
+        &json!({"model": "m", "max_tokens": 8, "messages": [{"role": "user", "content": [{"type": "image", "source": {}}]}]}),
+    )
+    .await;
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    let v: Value = r.json().await.expect("json");
+    assert_eq!(v["type"], "error");
+    assert_eq!(v["error"]["type"], "invalid_request_error");
+
+    let r = post_messages(&s.base, &json!({"model": "m", "max_tokens": 8, "messages": [{"role": "system", "content": "x"}]})).await;
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn anthropic_dedups_like_the_openai_endpoint() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let worker = Arc::new(CountingEcho {
+        inner: EchoWorker::new(),
+        calls: Arc::clone(&calls),
+    });
+    let s = start(worker, |_| {}).await;
+    let body = json!({"model": "m", "max_tokens": 8, "messages": [{"role": "user", "content": "same"}]});
+    let _ = post_messages(&s.base, &body).await;
+    let again = post_messages(&s.base, &body).await;
+    assert_eq!(again.headers()["x-orchestrator-dedup"], "cached");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn anthropic_auth_accepts_x_api_key_and_rejects_a_wrong_one() {
+    let s = start(Arc::new(EchoWorker::new()), |c| c.api_key = Some("secret".into())).await;
+    let body = json!({"model": "m", "max_tokens": 8, "messages": [{"role": "user", "content": "hi"}]});
+    let ok = client()
+        .post(format!("{}/v1/messages", s.base))
+        .header("x-api-key", "secret")
+        .json(&body)
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(ok.status(), StatusCode::OK);
+    let bad = client()
+        .post(format!("{}/v1/messages", s.base))
+        .header("x-api-key", "wrong")
+        .json(&body)
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(bad.status(), StatusCode::UNAUTHORIZED);
+    let v: Value = bad.json().await.expect("json");
+    assert_eq!(v["error"]["type"], "authentication_error");
 }

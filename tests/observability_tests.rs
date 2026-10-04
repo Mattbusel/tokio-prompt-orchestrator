@@ -13,6 +13,7 @@
 //! running on the multi-threaded runtime. Structured-log field coverage is
 //! verified in `src/stages.rs` unit tests and by manual `RUST_LOG=debug`
 //! inspection.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::HashMap;
 use std::sync::Arc;

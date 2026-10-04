@@ -60,13 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!(r#"     -d '{{"prompt": "Hello, world!"}}'\"#);
     info!("");
 
-    let (_, output_rx) = tokio::sync::mpsc::channel(1);
-    web_api::start_server(
-        web_api::ServerConfig::default(),
-        handles.input_tx,
-        output_rx,
-    )
-    .await?;
+    web_api::serve_pipeline(web_api::ServerConfig::default(), &handles).await?;
 
     Ok(())
 }

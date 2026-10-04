@@ -214,6 +214,7 @@ impl ConfigWatcher {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::io::Write;
@@ -348,7 +349,6 @@ log_format = "pretty"
     #[tokio::test]
     #[ignore = "relies on inotify/FSEvents timing — run locally, not in CI coverage"]
     async fn hot_reload_concurrent_writes_no_invalid_config_broadcast() {
-        use std::io::Write;
         let dir = tempfile::tempdir().expect("test: create tempdir");
         let path = dir.path().join("config.toml");
         std::fs::write(&path, VALID_TOML).expect("test: initial write");

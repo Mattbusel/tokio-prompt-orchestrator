@@ -614,10 +614,10 @@ pub fn scheduler_routes(state: SchedulerState) -> axum::Router {
     axum::Router::new()
         .route("/api/v1/schedule", post(create_schedule_handler))
         .route("/api/v1/schedule", get(list_schedules_handler))
-        .route("/api/v1/schedule/:id", delete(delete_schedule_handler))
-        .route("/api/v1/schedule/:id/enable", patch(enable_schedule_handler))
+        .route("/api/v1/schedule/{id}", delete(delete_schedule_handler))
+        .route("/api/v1/schedule/{id}/enable", patch(enable_schedule_handler))
         .route(
-            "/api/v1/schedule/:id/disable",
+            "/api/v1/schedule/{id}/disable",
             patch(disable_schedule_handler),
         )
         .with_state(state)

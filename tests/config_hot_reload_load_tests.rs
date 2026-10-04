@@ -10,6 +10,8 @@
 //! We don't need the web pipeline for this — the config watcher is independent
 //! of any pipeline. Tests should complete well under 10 seconds.
 
+#![cfg(feature = "hot-reload")]
+
 use std::io::Write as IoWrite;
 use std::sync::Arc;
 use std::time::Duration;

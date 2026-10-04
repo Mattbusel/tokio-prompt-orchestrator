@@ -66,6 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         port: 8080,
         max_request_size: 10 * 1024 * 1024,
         timeout_seconds: 300,
+        ..web_api::ServerConfig::default()
     };
 
     info!("📡 API Endpoints:");
@@ -98,9 +99,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("Press Ctrl+C to stop...");
     info!("");
 
-    // Start server (blocks). No pipeline output receiver needed in this demo.
-    let (_, output_rx) = tokio::sync::mpsc::channel(1);
-    web_api::start_server(config, handles.input_tx, output_rx).await?;
+    // Start the server (blocks). It takes the pipeline's output receiver so
+    // results reach HTTP clients.
+    web_api::serve_pipeline(config, &handles).await?;
 
     Ok(())
 }

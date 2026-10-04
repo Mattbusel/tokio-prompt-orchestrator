@@ -2,6 +2,7 @@
 //!
 //! EchoWorker is the floor: pure orchestration overhead with zero inference time.
 //! Target: >10,000 req/sec proves orchestration is not the bottleneck.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::collections::HashMap;

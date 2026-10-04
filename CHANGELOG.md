@@ -7,6 +7,117 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-10-04
+
+A leaner library that works with the Rust LLM clients people already use.
+Upgrading from 1.x: see "Changed (breaking)" below; most code only needs the
+`otel`, `hot-reload` or `cli` feature if it used those parts.
+
+### Added
+
+- **Anthropic-compatible endpoint, `POST /v1/messages`.** Anthropic clients
+  (the official SDKs included) work against the orchestrator by changing the
+  base URL: text conversations, system prompts and streaming with the full
+  event sequence, with the same dedup, circuit breaker and spend cap as the
+  OpenAI endpoint. The API key may be sent as `x-api-key`. Tested with the
+  official Python SDK (`messages.create`, `messages.stream`).
+- **Answers grounded in your documents.** New `Retriever` trait, and
+  `TantivyRetriever` (feature `tantivy`): BM25 search with English stemming
+  over a folder of Markdown/text files, in memory. `spawn_pipeline_with(worker,
+  PipelineOptions::with_retriever(..))` in Rust, `orchestrator --docs <folder>`
+  on the command line. Retrieval failures and timeouts (2 s default) send the
+  prompt without context instead of dropping it.
+- **Semantic dedup with real embeddings.** New `Embedder` trait with
+  `FastEmbedder` (feature `fastembed`, local ONNX models, no API key),
+  `OpenAiEmbedder` and `GenaiEmbedder`. `Deduplicator::with_embedder` and
+  `check_and_register_semantic` answer a reworded question from the cache;
+  `ServerConfig::embedder` and `orchestrator --semantic-dedup [threshold]`
+  turn it on for the OpenAI and Anthropic endpoints (`x-orchestrator-dedup:
+  semantic`). A match must also pass `same_specifics` (same numbers, shared
+  words in the same order), because measured embedding similarity alone puts
+  "convert 10 miles to km" and "convert 10 km to miles" at 0.99. Default
+  threshold 0.93 from those measurements.
+- **Integrations with other Rust LLM crates**, each its own feature and each
+  a `ModelWorker`, so deduplication, the circuit breaker, retries and the
+  dead-letter queue sit in front of the client you already use:
+  - `async-openai`: `integrations::AsyncOpenAiWorker` wraps an
+    `async_openai::Client` (OpenAI, Azure, or any OpenAI-compatible server).
+  - `genai`: `integrations::GenaiWorker` wraps a `genai::Client`, so one
+    worker covers OpenAI, Anthropic, Gemini, Ollama, Groq, DeepSeek, xAI,
+    Cohere and the other providers genai supports.
+  - `rig`: `integrations::RigWorker` wraps any rig-core completion model
+    (rig-core needs Rust 1.95+).
+  - `tower`: `integrations::ServiceWorker` runs any `tower::Service<String>`
+    as a worker (with its tower layers), and `integrations::WorkerService`
+    turns a worker into a service.
+  All map provider errors the same way: 401/403 become `AuthFailed` (never
+  retried), 429 becomes `RateLimited` (with `Retry-After` when the client
+  exposes it), everything else a retryable `Inference` error. Tested end to
+  end against a mock OpenAI server, including streaming.
+- `web_api::serve_pipeline(config, &handles)`: serve the HTTP API for a
+  pipeline in one call, with its output receiver, dead-letter queue and
+  circuit breaker wired in.
+- `DeadLetterQueue::snapshot()`: read the queue without draining it.
+- `otel`, `hot-reload` and `cli` features (see below).
+
+### Changed (breaking)
+
+- **Lighter default build: 219 crates down to 167.** OpenTelemetry moved
+  behind the new `otel` feature (on in `full`). `OtelLayer` and
+  `try_build_otel_layer` need it; `init_tracing` works either way and warns
+  if `OTEL_EXPORTER_OTLP_ENDPOINT` is set in a build without `otel`. The OTLP
+  exporter no longer compiles the gRPC stack it never used, and the unused
+  `opentelemetry-http` dependency is gone.
+- `config::watcher` (the file watcher, via notify) moved behind
+  `hot-reload`; `HotConfig` is unaffected. The `replay` binary needs `cli`.
+- **Safer `web_api::ServerConfig::default()`**: it binds `127.0.0.1`
+  instead of `0.0.0.0`, and `debug_mode` is off. The old default exposed an
+  unauthenticated proxy to the provider (on your API key) to the whole
+  network. Set `host` explicitly to serve other machines, and pair it with
+  `api_key`. The `orchestrator` binary keeps its debug endpoints only while
+  bound to a loopback address.
+- `OrchestratorError` is `#[non_exhaustive]`, so new error kinds can be
+  added without another major release. Add a `_` arm to exhaustive matches.
+- axum 0.7 -> 0.8, tower 0.4 -> 0.5, tower-http 0.5 -> 0.6. One tower version
+  in the tree instead of two.
+- Minimum Rust is now 1.88. The declared 1.85 was no longer true: with
+  current dependencies the default build already failed on 1.85
+  (`yoke-derive` needs 1.87), and `full` needs 1.88. Checked on 1.88 for the
+  default build and every feature except `tantivy` (1.90), `rig` (1.95) and
+  `fastembed` (1.88, checked separately).
+
+### Fixed
+
+- **Prompts reach the model as written.** The Retrieve stage was a
+  placeholder that wrapped every prompt from the CLI, `POST /api/v1/infer`,
+  the WebSocket and the MCP server in `CONTEXT: Retrieved documents for
+  '...' User Query: ... Assistant:`, so providers billed for, and answered
+  around, invented context. It also slept 5 ms per request to "simulate"
+  retrieval. Both are gone; context now comes only from a configured
+  `Retriever`.
+- Pipeline stages held a `tracing` span guard across `.await`, which
+  attributes other tasks' events to the wrong request in traces. Spans are
+  now attached to the futures with `Instrument`.
+- Semantic dedup with a caller-supplied embedding returned an empty answer
+  on a hit, and its embedding store grew without limit. It now returns the
+  matched answer, and the store is bounded (10,000 entries) and expires with
+  the cache.
+- `ServerConfig` now loads from a partial JSON/TOML config: missing fields
+  take their defaults instead of failing to deserialize.
+- `GET /api/v1/debug/dlq` and the MCP `dump_dlq` tool drained the
+  dead-letter queue and pushed it back, which could reorder or drop entries
+  that arrived meanwhile and re-sent every entry to DLQ subscribers. Both now
+  read a snapshot.
+- The `rest_api`, `sse_stream`, `websocket_api` and `web_api_demo` examples
+  had not compiled since `start_server` gained arguments, and they passed a
+  dummy output channel, so results never reached clients. They now use
+  `serve_pipeline`.
+- Seven test suites had stopped compiling (web API, CORS, result tracker, MCP,
+  TUI, tier integration, Redis dedup) because CI only ran `cargo test --lib`.
+  They are fixed, and CI now builds and runs every test target and example.
+  Eighteen `self_modify` tests that run `cargo test`/`clippy`/`bench` on the
+  repository itself are now `#[ignore]` (run them with `--ignored`).
+
 ## [1.6.0] - 2026-10-02
 
 This release swaps several hand-written parts for well-known open-source

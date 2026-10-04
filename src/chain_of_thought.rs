@@ -459,7 +459,6 @@ mod tests {
 
     #[test]
     fn test_compute_confidence_increases_with_length() {
-        let parser = CotParser::new();
         let short = ThoughtStep {
             step_id: 1,
             thought: "hi".to_string(),

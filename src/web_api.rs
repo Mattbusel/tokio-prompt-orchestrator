@@ -133,6 +133,9 @@ use crate::{PromptRequest, SessionId};
 /// This type never panics.
 #[cfg(feature = "web-api")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
+// Fields left out of a JSON/TOML config take their `Default` values, so a
+// config that sets only `port` loads instead of failing on every other field.
+#[serde(default)]
 pub struct ServerConfig {
     /// IP address or hostname to bind to (e.g. `"0.0.0.0"` for all interfaces).
     pub host: String,
@@ -143,7 +146,8 @@ pub struct ServerConfig {
     /// How long (in seconds) to wait for a result before returning a timeout error.
     pub timeout_seconds: u64,
     /// When `true`, the `/api/v1/debug/*` endpoints are enabled.
-    /// Default: `true` (safe for development; set to `false` in production).
+    /// Default: `false`. They show request and session IDs from the
+    /// dead-letter queue, so turn them on for local debugging only.
     pub debug_mode: bool,
     /// How often (in milliseconds) polling loops check the tracker for results.
     ///
@@ -170,6 +174,19 @@ pub struct ServerConfig {
     /// off reuse after completion. Default: 300.
     #[serde(default = "default_dedup_window_secs")]
     pub dedup_window_secs: u64,
+    /// Embedder for semantic dedup on `/v1/chat/completions`: with one set,
+    /// a prompt that means the same as one answered within
+    /// `dedup_window_secs` is answered from the cache even when worded
+    /// differently (`x-orchestrator-dedup: semantic`). See
+    /// [`crate::integrations`] for local and provider embedders. Not part of
+    /// the serialized config.
+    #[serde(skip)]
+    pub embedder: Option<Arc<dyn crate::embedding::Embedder>>,
+    /// Minimum cosine similarity for a semantic hit; used only with
+    /// `embedder`. Default `0.93`, chosen from measurements with
+    /// BGE-small-en-v1.5 (see `Deduplicator::with_embedder`).
+    #[serde(default = "default_semantic_threshold")]
+    pub semantic_threshold: f32,
     /// Bearer token required on every non-public endpoint. When `None`, the
     /// server reads `ORCHESTRATOR_API_KEY`, then `API_KEY`, from the
     /// environment; when neither is set, auth is off.
@@ -183,6 +200,10 @@ fn default_provider() -> String {
 }
 
 #[cfg(feature = "web-api")]
+fn default_semantic_threshold() -> f32 {
+    0.93
+}
+
 fn default_dedup_window_secs() -> u64 {
     300
 }
@@ -191,16 +212,20 @@ fn default_dedup_window_secs() -> u64 {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            host: "0.0.0.0".to_string(),
+            // Loopback only: a pipeline holds the provider API key, so it is
+            // reachable from other machines only when the caller says so.
+            host: "127.0.0.1".to_string(),
             port: 8080,
             max_request_size: 10 * 1024 * 1024, // 10MB
             timeout_seconds: 300,               // 5 minutes
-            debug_mode: true,
+            debug_mode: false,
             poll_interval_ms: 100,
             provider: default_provider(),
             model: default_provider(),
             max_spend_usd: None,
             dedup_window_secs: default_dedup_window_secs(),
+            embedder: None,
+            semantic_threshold: default_semantic_threshold(),
             api_key: None,
         }
     }
@@ -640,6 +665,49 @@ const WS_RATE_LIMIT_PER_MIN: u32 = 60;
 // Server
 // ============================================================================
 
+/// Serve the HTTP API for a pipeline started with [`crate::spawn_pipeline`].
+///
+/// The one-call way to put the REST, SSE, WebSocket and OpenAI-compatible
+/// endpoints in front of a pipeline: it takes the pipeline's output receiver
+/// (so results reach HTTP clients), its dead-letter queue and its circuit
+/// breaker from `handles`, and runs until the server stops.
+///
+/// ```no_run
+/// use std::sync::Arc;
+/// use tokio_prompt_orchestrator::{spawn_pipeline, web_api, EchoWorker};
+///
+/// # async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+/// let handles = spawn_pipeline(Arc::new(EchoWorker::new()));
+/// web_api::serve_pipeline(web_api::ServerConfig::default(), &handles).await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # Errors
+///
+/// Returns an error if the output receiver was already taken (each pipeline
+/// can feed one consumer), if the address cannot be bound, or if the server
+/// fails.
+#[cfg(feature = "web-api")]
+pub async fn serve_pipeline(
+    config: ServerConfig,
+    handles: &crate::PipelineHandles,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let output_rx = handles
+        .take_output_rx()
+        .await
+        .ok_or("the pipeline's output receiver was already taken by another consumer")?;
+    start_server(
+        config,
+        handles.input_tx.clone(),
+        output_rx,
+        handles.dlq.clone(),
+        handles.circuit_breaker.clone(),
+        None,
+    )
+    .await
+}
+
 /// Start the web API server.
 ///
 /// Binds to `config.host:config.port` and serves the REST API, SSE streaming,
@@ -777,18 +845,18 @@ pub async fn start_server(
     let app = Router::new()
         .route("/api/v1/infer", post(infer_handler))
         .route("/api/v1/batch", post(batch_handler))
-        .route("/api/v1/batch/:job_id/progress", get(batch_progress_handler))
+        .route("/api/v1/batch/{job_id}/progress", get(batch_progress_handler))
         .route("/api/v1/stream", post(sse_stream_handler))
-        .route("/api/v1/status/:request_id", get(status_handler))
-        .route("/api/v1/result/:request_id", get(result_handler))
+        .route("/api/v1/status/{request_id}", get(status_handler))
+        .route("/api/v1/result/{request_id}", get(result_handler))
         .route("/api/v1/results", get(results_handler))
         .route("/api/v1/ws", get(websocket_handler))
         .route("/v1/stream", get(token_stream_ws_handler))
         .route("/api/v1/schema", get(schema_handler))
         .route("/api/v1/pipeline/status", get(pipeline_status_handler))
         .route("/api/v1/ab-tests", post(ab_test_create_handler))
-        .route("/api/v1/ab-tests/:name/results", get(ab_test_results_handler))
-        .route("/api/v1/ab-tests/:name", axum::routing::delete(ab_test_delete_handler))
+        .route("/api/v1/ab-tests/{name}/results", get(ab_test_results_handler))
+        .route("/api/v1/ab-tests/{name}", axum::routing::delete(ab_test_delete_handler))
         .route("/api/v1/debug/dlq", get(debug_dlq_handler))
         .route("/api/v1/debug/dedup-index", get(debug_dedup_handler))
         .route("/api/v1/debug/pipeline", get(debug_pipeline_handler))
@@ -797,16 +865,17 @@ pub async fn start_server(
         .route("/api/v1/rate-limiter/stats", get(rate_limiter_stats_handler))
         .route("/api/v1/templates", post(template_register_handler))
         .route("/api/v1/templates", get(template_list_handler))
-        .route("/api/v1/templates/:name/render", post(template_render_handler))
+        .route("/api/v1/templates/{name}/render", post(template_render_handler))
         .route("/api/v1/load-balancer/stats", get(load_balancer_stats_handler))
         .route("/api/v1/sessions", post(session_create_handler))
-        .route("/api/v1/sessions/:id", get(session_get_handler))
-        .route("/api/v1/sessions/:id", axum::routing::delete(session_delete_handler))
-        .route("/api/v1/sessions/:id/messages", post(session_append_handler))
-        .route("/v1/sessions/:session_id/budget", get(session_budget_handler))
-        .route("/v1/sessions/:session_id/budget/reset", post(session_budget_reset_handler))
+        .route("/api/v1/sessions/{id}", get(session_get_handler))
+        .route("/api/v1/sessions/{id}", axum::routing::delete(session_delete_handler))
+        .route("/api/v1/sessions/{id}/messages", post(session_append_handler))
+        .route("/v1/sessions/{session_id}/budget", get(session_budget_handler))
+        .route("/v1/sessions/{session_id}/budget/reset", post(session_budget_reset_handler))
         .route("/v1/chat/completions", post(openai_compat::chat_completions_handler))
         .route("/v1/models", get(openai_compat::models_handler))
+        .route("/v1/messages", post(openai_compat::messages_handler))
         .route("/health", get(health_handler))
         .route("/v1/health", get(health_handler))
         .route("/live", get(live_handler))
@@ -991,12 +1060,14 @@ async fn auth_middleware(
         return next.run(req).await;
     };
 
-    // Extract Bearer token from Authorization header.
+    // The key comes as `Authorization: Bearer <key>` (OpenAI clients and
+    // most tools) or `x-api-key: <key>` (Anthropic clients).
     let token_valid = req
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
+        .or_else(|| req.headers().get("x-api-key").and_then(|v| v.to_str().ok()))
         .map(|token| {
             // Constant-time comparison using the `subtle` crate to prevent
             // timing side-channels.  Tokens of different lengths are compared
@@ -1017,6 +1088,8 @@ async fn auth_middleware(
         next.run(req).await
     } else if openai_compat::is_openai_path(&req_path) {
         openai_compat::unauthorized()
+    } else if openai_compat::is_anthropic_path(&req_path) {
+        openai_compat::anthropic_unauthorized()
     } else {
         (
             StatusCode::UNAUTHORIZED,
@@ -1429,11 +1502,11 @@ async fn websocket_stream(socket: WebSocket, state: Arc<AppState>) {
                                 "error": "RATE_LIMITED",
                                 "retry_after_ms": 1000
                             }).to_string();
-                            let _ = ws_sink.send(Message::Text(err_msg)).await;
+                            let _ = ws_sink.send(Message::Text(err_msg.into())).await;
                             // Close with code 4029.
                             let close_frame = axum::extract::ws::CloseFrame {
                                 code: 4029,
-                                reason: std::borrow::Cow::Borrowed("rate limit exceeded"),
+                                reason: "rate limit exceeded".into(),
                             };
                             let _ = ws_sink.send(Message::Close(Some(close_frame))).await;
                             break;
@@ -1446,7 +1519,7 @@ async fn websocket_stream(socket: WebSocket, state: Arc<AppState>) {
                                 let error_msg = serde_json::json!({
                                     "error": format!("Invalid JSON: {e}")
                                 }).to_string();
-                                let _ = ws_sink.send(Message::Text(error_msg)).await;
+                                let _ = ws_sink.send(Message::Text(error_msg.into())).await;
                                 continue;
                             }
                         };
@@ -1465,7 +1538,7 @@ async fn websocket_stream(socket: WebSocket, state: Arc<AppState>) {
                                 "error": "TRACKER_FULL",
                                 "message": "Request tracker at capacity — retry after a backoff period"
                             }).to_string();
-                            let _ = ws_sink.send(Message::Text(err_msg)).await;
+                            let _ = ws_sink.send(Message::Text(err_msg.into())).await;
                             continue;
                         }
                         let processing_msg = serde_json::json!({
@@ -1473,7 +1546,7 @@ async fn websocket_stream(socket: WebSocket, state: Arc<AppState>) {
                             "status": "processing"
                         }).to_string();
 
-                        if ws_sink.send(Message::Text(processing_msg)).await.is_err() {
+                        if ws_sink.send(Message::Text(processing_msg.into())).await.is_err() {
                             break;
                         }
 
@@ -1558,7 +1631,7 @@ async fn websocket_stream(socket: WebSocket, state: Arc<AppState>) {
                                 "error": ws_error,
                             }).to_string();
 
-                            if ws_sink.send(Message::Text(result_msg)).await.is_err() {
+                            if ws_sink.send(Message::Text(result_msg.into())).await.is_err() {
                                 break;
                             }
                         } else {
@@ -1567,7 +1640,7 @@ async fn websocket_stream(socket: WebSocket, state: Arc<AppState>) {
                                 "status": "failed",
                                 "error": "Pipeline closed"
                             }).to_string();
-                            let _ = ws_sink.send(Message::Text(err_msg)).await;
+                            let _ = ws_sink.send(Message::Text(err_msg.into())).await;
                             break;
                         }
                     }
@@ -1585,7 +1658,7 @@ async fn websocket_stream(socket: WebSocket, state: Arc<AppState>) {
                 }
             }
             _ = ping_interval.tick() => {
-                if ws_sink.send(Message::Ping(vec![])).await.is_err() {
+                if ws_sink.send(Message::Ping(Default::default())).await.is_err() {
                     break;
                 }
             }
@@ -1647,7 +1720,8 @@ async fn token_stream_ws(mut socket: WebSocket, state: Arc<AppState>) {
                         let _ = socket
                             .send(Message::Text(
                                 serde_json::json!({"error": format!("Invalid JSON: {e}")})
-                                    .to_string(),
+                                    .to_string()
+                                    .into(),
                             ))
                             .await;
                         return;
@@ -1679,7 +1753,9 @@ async fn token_stream_ws(mut socket: WebSocket, state: Arc<AppState>) {
     if state.pipeline_tx.send(prompt_req).await.is_err() {
         let _ = socket
             .send(Message::Text(
-                serde_json::json!({"error": "Pipeline closed"}).to_string(),
+                serde_json::json!({"error": "Pipeline closed"})
+                    .to_string()
+                    .into(),
             ))
             .await;
         return;
@@ -1710,7 +1786,7 @@ async fn token_stream_ws(mut socket: WebSocket, state: Arc<AppState>) {
         // If the client disconnects mid-stream, stop immediately to avoid
         // burning API tokens on a gone connection.
         tokio::select! {
-            send_result = ws_sink.send(Message::Text(json)) => {
+            send_result = ws_sink.send(Message::Text(json.into())) => {
                 if send_result.is_err() {
                     break 'stream;
                 }
@@ -1727,7 +1803,7 @@ async fn token_stream_ws(mut socket: WebSocket, state: Arc<AppState>) {
                     _ => {
                         // Ignore other frames (ping, pong, etc.) and still send the chunk.
                         if ws_sink.send(Message::Text(
-                            match serde_json::to_string(&chunk) { Ok(j) => j, Err(_) => break 'stream }
+                            match serde_json::to_string(&chunk) { Ok(j) => j.into(), Err(_) => break 'stream }
                         )).await.is_err() {
                             break 'stream;
                         }
@@ -2859,13 +2935,10 @@ async fn debug_dlq_handler(
         return Err(AppError::DebugDisabled);
     }
 
-    // Peek without draining: collect entries from the queue and push them back.
-    let entries = state.dlq.drain();
+    // Read without draining: draining and pushing back would race with
+    // concurrent drops and re-broadcast every entry to DLQ subscribers.
+    let entries = state.dlq.snapshot();
     let count = entries.len();
-    // Re-enqueue so the DLQ is not cleared by this inspection call.
-    for entry in &entries {
-        state.dlq.push(entry.clone());
-    }
 
     let json_entries: Vec<serde_json::Value> = entries
         .iter()
@@ -3087,6 +3160,15 @@ impl Default for ServerConfig {
     }
 }
 
+/// Stub when the `web-api` feature is disabled: always returns an error.
+#[cfg(not(feature = "web-api"))]
+pub async fn serve_pipeline(
+    _config: ServerConfig,
+    _handles: &crate::PipelineHandles,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    Err("Web API requires 'web-api' feature".into())
+}
+
 #[cfg(not(feature = "web-api"))]
 pub async fn start_server(
     _config: ServerConfig,
@@ -3204,7 +3286,8 @@ mod tests {
     #[test]
     fn test_server_config_default_values() {
         let cfg = ServerConfig::default();
-        assert_eq!(cfg.host, "0.0.0.0");
+        assert_eq!(cfg.host, "127.0.0.1");
+        assert!(!cfg.debug_mode);
         assert_eq!(cfg.port, 8080);
         assert_eq!(cfg.max_request_size, 10 * 1024 * 1024);
         assert_eq!(cfg.timeout_seconds, 300);

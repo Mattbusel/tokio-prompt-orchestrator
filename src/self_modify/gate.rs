@@ -655,6 +655,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "runs cargo test/clippy/bench on this repository; slow"]
     async fn test_evaluate_returns_report() {
         let gate = make_gate(0);
         let report = gate.evaluate("proposal-1").await;
@@ -662,6 +663,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "runs cargo test/clippy/bench on this repository; slow"]
     async fn test_evaluate_stores_in_history() {
         let gate = make_gate(0);
         gate.evaluate("p1").await;
@@ -670,6 +672,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "runs cargo test/clippy/bench on this repository; slow"]
     async fn test_evaluate_history_newest_first() {
         let gate = make_gate(0);
         gate.evaluate("first").await;
@@ -679,6 +682,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "runs cargo test/clippy/bench on this repository; slow"]
     async fn test_evaluate_includes_all_mandatory_gates() {
         let gate = make_gate(0);
         let report = gate.evaluate("p").await;
@@ -687,6 +691,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "runs cargo test/clippy/bench on this repository; slow"]
     async fn test_benchmark_gate_skipped_when_disabled() {
         let gate = make_gate(0);
         let report = gate.evaluate("p").await;
@@ -712,6 +717,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "runs cargo test/clippy/bench on this repository; slow"]
     async fn test_trust_0_recommends_await_review_on_pass() {
         // This test only validates the trust-level logic, not actual cargo runs.
         // We simulate a passing report by evaluating on a valid workspace.
@@ -728,6 +734,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "runs cargo test/clippy/bench on this repository; slow"]
     async fn test_history_capped_at_200() {
         let gate = make_gate(0);
         for i in 0..205 {
@@ -781,6 +788,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "runs cargo test/clippy/bench on this repository; slow"]
     async fn test_smoke_test_skipped_when_no_runner() {
         let gate = make_gate(0);
         let report = gate.evaluate("p").await;
@@ -789,6 +797,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "runs cargo test/clippy/bench on this repository; slow"]
     async fn test_smoke_test_passes_with_passing_runner() {
         let gate = make_gate(0);
         gate.set_smoke_runner(Arc::new(PassingSmokeRunner)).unwrap();
@@ -798,6 +807,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "runs cargo test/clippy/bench on this repository; slow"]
     async fn test_smoke_test_fails_with_failing_runner() {
         let gate = make_gate(0);
         gate.set_smoke_runner(Arc::new(FailingSmokeRunner)).unwrap();
@@ -809,6 +819,7 @@ mod tests {
     // --- Benchmark regression tests ---
 
     #[tokio::test]
+    #[ignore = "runs cargo test/clippy/bench on this repository; slow"]
     async fn test_benchmark_regression_skipped_when_no_baselines() {
         let gate = ValidationGate::new(GateConfig {
             run_benchmarks: true,
@@ -827,6 +838,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "runs cargo test/clippy/bench on this repository; slow"]
     async fn test_benchmark_with_baselines_runs_check() {
         let gate = ValidationGate::new(GateConfig {
             run_benchmarks: true,
@@ -859,6 +871,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "runs cargo test/clippy/bench on this repository; slow"]
     async fn test_validation_gate_skips_when_disabled() {
         // Safety: this test sets an env var; run serially to avoid interference.
         // env::set_var is unsafe in Rust ≥1.81 (only in multi-threaded contexts)

@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 use tokio_prompt_orchestrator::tui::app::{
-    App, ChannelDepth, CircuitState, LogEntry, LogLevel, STAGE_BUDGETS_MS, STAGE_NAMES,
+    App, ChannelDepth, CircuitState, LogEntry, LogLevel, DEFAULT_STAGE_BUDGETS_MS, STAGE_NAMES,
 };
 use tokio_prompt_orchestrator::tui::events::{apply_event, InputEvent};
 use tokio_prompt_orchestrator::tui::metrics::MockMetrics;
@@ -224,7 +224,7 @@ fn test_stage_budget_ratio_all_stages_zero_latency() {
 #[test]
 fn test_stage_budget_ratio_rag_at_budget() {
     let mut app = App::new(Duration::from_secs(1));
-    app.stage_latencies[0] = STAGE_BUDGETS_MS[0]; // RAG at exact budget
+    app.stage_latencies[0] = DEFAULT_STAGE_BUDGETS_MS[0]; // RAG at exact budget
     let ratio = app.stage_budget_ratio(0);
     assert!((ratio - 1.0).abs() < 0.001);
 }
@@ -232,7 +232,7 @@ fn test_stage_budget_ratio_rag_at_budget() {
 #[test]
 fn test_stage_budget_ratio_infer_double_budget() {
     let mut app = App::new(Duration::from_secs(1));
-    app.stage_latencies[2] = STAGE_BUDGETS_MS[2] * 2.0; // INFER at 2x budget
+    app.stage_latencies[2] = DEFAULT_STAGE_BUDGETS_MS[2] * 2.0; // INFER at 2x budget
     let ratio = app.stage_budget_ratio(2);
     assert!((ratio - 2.0).abs() < 0.001);
 }
@@ -616,9 +616,12 @@ fn test_stage_names_are_nonempty() {
 #[test]
 fn test_stage_budgets_order() {
     // INFER should have the highest budget
-    let max_budget = STAGE_BUDGETS_MS.iter().cloned().fold(0.0_f64, f64::max);
+    let max_budget = DEFAULT_STAGE_BUDGETS_MS
+        .iter()
+        .cloned()
+        .fold(0.0_f64, f64::max);
     assert_eq!(
-        max_budget, STAGE_BUDGETS_MS[2],
+        max_budget, DEFAULT_STAGE_BUDGETS_MS[2],
         "INFER should have highest budget"
     );
 }

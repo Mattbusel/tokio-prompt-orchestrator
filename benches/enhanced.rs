@@ -6,6 +6,7 @@
 //! - Retry policy evaluation:    P50 <1μs,   P99 <5μs
 //! - Priority queue push+pop:    P50 <5μs,   P99 <20μs
 //! - Cache operations:           P50 <0.1ms, P99 <0.5ms
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::collections::HashMap;

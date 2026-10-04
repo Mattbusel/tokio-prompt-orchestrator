@@ -6,6 +6,7 @@
 //! verify requests are forwarded without needing a full model backend.
 //!
 //! All tests require the `web-api` Cargo feature.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 #![cfg(feature = "web-api")]
 
@@ -44,10 +45,23 @@ async fn spawn_server() -> (String, mpsc::Receiver<PromptRequest>) {
         port,
         max_request_size: 1024 * 1024,
         timeout_seconds: 2,
+        ..ServerConfig::default()
     };
     let (_, out_rx) = mpsc::channel::<tokio_prompt_orchestrator::PostOutput>(1);
     tokio::spawn(async move {
-        let _ = tokio_prompt_orchestrator::web_api::start_server(config, tx, out_rx).await;
+        let _ = tokio_prompt_orchestrator::web_api::start_server(
+            config,
+            tx,
+            out_rx,
+            std::sync::Arc::new(tokio_prompt_orchestrator::DeadLetterQueue::new(100)),
+            tokio_prompt_orchestrator::enhanced::CircuitBreaker::new(
+                5,
+                0.8,
+                std::time::Duration::from_secs(60),
+            ),
+            None,
+        )
+        .await;
     });
     // Give the server a moment to bind.
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -66,9 +80,12 @@ fn client() -> Client {
 // ============================================================================
 
 #[test]
-fn test_server_config_default_host_is_all_interfaces() {
+fn test_server_config_default_host_is_loopback() {
+    // The server forwards to a paid provider with the operator's API key, so
+    // the library default must not expose it to the network.
     let cfg = ServerConfig::default();
-    assert_eq!(cfg.host, "0.0.0.0");
+    assert_eq!(cfg.host, "127.0.0.1");
+    assert!(!cfg.debug_mode, "debug endpoints are opt-in");
 }
 
 #[test]
@@ -97,7 +114,7 @@ fn test_server_config_default_timeout_is_300_seconds() {
 fn test_server_config_serializes_to_json() {
     let cfg = ServerConfig::default();
     let json = serde_json::to_value(&cfg).expect("ServerConfig must serialize");
-    assert_eq!(json["host"], "0.0.0.0");
+    assert_eq!(json["host"], "127.0.0.1");
     assert_eq!(json["port"], 8080);
     assert_eq!(json["max_request_size"], 10 * 1024 * 1024);
     assert_eq!(json["timeout_seconds"], 300);
@@ -116,6 +133,18 @@ fn test_server_config_deserializes_from_json() {
     assert_eq!(cfg.port, 3000);
     assert_eq!(cfg.max_request_size, 1024);
     assert_eq!(cfg.timeout_seconds, 60);
+    // Every field not in the JSON falls back to its default.
+    let defaults = ServerConfig::default();
+    assert_eq!(cfg.dedup_window_secs, defaults.dedup_window_secs);
+    assert_eq!(cfg.provider, defaults.provider);
+}
+
+#[test]
+fn test_server_config_accepts_a_single_field() {
+    let cfg: ServerConfig =
+        serde_json::from_value(json!({"port": 9000})).expect("a partial config must load");
+    assert_eq!(cfg.port, 9000);
+    assert_eq!(cfg.host, ServerConfig::default().host);
 }
 
 #[test]
@@ -125,6 +154,7 @@ fn test_server_config_round_trip_serialization() {
         port: 9090,
         max_request_size: 2048,
         timeout_seconds: 120,
+        ..ServerConfig::default()
     };
     let json = serde_json::to_value(&original).expect("serialize");
     let restored: ServerConfig = serde_json::from_value(json).expect("deserialize");
@@ -212,6 +242,8 @@ fn test_infer_request_serializes_round_trip() {
             m
         },
         stream: false,
+        deadline_secs: None,
+        timeout_seconds: None,
     };
     let json = serde_json::to_value(&req).expect("must serialize");
     let deserialized: InferRequest = serde_json::from_value(json).expect("must deserialize");
@@ -250,6 +282,8 @@ fn test_infer_request_clone_preserves_all_fields() {
             m
         },
         stream: true,
+        deadline_secs: None,
+        timeout_seconds: None,
     };
     let cloned = req.clone();
     assert_eq!(cloned.prompt, req.prompt);
@@ -463,7 +497,7 @@ async fn test_health_endpoint_includes_version() {
         body.get("version").is_some(),
         "Health response must include version"
     );
-    assert_eq!(body["version"], "0.1.0");
+    assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
 }
 
 #[tokio::test]
@@ -1000,10 +1034,23 @@ async fn test_infer_endpoint_pipeline_closed_returns_503() {
         port,
         max_request_size: 1024 * 1024,
         timeout_seconds: 2,
+        ..ServerConfig::default()
     };
     let (_, out_rx) = mpsc::channel::<tokio_prompt_orchestrator::PostOutput>(1);
     tokio::spawn(async move {
-        let _ = tokio_prompt_orchestrator::web_api::start_server(config, tx, out_rx).await;
+        let _ = tokio_prompt_orchestrator::web_api::start_server(
+            config,
+            tx,
+            out_rx,
+            std::sync::Arc::new(tokio_prompt_orchestrator::DeadLetterQueue::new(100)),
+            tokio_prompt_orchestrator::enhanced::CircuitBreaker::new(
+                5,
+                0.8,
+                std::time::Duration::from_secs(60),
+            ),
+            None,
+        )
+        .await;
     });
     tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -1033,10 +1080,23 @@ async fn test_pipeline_closed_error_body_contains_error_field() {
         port,
         max_request_size: 1024 * 1024,
         timeout_seconds: 2,
+        ..ServerConfig::default()
     };
     let (_, out_rx) = mpsc::channel::<tokio_prompt_orchestrator::PostOutput>(1);
     tokio::spawn(async move {
-        let _ = tokio_prompt_orchestrator::web_api::start_server(config, tx, out_rx).await;
+        let _ = tokio_prompt_orchestrator::web_api::start_server(
+            config,
+            tx,
+            out_rx,
+            std::sync::Arc::new(tokio_prompt_orchestrator::DeadLetterQueue::new(100)),
+            tokio_prompt_orchestrator::enhanced::CircuitBreaker::new(
+                5,
+                0.8,
+                std::time::Duration::from_secs(60),
+            ),
+            None,
+        )
+        .await;
     });
     tokio::time::sleep(Duration::from_millis(300)).await;
     drop(rx);
@@ -1231,5 +1291,30 @@ async fn test_health_endpoint_multiple_calls_return_same_result() {
             .await
             .expect("json");
         assert_eq!(body["status"], "healthy");
+    }
+}
+
+// ============================================================================
+// Debug endpoints are opt-in
+// ============================================================================
+
+#[tokio::test]
+async fn test_debug_endpoints_refused_unless_enabled() {
+    let (base, _rx) = spawn_server().await;
+    for path in [
+        "/api/v1/debug/dlq",
+        "/api/v1/debug/dedup-index",
+        "/api/v1/debug/pipeline",
+    ] {
+        let resp = client()
+            .get(format!("{base}{path}"))
+            .send()
+            .await
+            .expect("send");
+        assert_ne!(
+            resp.status(),
+            StatusCode::OK,
+            "{path} must be refused when debug_mode is off"
+        );
     }
 }
