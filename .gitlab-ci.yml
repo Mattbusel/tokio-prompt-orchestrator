@@ -84,6 +84,11 @@ test:
   variables:
     CARGO_HOME: "${CI_PROJECT_DIR}/.cargo-home"
     CARGO_TARGET_DIR: "${CI_PROJECT_DIR}/target"
+    # ~60 test binaries with every feature: without these the debug info
+    # fills the runner's disk and the linker dies with SIGBUS.
+    CARGO_PROFILE_DEV_DEBUG: "0"
+    CARGO_PROFILE_TEST_DEBUG: "0"
+    CARGO_INCREMENTAL: "0"
   cache:
     key: cargo-test
     paths: [target/, .cargo-home/]
