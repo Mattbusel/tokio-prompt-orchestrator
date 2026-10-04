@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791000727848,
+  "lastUpdate": 1791086691893,
   "repoUrl": "https://github.com/Mattbusel/tokio-prompt-orchestrator",
   "entries": {
     "Pipeline Benchmarks": [
@@ -586,6 +586,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "session_id_creation",
             "value": 15,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "committer": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "distinct": true,
+          "id": "a55ef733fd391c78f238346f8a5bc396291c09e9",
+          "message": "2.0.0: Anthropic endpoint, semantic dedup, answers from your documents, and it plugs into async-openai, genai, rig and tower\n\nNew\n- POST /v1/messages: the Anthropic Messages API (text, system prompt, streaming with the full event sequence, x-api-key auth) with the same dedup, circuit breaker and spend cap as the OpenAI endpoint. Verified with the official anthropic Python SDK (messages.create and messages.stream) against the real binary.\n- Semantic dedup with real embeddings: Embedder trait, FastEmbedder (fastembed, local BGE-small, no API key), OpenAiEmbedder, GenaiEmbedder. Deduplicator::with_embedder / check_and_register_semantic, ServerConfig::embedder, orchestrator --semantic-dedup. Measured on BGE-small: \"Convert 10 miles to kilometers\" vs \"Convert 10 kilometers to miles\" scores 0.99, above every real paraphrase, so a hit must also pass same_specifics (same numbers, shared words in the same order). On the test pairs at 0.93: 4 of 5 paraphrases reuse the answer, 0 of 5 different questions do.\n- Retrieval: Retriever trait, TantivyRetriever (tantivy BM25 with English stemming over a folder of Markdown/text), spawn_pipeline_with + PipelineOptions, orchestrator --docs <folder>. Retrieval errors and timeouts send the prompt without context, never drop it. Release binaries include it.\n- Integrations, each a cargo feature and a ModelWorker: AsyncOpenAiWorker, GenaiWorker, RigWorker, and tower ServiceWorker / WorkerService. Tested end to end against a mock OpenAI server (reply, stream, 401 not retried, 429 backs off).\n- web_api::serve_pipeline, DeadLetterQueue::snapshot.\n\nFixed\n- Prompts reach the model as written. The Retrieve stage wrapped every prompt from the CLI, REST, WebSocket and MCP paths in invented \"CONTEXT: Retrieved documents for ... User Query: ... Assistant:\" text and slept 5 ms per request.\n- ServerConfig::default bound 0.0.0.0 with debug endpoints on and no key: now 127.0.0.1, debug off.\n- Partial ServerConfig JSON/TOML failed to load; the DLQ debug endpoint and MCP dump_dlq drained and re-pushed the queue; semantic dedup returned an empty answer on a hit and its store grew without limit; stage spans were held across .await.\n- cargo-binstall pointed at GitHub-style URLs that redirect to a sign-in page on GitLab; verified against the 1.5.0 release for Linux and Windows.\n- Four web examples and seven test suites no longer compiled; CI only ran --lib. CI now runs every test target, example and doctest. Eighteen self_modify tests that run cargo on the repository are #[ignore].\n\nChanged (breaking)\n- Default build 219 -> 167 crates: OpenTelemetry behind `otel` (no gRPC stack), notify behind `hot-reload`, clap behind `cli`.\n- OrchestratorError is #[non_exhaustive]; axum 0.8, tower 0.5, tower-http 0.6.\n- Minimum Rust 1.88 (1.85 no longer built with current dependencies). Feature minimums: tantivy 1.90, rig 1.95, fastembed 1.88.\n\nTests: 3069 passed, 0 failed (lib, integration, examples; 21 ignored on purpose) and 135 doctests with full tui mcp self-improving distributed schema tower async-openai genai tantivy; rig end to end on Rust 1.98.1; fastembed real-model tests passed. cargo clippy --all-targets: 0 errors.",
+          "timestamp": "2026-10-04T00:00:39-04:00",
+          "tree_id": "eabfdd657566d09f4bfb2f54f85ffe68a7b55f38",
+          "url": "https://github.com/Mattbusel/tokio-prompt-orchestrator/commit/a55ef733fd391c78f238346f8a5bc396291c09e9"
+        },
+        "date": 1791086690762,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "full_pipeline_echo_worker",
+            "value": 11168784,
+            "range": "± 127303",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/10",
+            "value": 51148801,
+            "range": "± 146558",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/50",
+            "value": 51199168,
+            "range": "± 187180",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/100",
+            "value": 51279807,
+            "range": "± 286564",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/512",
+            "value": 37903,
+            "range": "± 1198",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/1024",
+            "value": 37558,
+            "range": "± 1165",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/2048",
+            "value": 37854,
+            "range": "± 1915",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "send_with_shed_normal",
+            "value": 148,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "shard_session",
+            "value": 12,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "session_id_creation",
+            "value": 16,
             "range": "± 0",
             "unit": "ns/iter"
           }
