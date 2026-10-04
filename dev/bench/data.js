@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791087064371,
+  "lastUpdate": 1791087802174,
   "repoUrl": "https://github.com/Mattbusel/tokio-prompt-orchestrator",
   "entries": {
     "Pipeline Benchmarks": [
@@ -754,6 +754,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "session_id_creation",
             "value": 16,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "committer": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "distinct": true,
+          "id": "af07270f1a0eefd03c2794d53de00cef7cb6461f",
+          "message": "2.0.1: cargo binstall works on Linux and Windows\n\n- coordinator and validate need the cli feature (with replay), so binstall\n  and a plain cargo install get exactly the orchestrator binary the release\n  ships. binstall refused 2.0.0 because those two were missing from the\n  archive.\n- Windows binstall uses a .zip with the Linux archive's layout; the\n  single-file .exe format mapped every declared binary to one path.\n- Verified with cargo binstall --dry-run against the real release assets\n  for x86_64-unknown-linux-gnu and x86_64-pc-windows-msvc.",
+          "timestamp": "2026-10-04T00:20:05-04:00",
+          "tree_id": "bd4aabe8e2639aea914ee7c22b2178fd673e19fc",
+          "url": "https://github.com/Mattbusel/tokio-prompt-orchestrator/commit/af07270f1a0eefd03c2794d53de00cef7cb6461f"
+        },
+        "date": 1791087800745,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "full_pipeline_echo_worker",
+            "value": 11186379,
+            "range": "± 97228",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/10",
+            "value": 51037037,
+            "range": "± 141503",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/50",
+            "value": 51076290,
+            "range": "± 13878",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/100",
+            "value": 51082536,
+            "range": "± 128945",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/512",
+            "value": 23237,
+            "range": "± 3551",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/1024",
+            "value": 22789,
+            "range": "± 1144",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/2048",
+            "value": 22632,
+            "range": "± 577",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "send_with_shed_normal",
+            "value": 186,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "shard_session",
+            "value": 7,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "session_id_creation",
+            "value": 7,
             "range": "± 0",
             "unit": "ns/iter"
           }
