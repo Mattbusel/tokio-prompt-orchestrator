@@ -6,6 +6,12 @@
   "use strict";
 
   function el(id) { return document.getElementById(id); }
+  // button labels for the /zh/, /ja/, /ko/ pages
+  var L = {
+    "zh-CN": { replay: "重新播放", playing: "播放中…" },
+    "ja": { replay: "もう一度再生", playing: "再生中…" },
+    "ko": { replay: "다시 재생", playing: "재생 중…" }
+  }[document.documentElement.lang] || { replay: "Replay", playing: "Playing…" };
 
   function start(host, data, ui) {
     host.innerHTML = PipelineFlow.svg(data);
@@ -154,7 +160,7 @@
       step(dt);
       if (parts.every(function (p) { return p.done; }) && clock > tEnd) {
         running = false;
-        if (ui.button) ui.button.textContent = "Replay";
+        if (ui.button) ui.button.textContent = L.replay;
         return;
       }
       raf = requestAnimationFrame(frame);
@@ -173,7 +179,7 @@
 
     function play() {
       running = true; last = null;
-      if (ui.button) ui.button.textContent = "Playing…";
+      if (ui.button) ui.button.textContent = L.playing;
       raf = requestAnimationFrame(frame);
     }
 
@@ -190,7 +196,7 @@
       clock = tEnd + 1;
       parts.forEach(function (p) { p.done = true; place(p); });
       setState(clock);
-      if (ui.button) ui.button.textContent = "Replay";
+      if (ui.button) ui.button.textContent = L.replay;
       ui.button && (ui.button.onclick = function () { reduce = false; clock = 0; reset(); });
       return;
     }

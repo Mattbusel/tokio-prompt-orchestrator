@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rust LLM 요청 오케스트레이터: 중복 제거, 서킷 브레이커 (오픈소스)</title>
+<meta name="description" content="Anthropic, OpenAI, llama.cpp, vLLM 앞단에 큐, 중복 제거, 서킷 브레이커를 둡니다. 오픈소스 Rust 라이브러리와 HTTP 서버, Windows, macOS, Linux 무료 다운로드.">
+<link rel="canonical" href="https://tokio-prompt-orchestrator.vercel.app/ko/">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://tokio-prompt-orchestrator.vercel.app/ko/">
+<meta property="og:title" content="tokio-prompt-orchestrator: Rust LLM 요청 오케스트레이터">
+<meta property="og:description" content="Anthropic, OpenAI, llama.cpp, vLLM 앞단에 큐, 중복 제거, 서킷 브레이커를 둡니다. 오픈소스 Rust 라이브러리와 HTTP 서버, Windows, macOS, Linux 무료 다운로드.">
+<meta property="og:image" content="https://tokio-prompt-orchestrator.vercel.app/assets/social-preview.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="tokio-prompt-orchestrator: LLM 앞단의 중복 제거, 서킷 브레이커, 데드 레터 큐">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="tokio-prompt-orchestrator: Rust LLM 요청 오케스트레이터">
+<meta name="twitter:description" content="Anthropic, OpenAI, llama.cpp, vLLM 앞단에 큐, 중복 제거, 서킷 브레이커를 둡니다. 오픈소스 Rust 라이브러리와 HTTP 서버, Windows, macOS, Linux 무료 다운로드.">
+<meta name="twitter:image" content="https://tokio-prompt-orchestrator.vercel.app/assets/social-preview.png">
+<script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@type": "SoftwareApplication",
+ "name": "tokio-prompt-orchestrator",
+ "description": "Rust LLM request orchestrator: a bounded Tokio pipeline with deduplication, a circuit breaker, timeouts and a dead-letter queue in front of Anthropic, OpenAI, llama.cpp, vLLM or your own backend. Library, HTTP server and CLI.",
+ "applicationCategory": "DeveloperApplication",
+ "operatingSystem": "Windows, macOS, Linux",
+ "url": "https://tokio-prompt-orchestrator.vercel.app/",
+ "codeRepository": "https://gitlab.com/mattbusel/tokio-prompt-orchestrator",
+ "programmingLanguage": "Rust",
+ "license": "https://opensource.org/licenses/MIT",
+ "author": {
+  "@type": "Person",
+  "name": "Matthew Busel",
+  "url": "https://mattbusel.vercel.app/"
+ },
+ "downloadUrl": "https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/releases/permalink/latest/downloads/orchestrator-windows-x86_64.exe",
+ "softwareVersion": "1.4.3",
+ "offers": {
+  "@type": "Offer",
+  "price": "0",
+  "priceCurrency": "USD"
+ },
+ "image": "https://tokio-prompt-orchestrator.vercel.app/assets/social-preview.png"
+}
+</script>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230f1113'/%3E%3Cpath d='M5 10h9M5 16h9M5 22h9' stroke='%23f0b429' stroke-width='2.5' stroke-linecap='round'/%3E%3Cpath d='M14 10c5 0 5 6 9 6M14 22c5 0 5-6 9-6M14 16h13' stroke='%232cc7a6' stroke-width='2.5' stroke-linecap='round' fill='none'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/flow.css">
+<link rel="stylesheet" href="../assets/site.css">
+<script>
+  try { var t = localStorage.getItem("tpo-theme"); if (t) document.documentElement.setAttribute("data-theme", t); } catch (e) {}
+</script>
+<!-- i18n -->
+<link rel="alternate" hreflang="en" href="https://tokio-prompt-orchestrator.vercel.app/">
+<link rel="alternate" hreflang="zh-CN" href="https://tokio-prompt-orchestrator.vercel.app/zh/">
+<link rel="alternate" hreflang="ja" href="https://tokio-prompt-orchestrator.vercel.app/ja/">
+<link rel="alternate" hreflang="ko" href="https://tokio-prompt-orchestrator.vercel.app/ko/">
+<link rel="alternate" hreflang="x-default" href="https://tokio-prompt-orchestrator.vercel.app/">
+<meta property="og:locale" content="ko_KR">
+<meta property="og:locale:alternate" content="en_US">
+<meta property="og:locale:alternate" content="zh_CN">
+<meta property="og:locale:alternate" content="ja_JP">
+<style>.i18n-switch{display:block!important;position:relative;z-index:40;box-sizing:border-box;max-width:1200px;margin:0 auto!important;padding:6px 16px 0!important;border:0!important;background:none!important;text-align:right!important;font:13px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif!important;letter-spacing:normal!important;text-transform:none!important;opacity:.8}.i18n-switch a,.i18n-switch span{display:inline!important;margin:0!important;padding:0!important;font:inherit!important;color:inherit!important;background:none!important;border:0!important}.i18n-switch a{text-decoration:underline!important;text-underline-offset:2px}.i18n-switch [aria-current]{font-weight:600!important}</style>
+<!-- /i18n -->
+</head>
+<body>
+<a class="skip" href="#main">본문으로 건너뛰기</a>
+<div class="i18n-switch" role="navigation" aria-label="언어"><a href="../" hreflang="en" lang="en">English</a> | <a href="../zh/" hreflang="zh-CN" lang="zh-CN">简体中文</a> | <a href="../ja/" hreflang="ja" lang="ja">日本語</a> | <span aria-current="true">한국어</span></div>
+<header class="top">
+  <div class="wrap topbar">
+    <a class="mark" href="./"><span>tokio-prompt-</span><span class="dim">orchestrator</span></a>
+    <nav aria-label="프로젝트 링크">
+      <a href="#quick-start">빠른 시작</a>
+      <a href="https://docs.rs/tokio-prompt-orchestrator">API 문서</a>
+      <a href="https://crates.io/crates/tokio-prompt-orchestrator">crates.io</a>
+      <a href="https://gitlab.com/mattbusel/tokio-prompt-orchestrator">GitHub</a>
+      <button class="theme" id="theme" type="button" aria-label="색상 테마 전환"><svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="7" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 3a7 7 0 0 1 0 14z" fill="currentColor"/></svg></button>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+<section class="hero wrap">
+ <div class="hero-l">
+  <p class="eyebrow">Rust 크레이트 &middot; Tokio &middot; MIT</p>
+  <h1>사용자와 LLM 사이에 용량 제한 파이프라인을 두세요.</h1>
+  <p class="lede">중복된 프롬프트는 모델 호출 한 번을 함께 씁니다. 프로바이더에 장애가 나면 서킷 브레이커가 작동해 요청이 쌓이지 않고 즉시 실패합니다. 파이프라인이 버린 요청은 모두 데드 레터 큐에 들어가며, 확인하고 다시 실행할 수 있습니다. Anthropic, OpenAI, llama.cpp, vLLM 또는 직접 만든 백엔드와 함께 동작합니다.</p>
+  <div class="cta">
+    <a class="btn dl" href="https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/releases/permalink/latest/downloads/orchestrator-windows-x86_64.exe">Windows용 다운로드 (.exe)</a>
+    <a class="alt-dl" href="#quick-start">macOS, Linux, Homebrew, Scoop, cargo</a>
+    <div class="cmd"><code>cargo run --example llm_pipeline</code><button class="copy" data-copy="git clone https://gitlab.com/mattbusel/tokio-prompt-orchestrator &amp;&amp; cd tokio-prompt-orchestrator &amp;&amp; cargo run --example llm_pipeline" type="button">복사</button></div>
+    <span class="hint">API 키가 필요 없습니다. 아래 그림과 똑같은 시나리오를 실행합니다.</span>
+  </div>
+ </div>
+ <div class="hero-r">
+    <div>
+      <h2 id="run-h">실제 실행 한 번을 다시 보기</h2>
+      <p>사용자 4명이 요청 12개로 질문 3개를 보내고, 이어서 모의 프로바이더 장애 중에 8개가 더 도착합니다. 점 하나가 요청 하나이고, 모든 타임스탬프는 기록된 실행에서 가져온 것이며 다섯 배 느리게 재생합니다.</p>
+    </div>
+    <div class="readout" aria-live="off">
+      <div><span class="k">시간</span><span class="v mono" id="r-clock">0.0 ms</span></div>
+      <div><span class="k">모델 호출</span><span class="v mono" id="r-calls">0</span></div>
+      <div><span class="k">응답 완료</span><span class="v mono" id="r-ans">0</span></div>
+      <div><span class="k">브레이커</span><span class="v mono st ok" id="r-br">closed</span></div>
+      <div><span class="k">DLQ 대기</span><span class="v mono" id="r-dlq">0</span></div>
+      <button type="button" id="r-play" class="btn">재생</button>
+    </div>
+ </div>
+</section>
+
+<section class="stage wrap" aria-label="기록된 실행 한 번 재생">
+  <div class="flow-card"><div id="flow" class="flow-host"><noscript><img src="../assets/banner-dark.png" alt="llm_pipeline 예제를 한 번 실행했을 때의 요청 흐름" style="width:100%"></noscript></div></div>
+  <p class="source mono">출처: <a href="../data/llm_pipeline_trace.json">llm_pipeline_trace.json</a>, 내장 모의 모델(호출당 300 ms)로 <code>cargo run --example llm_pipeline</code> 실행, 디버그 빌드, Windows x86_64.</p>
+</section>
+
+<section class="wrap feats" aria-label="주요 기능">
+  <article class="feat">
+    <h3><span class="sw q0"></span>중복 제거</h3>
+    <p>동일한 프롬프트는 키로 묶여 하나로 합쳐집니다. 이 실행에서 요청 12개가 <b>모델 호출 3번</b>이 되었고, 중복 9개는 중복 제거 캐시에서 총 0.3 ms 만에 응답했습니다.</p>
+    <p class="api mono">enhanced::Deduplicator</p>
+  </article>
+  <article class="feat">
+    <h3><span class="sw bad"></span>서킷 브레이커</h3>
+    <p>3단계의 모든 워커 호출을 감쌉니다. <b>5번 실패</b>하면 열리고, 이후 요청은 프로바이더에 닿지 않고 거부됩니다. 60 s 후 다시 확인합니다.</p>
+    <p class="api mono">enhanced::CircuitBreaker</p>
+  </article>
+  <article class="feat">
+    <h3><span class="sw ink"></span>데드 레터 큐</h3>
+    <p>조용히 버려지는 요청은 없습니다. 채널 포화, 타임아웃, 기한 만료, 실패, 브레이커 거부는 모두 이유와 함께 1000개짜리 링 버퍼에 들어갑니다.</p>
+    <p class="api mono">handles.dlq.drain()</p>
+  </article>
+  <article class="feat">
+    <h3><span class="sw q1"></span>백프레셔</h3>
+    <p>Tokio 태스크 다섯 개를 용량 제한 채널(512, 512, 512, 1024, 512, 256)로 연결합니다. 모델이 느려지면 프로듀서가 기다리거나 요청을 버리므로 부하가 걸려도 메모리 사용량이 일정합니다.</p>
+    <p class="api mono">spawn_pipeline(worker)</p>
+  </article>
+</section>
+
+<section class="wrap split out" aria-labelledby="out-h">
+  <div>
+    <h2 id="out-h">그 실행의 출력</h2>
+    <p>이 예제는 약 200줄이며, 직접 만든 백엔드를 연결할 때 좋은 템플릿입니다. 키와 함께 <code>PROVIDER=anthropic</code> 또는 <code>PROVIDER=openai</code>를 설정하면 실제 모델로 같은 3번의 호출을 보냅니다. 장애는 프로바이더 앞단에서 모의로 일으키므로 비용이 들지 않습니다.</p>
+    <p><a class="arrow" href="https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/blob/main/examples/llm_pipeline.rs">examples/llm_pipeline.rs 보기</a></p>
+  </div>
+  <div class="term" role="region" aria-label="cargo run --example llm_pipeline 터미널 출력">
+    <div class="tbar"><i></i><i></i><i></i><span>cargo run --example llm_pipeline</span></div>
+    <pre id="llm-out" class="mono"></pre>
+  </div>
+</section>
+
+<section class="wrap arch" aria-labelledby="arch-h">
+  <h2 id="arch-h">요청이 흐르는 방식</h2>
+  <p>복원력은 3단계에 있습니다. <code>ModelWorker</code>를 둘러싸고 기한 확인, 서킷 브레이커, 타임아웃이 동작합니다. 중복 제거, 재시도, 캐싱, 속도 제한, 로드 밸런싱은 워커 바깥에 감싸는 빌딩 블록이며, 예제가 <code>Deduplicator</code>로 하는 방식 그대로 씁니다.</p>
+  <picture>
+    <source srcset="../assets/architecture-dark.svg" media="(prefers-color-scheme: dark)">
+    <img id="arch-img" src="../assets/architecture-light.svg" alt="용량 제한 채널로 연결된 다섯 단계: 검색, 조립, 추론, 후처리, 스트리밍. 3단계는 모델 워커를 둘러싸고 기한 확인, 서킷 브레이커, 타임아웃을 실행합니다. 버려진 요청은 이유와 함께 데드 레터 큐로 갑니다." width="1200" height="560" loading="lazy">
+  </picture>
+</section>
+
+<section class="wrap" id="quick-start" aria-labelledby="qs-h">
+  <h2 id="qs-h">빠른 시작</h2>
+  <div class="qs">
+    <div class="step">
+      <h3><span class="n">1</span>직접 확인하기</h3>
+      <p>예제를 클론해서 실행하세요. 키도 네트워크도 필요 없습니다.</p>
+      <div class="code"><button class="copy" type="button" data-target="c1">복사</button><pre id="c1" class="mono">git clone https://gitlab.com/mattbusel/tokio-prompt-orchestrator
+cd tokio-prompt-orchestrator
+cargo run --example llm_pipeline</pre></div>
+    </div>
+    <div class="step">
+      <h3><span class="n">2</span>서버 설치 및 실행</h3>
+      <p>대화형 터미널과 8080 포트의 HTTP API를 함께 제공합니다. <code>echo</code>는 키가 필요 없습니다. Windows(PowerShell 한 줄), Homebrew, Scoop, <code>cargo binstall</code>은 <a href="https://gitlab.com/mattbusel/tokio-prompt-orchestrator#download">다운로드</a>를 참고하세요.</p>
+      <div class="code"><button class="copy" type="button" data-target="c2">복사</button><pre id="c2" class="mono">curl -fsSL https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/raw/main/install.sh | sh
+orchestrator --provider echo
+
+# then, from another terminal
+curl -s -X POST http://127.0.0.1:8080/api/v1/infer \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"What is backpressure?"}'</pre></div>
+    </div>
+    <div class="step">
+      <h3><span class="n">3</span>라이브러리로 사용하기</h3>
+      <p><code>EchoWorker</code>를 <code>AnthropicWorker</code>, <code>OpenAiWorker</code>, <code>LlamaCppWorker</code>, <code>VllmWorker</code> 중 하나로 바꾸세요.</p>
+      <div class="code"><button class="copy" type="button" data-target="c3">복사</button><pre id="c3" class="mono">[dependencies]
+tokio-prompt-orchestrator = "1.4"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }</pre></div>
+    </div>
+  </div>
+  <div class="code wide"><button class="copy" type="button" data-target="c4">복사</button><pre id="c4" class="mono"><span class="kw">use</span> std::{collections::HashMap, sync::Arc};
+<span class="kw">use</span> tokio_prompt_orchestrator::{spawn_pipeline, EchoWorker, ModelWorker, PromptRequest, SessionId};
+
+<span class="at">#[tokio::main]</span>
+<span class="kw">async fn</span> main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
+    <span class="kw">let</span> worker: Arc&lt;dyn ModelWorker&gt; = Arc::new(EchoWorker::new());
+    <span class="kw">let</span> handles = spawn_pipeline(worker);
+    <span class="kw">let mut</span> output = handles.take_output_rx().<span class="kw">await</span>.ok_or(<span class="st">"output taken"</span>)?;
+
+    handles.input_tx.send(PromptRequest {
+        session: SessionId::new(<span class="st">"demo"</span>),
+        request_id: <span class="st">"req-1"</span>.into(),
+        input: <span class="st">"Hello, pipeline!"</span>.into(),
+        meta: HashMap::new(),
+        deadline: None,
+    }).<span class="kw">await</span>?;
+
+    <span class="kw">if let</span> Some(out) = output.recv().<span class="kw">await</span> { println!(<span class="st">"{}"</span>, out.text); }
+    <span class="kw">for</span> dropped <span class="kw">in</span> handles.dlq.drain() { println!(<span class="st">"dropped {}: {}"</span>, dropped.request_id, dropped.reason); }
+    Ok(())
+}</pre></div>
+</section>
+
+<section class="wrap split out" aria-labelledby="srv-h">
+  <div>
+    <h2 id="srv-h">에이전트와 도구를 위한 서버</h2>
+    <p><code>orchestrator</code> 바이너리는 터미널 프롬프트와 REST, SSE, WebSocket API를 나란히 실행합니다. 프롬프트를 POST하면 요청 ID를 받고, 그다음 결과를 가져옵니다. <code>/health</code>는 브레이커 상태와 큐 깊이를 알려 줍니다.</p>
+    <p>Claude Desktop과 Claude Code는 별도의 <code>mcp</code> 바이너리를 통해 stdio로 연결합니다: <a class="arrow" href="https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/blob/main/examples/mcp_claude_desktop.md">MCP 설정</a></p>
+    <p class="note">Windows: <a href="https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/releases/permalink/latest/downloads/orchestrator-windows-x86_64.exe">.exe를 다운로드</a>해서 더블클릭하세요. 설정에서 <code>echo</code>를 고르면 키 없이 써 볼 수 있습니다.</p>
+  </div>
+  <img class="shot" src="../assets/terminal-server.png" alt="--provider echo 로 실행한 orchestrator가 터미널에 입력한 프롬프트 하나와 curl로 /api/v1/infer 에 보낸 프롬프트 하나에 응답하는 모습" width="1184" height="607" loading="lazy">
+</section>
+
+<section class="wrap" aria-labelledby="more-h">
+  <h2 id="more-h">함께 들어 있는 기능</h2>
+  <div class="grid">
+    <div class="cell">
+      <h3>속도 제한기</h3>
+      <p>모델별 슬라이딩 윈도와 토큰 버킷. 분당 요청 10개로 제한했을 때의 실제 출력:</p>
+      <pre class="mono small">req-01 ok
+...
+req-10 ok
+req-11 throttled: sliding window limit exceeded; window resets in 60001 ms
+req-12 throttled: sliding window limit exceeded; window resets in 60001 ms</pre>
+      <p class="api mono">rate_limiter::RateLimiterRegistry</p>
+    </div>
+    <div class="cell">
+      <h3>백엔드</h3>
+      <p>Anthropic, OpenAI, llama.cpp, vLLM 워커, 오프라인 <code>EchoWorker</code>, 라운드 로빈이나 최소 부하 풀을 위한 <code>LoadBalancedWorker</code>. 그 밖의 백엔드는 async trait 하나만 구현하면 됩니다.</p>
+      <p class="api mono">trait ModelWorker</p>
+    </div>
+    <div class="cell">
+      <h3>터미널 대시보드</h3>
+      <p>큐 깊이, 브레이커 상태, 중복 제거로 아낀 양, 로그 패널을 Ratatui TUI로 보여 줍니다. 모의 데이터 모드가 있어 파이프라인을 실행하지 않고도 살펴볼 수 있습니다.</p>
+      <p class="api mono">cargo run --bin tui --features tui</p>
+    </div>
+    <div class="cell">
+      <h3>선택 기능</h3>
+      <p>feature flag로 Prometheus 메트릭, OpenTelemetry 트레이싱, Redis 기반 분산 중복 제거, 프롬프트 템플릿, A/B 테스트, 자동 튜닝 제어 루프를 추가할 수 있습니다. 기본 빌드에는 선택 의존성이 없습니다.</p>
+      <p class="api mono">--features full</p>
+    </div>
+  </div>
+</section>
+
+<section class="wrap" aria-labelledby="bench-h">
+  <h2 id="bench-h">오버헤드</h2>
+  <p><a href="https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/blob/main/BENCHMARKS.md">BENCHMARKS.md</a>에 기록된 최근 실행 결과입니다(Windows, x86_64, <code>EchoWorker</code> 사용, 네트워크와 모델 시간 제외).</p>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th scope="col">측정 항목</th><th scope="col" class="r">p50</th></tr></thead>
+    <tbody>
+      <tr><td>속도 제한 확인</td><td class="r mono">110 ns</td></tr>
+      <tr><td><code>send_with_shed</code> (요청을 버리는 논블로킹 전송)</td><td class="r mono">204 ns</td></tr>
+      <tr><td>서킷 브레이커 확인(닫힘 상태)</td><td class="r mono">~0.4 &micro;s</td></tr>
+      <tr><td>중복 제거 확인(캐시됨)</td><td class="r mono">~1.5 &micro;s</td></tr>
+      <tr><td>동일한 프롬프트 100개 동시 요청, 중복 제거 적용, 추론 한 번</td><td class="r mono">총 52.6 &micro;s</td></tr>
+      <tr><td><code>EchoWorker</code> 동시 호출 1000번</td><td class="r mono">총 7.1 ms</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+</main>
+
+<footer class="wrap foot">
+  <div>
+    <span class="mark small"><span>tokio-prompt-</span><span class="dim">orchestrator</span></span>
+    <p>MIT 라이선스. 알려진 문제는 공개적으로 추적합니다. Dockerfile은 아직 동작하는 이미지를 빌드하지 못하며(<a href="https://gitlab.com/mattbusel/tokio-prompt-orchestrator">#5</a>), RAG 단계에는 아직 실제 retriever trait이 없습니다(<a href="https://gitlab.com/mattbusel/tokio-prompt-orchestrator">#6</a>).</p>
+  </div>
+  <nav aria-label="푸터 링크">
+    <a href="https://gitlab.com/mattbusel/tokio-prompt-orchestrator">소스 코드</a>
+    <a href="https://docs.rs/tokio-prompt-orchestrator">docs.rs</a>
+    <a href="https://docs.rs/tokio-prompt-orchestrator">API 문서 (main)</a>
+    <a href="https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/blob/main/BENCHMARKS.md">벤치마크</a>
+    <a href="https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/releases">릴리스</a>
+    <a href="https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/issues">이슈</a>
+  </nav>
+</footer>
+
+<script src="../assets/flow.js"></script>
+<script src="../assets/replay.js"></script>
+<script src="../assets/site.js"></script>
+</body>
+</html>

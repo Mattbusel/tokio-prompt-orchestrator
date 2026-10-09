@@ -51,9 +51,22 @@
 <script>
   try { var t = localStorage.getItem("tpo-theme"); if (t) document.documentElement.setAttribute("data-theme", t); } catch (e) {}
 </script>
+<!-- i18n -->
+<link rel="alternate" hreflang="en" href="https://tokio-prompt-orchestrator.vercel.app/">
+<link rel="alternate" hreflang="zh-CN" href="https://tokio-prompt-orchestrator.vercel.app/zh/">
+<link rel="alternate" hreflang="ja" href="https://tokio-prompt-orchestrator.vercel.app/ja/">
+<link rel="alternate" hreflang="ko" href="https://tokio-prompt-orchestrator.vercel.app/ko/">
+<link rel="alternate" hreflang="x-default" href="https://tokio-prompt-orchestrator.vercel.app/">
+<meta property="og:locale" content="en_US">
+<meta property="og:locale:alternate" content="zh_CN">
+<meta property="og:locale:alternate" content="ja_JP">
+<meta property="og:locale:alternate" content="ko_KR">
+<style>.i18n-switch{display:block!important;position:relative;z-index:40;box-sizing:border-box;max-width:1200px;margin:0 auto!important;padding:6px 16px 0!important;border:0!important;background:none!important;text-align:right!important;font:13px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif!important;letter-spacing:normal!important;text-transform:none!important;opacity:.8}.i18n-switch a,.i18n-switch span{display:inline!important;margin:0!important;padding:0!important;font:inherit!important;color:inherit!important;background:none!important;border:0!important}.i18n-switch a{text-decoration:underline!important;text-underline-offset:2px}.i18n-switch [aria-current]{font-weight:600!important}</style>
+<!-- /i18n -->
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
+<div class="i18n-switch" role="navigation" aria-label="Language"><span aria-current="true">English</span> | <a href="zh/" hreflang="zh-CN" lang="zh-CN">简体中文</a> | <a href="ja/" hreflang="ja" lang="ja">日本語</a> | <a href="ko/" hreflang="ko" lang="ko">한국어</a></div>
 <header class="top">
   <div class="wrap topbar">
     <a class="mark" href="./"><span>tokio-prompt-</span><span class="dim">orchestrator</span></a>
