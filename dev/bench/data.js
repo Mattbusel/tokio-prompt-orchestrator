@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791580226251,
+  "lastUpdate": 1791584183442,
   "repoUrl": "https://github.com/Mattbusel/tokio-prompt-orchestrator",
   "entries": {
     "Pipeline Benchmarks": [
@@ -910,6 +910,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "send_with_shed_normal",
             "value": 165,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "shard_session",
+            "value": 12,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "session_id_creation",
+            "value": 15,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "committer": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "distinct": true,
+          "id": "66a3fcafb5b6335b53ca1fbd0ef2ddcd7d07408b",
+          "message": "Site: Simplified Chinese, Japanese and Korean pages",
+          "timestamp": "2026-10-09T18:11:06-04:00",
+          "tree_id": "c0c6a629efb01cfb9ec36cfa5f065c7eab9cc4e5",
+          "url": "https://github.com/Mattbusel/tokio-prompt-orchestrator/commit/66a3fcafb5b6335b53ca1fbd0ef2ddcd7d07408b"
+        },
+        "date": 1791584182359,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "full_pipeline_echo_worker",
+            "value": 11138858,
+            "range": "± 150057",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/10",
+            "value": 51155367,
+            "range": "± 127744",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/50",
+            "value": 51127486,
+            "range": "± 179256",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/100",
+            "value": 51211211,
+            "range": "± 353327",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/512",
+            "value": 37493,
+            "range": "± 1346",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/1024",
+            "value": 37758,
+            "range": "± 1704",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/2048",
+            "value": 37051,
+            "range": "± 1644",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "send_with_shed_normal",
+            "value": 146,
             "range": "± 0",
             "unit": "ns/iter"
           },
