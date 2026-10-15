@@ -298,4 +298,4 @@ let handles = spawn_pipeline(Arc::new(AsyncOpenAiWorker::new(client, "llama3.2")
 
 ## 聘请作者
 
-**你的产品需要这类工程能力吗？** 我会承接少量客户项目：LLM 功能、iOS 应用和性能优化，固定价格。[服务与报价](https://mattbusel.vercel.app/) · [邮箱](mailto:mattbusel@gmail.com) · [LinkedIn](https://www.linkedin.com/in/matthewbusel/)
+**你的产品需要这类工程能力吗？** 我会承接少量客户项目：LLM 功能、iOS 应用和性能优化，固定价格。[服务与报价](https://tensorust.com/) · [邮箱](mailto:mattbusel@gmail.com) · [LinkedIn](https://www.linkedin.com/in/matthewbusel/)

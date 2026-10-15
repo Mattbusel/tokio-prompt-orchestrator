@@ -298,4 +298,4 @@ feature를 하나도 켜지 않으면 라이브러리는 파이프라인, worker
 
 ## 개발 의뢰
 
-**이런 수준의 엔지니어링이 필요한 제품이 있으신가요?** 소수의 클라이언트 프로젝트를 고정 가격으로 맡고 있습니다. LLM 기능, iOS 앱, 성능 개선 작업입니다. [서비스 및 가격](https://mattbusel.vercel.app/) · [이메일](mailto:mattbusel@gmail.com) · [LinkedIn](https://www.linkedin.com/in/matthewbusel/)
+**이런 수준의 엔지니어링이 필요한 제품이 있으신가요?** 소수의 클라이언트 프로젝트를 고정 가격으로 맡고 있습니다. LLM 기능, iOS 앱, 성능 개선 작업입니다. [서비스 및 가격](https://tensorust.com/) · [이메일](mailto:mattbusel@gmail.com) · [LinkedIn](https://www.linkedin.com/in/matthewbusel/)

@@ -298,4 +298,4 @@ featureを何も有効にしない場合、ライブラリに含まれるのは�
 
 ## 作者に依頼する
 
-**あなたのプロダクトにもこうしたエンジニアリングが必要ですか？** 少数ですがクライアントの開発を固定価格でお引き受けしています。LLM機能、iOSアプリ、パフォーマンス改善などです。[サービスと料金](https://mattbusel.vercel.app/) · [メール](mailto:mattbusel@gmail.com) · [LinkedIn](https://www.linkedin.com/in/matthewbusel/)
+**あなたのプロダクトにもこうしたエンジニアリングが必要ですか？** 少数ですがクライアントの開発を固定価格でお引き受けしています。LLM機能、iOSアプリ、パフォーマンス改善などです。[サービスと料金](https://tensorust.com/) · [メール](mailto:mattbusel@gmail.com) · [LinkedIn](https://www.linkedin.com/in/matthewbusel/)
