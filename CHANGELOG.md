@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.3] - 2026-10-18
+
+### Fixed
+
+- The `orchestrator` server sent one upstream call at a time: `spawn_pipeline_with`
+  (and so `spawn_pipeline`) ran a single inference task, so 20 different prompts
+  sent at once against a provider that takes 1.5 s took about 30 s. The inference
+  stage is now a pool of workers. Measured with the openai-node SDK against a
+  1.5 s mock provider: slowest of 20 concurrent distinct prompts 30.2 s in 2.0.1,
+  1.5 s now. Identical requests in flight still coalesce into one upstream call.
+- A hung provider never opened the circuit breaker. The per-call timeout wrapped
+  the breaker call, so a timeout cancelled the call before the breaker recorded a
+  failure. The timeout now runs inside the breaker: a call that times out counts
+  as a failure, and five of them open it.
+- `stages.inference.timeout_ms` below one second was rounded down to 0 s; it is
+  now applied to the millisecond.
+
+### Added
+
+- `--concurrency <N>`: model calls sent upstream at the same time (default 16,
+  1 to 1024). `PipelineOptions::concurrency` and `DEFAULT_INFERENCE_CONCURRENCY`
+  in the library.
+- `--timeout <seconds>`: longest one upstream call may take (default 30 s, 60 s
+  for `anthropic`, as before; 1 to 3600). Past it the request is answered
+  `504 upstream_timeout` and the breaker counts a failure.
+  `PipelineOptions::inference_timeout` in the library.
+- Requests refused by an open circuit breaker (`503 circuit_open`) carry
+  `x-should-retry: false`, so the OpenAI and Anthropic SDKs stop retrying them
+  (by default they retried twice, about 1.3 s per refusal), and `Retry-After`
+  set to when the breaker will probe the provider again.
+  `CircuitBreaker::retry_after_sync` returns that time.
+
+### Changed
+
+- `spawn_pipeline` and `spawn_pipeline_with` run up to 16 model calls at once by
+  default, so outputs can arrive in a different order than requests went in
+  (match them by `request_id`). Set `PipelineOptions::concurrency = 1` for the
+  old one-at-a-time behaviour. `spawn_pipeline_with_config` keeps using
+  `inference_workers` (default 1).
+- With retries on, the inference timeout applies to each attempt rather than to
+  all attempts together.
+
 ## [2.0.2] - 2026-10-17
 
 ### Security

@@ -89,6 +89,9 @@ use tracing::{info, warn, Instrument};
 /// Default timeout for a single inference call (seconds).
 const DEFAULT_INFERENCE_TIMEOUT_SECS: u64 = 120;
 
+/// Default number of model calls [`spawn_pipeline_with`] runs at once.
+pub const DEFAULT_INFERENCE_CONCURRENCY: usize = 16;
+
 //  OutputSink trait
 
 /// Pluggable output sink for the stream stage.
@@ -291,6 +294,16 @@ pub struct PipelineOptions {
     /// Longest the Retrieve stage waits for the retriever before sending
     /// the prompt without context. Default 2 seconds.
     pub retrieval_timeout: std::time::Duration,
+    /// How many model calls run at the same time. Default
+    /// [`DEFAULT_INFERENCE_CONCURRENCY`] (16); `1` sends one call at a time
+    /// (the behaviour before 2.0.3). Values below 1 count as 1. With more
+    /// than one, answers can come out in a different order than requests
+    /// went in; match them by `request_id`.
+    pub concurrency: usize,
+    /// Longest one model call may take before it counts as failed (and,
+    /// past the circuit breaker's threshold, opens it). Applies to each
+    /// attempt when retries are on. Default 120 seconds.
+    pub inference_timeout: std::time::Duration,
 }
 
 impl Default for PipelineOptions {
@@ -300,6 +313,8 @@ impl Default for PipelineOptions {
             retriever: None,
             retrieval_limit: 4,
             retrieval_timeout: std::time::Duration::from_secs(2),
+            concurrency: DEFAULT_INFERENCE_CONCURRENCY,
+            inference_timeout: std::time::Duration::from_secs(DEFAULT_INFERENCE_TIMEOUT_SECS),
         }
     }
 }
@@ -400,17 +415,18 @@ pub fn spawn_pipeline_with(worker: Arc<dyn ModelWorker>, options: PipelineOption
     let cancel = CancellationToken::new();
     let rag = tokio::spawn(rag_stage(input_rx, rag_tx, Arc::clone(&dlq), cancel.child_token(), retrieval));
     let assemble = tokio::spawn(assemble_stage(rag_rx, assemble_tx, Arc::clone(&dlq), cancel.child_token()));
-    let inference = tokio::spawn(inference_stage(
+    let inference = spawn_inference_pool(
+        options.concurrency,
         assemble_rx,
         inference_tx,
         worker,
         circuit_breaker.clone(),
-        DEFAULT_INFERENCE_TIMEOUT_SECS,
+        options.inference_timeout,
         Arc::clone(&dlq),
         None, // adaptive timeout not used in the simple spawn_pipeline path
         retry,
-        cancel.child_token(),
-    ));
+        &cancel,
+    );
     let post = tokio::spawn(post_stage(inference_rx, post_tx, Arc::clone(&dlq), cancel.child_token()));
     let stream = tokio::spawn(stream_stage(post_rx, output_tx, Arc::new(LogSink), cancel.child_token()));
 
@@ -526,12 +542,12 @@ pub fn spawn_pipeline_with_config(
     let dlq = Arc::new(DeadLetterQueue::new(1000));
     // `[resilience] retry_attempts / retry_base_ms / retry_max_ms`.
     let retry = InferenceRetry::from_resilience(r);
-    let inference_timeout_secs = config
+    let inference_timeout = config
         .stages
         .inference
         .timeout_ms
-        .map(|ms| ms / 1000)
-        .unwrap_or(DEFAULT_INFERENCE_TIMEOUT_SECS);
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(std::time::Duration::from_secs(DEFAULT_INFERENCE_TIMEOUT_SECS));
 
     // Build the shared AdaptiveTimeout when enabled.  All pool workers share
     // one instance so the P95 estimate reflects the full traffic distribution
@@ -551,51 +567,20 @@ pub fn spawn_pipeline_with_config(
     let rag = tokio::spawn(rag_stage(input_rx, rag_tx, Arc::clone(&dlq), cancel2.child_token(), retrieval));
     let assemble = tokio::spawn(assemble_stage(rag_rx, assemble_tx, Arc::clone(&dlq), cancel2.child_token()));
 
-    // Multi-worker pool: spawn N inference tasks that all read from the same
-    // shared receiver.  When inference_workers == 1 (default) the behaviour is
-    // identical to a single direct tokio::spawn, preserving backward compat.
-    let num_workers = config.stages.inference.inference_workers.max(1);
-    let inference = if num_workers == 1 {
-        tokio::spawn(inference_stage(
-            assemble_rx,
-            inference_tx,
-            worker,
-            circuit_breaker.clone(),
-            inference_timeout_secs,
-            Arc::clone(&dlq),
-            adaptive_timeout,
-            retry,
-            cancel2.child_token(),
-        ))
-    } else {
-        info!(
-            target: "orchestrator::pipeline",
-            num_workers = num_workers,
-            "Spawning inference worker pool"
-        );
-        let shared_rx = Arc::new(tokio::sync::Mutex::new(assemble_rx));
-        let mut handles = Vec::with_capacity(num_workers);
-        for id in 0..num_workers {
-            handles.push(tokio::spawn(inference_stage_pool_worker(
-                Arc::clone(&shared_rx),
-                inference_tx.clone(),
-                Arc::clone(&worker),
-                circuit_breaker.clone(),
-                inference_timeout_secs,
-                Arc::clone(&dlq),
-                id,
-                adaptive_timeout.as_ref().map(Arc::clone),
-                retry,
-                cancel2.child_token(),
-            )));
-        }
-        // Return a single JoinHandle that waits for all pool workers to finish.
-        tokio::spawn(async move {
-            for h in handles {
-                let _ = h.await;
-            }
-        })
-    };
+    // `inference_workers` tasks share one receiver; 1 (the config default)
+    // sends one model call at a time.
+    let inference = spawn_inference_pool(
+        config.stages.inference.inference_workers,
+        assemble_rx,
+        inference_tx,
+        worker,
+        circuit_breaker.clone(),
+        inference_timeout,
+        Arc::clone(&dlq),
+        adaptive_timeout,
+        retry,
+        &cancel2,
+    );
 
     #[cfg(not(feature = "core-pinning"))]
     let post = tokio::spawn(post_stage(inference_rx, post_tx, Arc::clone(&dlq), cancel2.child_token()));
@@ -840,225 +825,100 @@ async fn assemble_stage(
 /// Stage 3: Inference
 ///
 /// Delegates to the ModelWorker trait for actual LLM inference.
-/// This stage is the hot path and should be horizontally scalable.
+///
+/// # Concurrency
+///
+/// `workers` tasks share one receiver, so up to `workers` model calls are in
+/// flight at once (`0` counts as 1). They share one circuit breaker, so
+/// failures from all of them count toward opening it.
 ///
 /// # Retry and timeout policy
 ///
-/// Retry logic and per-request timeout enforcement are centralised here.
 /// The circuit breaker (`CircuitBreaker::call`) wraps every worker call, and
-/// `tokio::time::timeout` enforces the wall-clock deadline per request.
-/// Individual [`ModelWorker`] implementations do **not** retry; see `worker.rs`.
+/// the per-call timeout runs *inside* it: a call that hangs past `timeout`
+/// is recorded as a failure, so a hung provider opens the breaker just like
+/// one that answers 5xx. With retries on, the timeout applies to each
+/// attempt. Individual [`ModelWorker`] implementations do **not** retry; see
+/// `worker.rs`.
 ///
 /// # Panics
 ///
 /// This function never panics.
-///
-/// NOTE: The multi-worker pool pattern (spawning N tasks all reading from the
-/// same `mpsc::Receiver`) is implemented in [`spawn_pipeline_with_config`] via
-/// the `inference.inference_workers` config field.  Each worker task shares an
-/// `Arc<Mutex<Receiver<…>>>` so Tokio's work-stealing distributes items across
-/// workers.  This function remains a single-worker unit so it stays testable
-/// in isolation.
 #[allow(clippy::too_many_arguments)]
-async fn inference_stage(
-    mut rx: mpsc::Receiver<AssembleOutput>,
+fn spawn_inference_pool(
+    workers: usize,
+    rx: mpsc::Receiver<AssembleOutput>,
     tx: mpsc::Sender<InferenceOutput>,
     worker: Arc<dyn ModelWorker>,
     breaker: CircuitBreaker,
-    timeout_secs: u64,
+    timeout: std::time::Duration,
     dlq: Arc<DeadLetterQueue>,
     adaptive_timeout: Option<Arc<std::sync::Mutex<AdaptiveTimeout>>>,
     retry: InferenceRetry,
-    cancel: CancellationToken,
-) {
-    info!(target: "orchestrator::pipeline", "Inference stage started");
-
-    loop {
-        let assemble_output = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => break,
-            item = rx.recv() => match item {
-                Some(req) => req,
-                None => break,
-            }
-        };
-        let start = Instant::now();
-        let session_id = assemble_output.session.as_str().to_string();
-        let request_id = assemble_output.request_id.clone();
-
-        let span = tracing::info_span!(
-            "pipeline.inference",
-            session_id = %session_id,
-            request_id = %request_id,
-            stage = "inference",
-            duration_ms = tracing::field::Empty,
-            outcome = tracing::field::Empty,
-            error_kind = tracing::field::Empty,
-        );
-
-        metrics::inc_request("inference");
-
-        // Drop requests whose deadline has already passed.
-        if let Some(deadline) = assemble_output.deadline {
-            if std::time::Instant::now() > deadline {
-                warn!(
-                    target: "orchestrator::pipeline",
-                    session_id = %session_id,
-                    request_id = %request_id,
-                    "Inference: request deadline expired, dropping"
-                );
-                metrics::inc_error("inference", "deadline_expired");
-                metrics::inc_expired();
-                dlq.push(DroppedRequest {
-                    request_id: request_id.clone(),
-                    session_id: session_id.clone(),
-                    reason: "deadline_expired".to_string(),
-                    dropped_at: std::time::SystemTime::now(),
-                });
-                continue;
-            }
+    cancel: &CancellationToken,
+) -> JoinHandle<()> {
+    let workers = workers.max(1);
+    info!(target: "orchestrator::pipeline", workers, "Spawning inference workers");
+    let shared_rx = Arc::new(tokio::sync::Mutex::new(rx));
+    let handles: Vec<JoinHandle<()>> = (0..workers)
+        .map(|id| {
+            tokio::spawn(inference_stage_pool_worker(
+                Arc::clone(&shared_rx),
+                tx.clone(),
+                Arc::clone(&worker),
+                breaker.clone(),
+                timeout,
+                Arc::clone(&dlq),
+                id,
+                adaptive_timeout.as_ref().map(Arc::clone),
+                retry,
+                cancel.child_token(),
+            ))
+        })
+        .collect();
+    // One handle that finishes when every worker has.
+    tokio::spawn(async move {
+        for h in handles {
+            let _ = h.await;
         }
+    })
+}
 
-        // Call model worker through the circuit breaker with a per-request timeout.
-        // When adaptive_timeout is enabled, use the P95-based dynamic timeout;
-        // otherwise fall back to the fixed timeout_secs value.
-        // Prompt content is NOT logged.
-        let effective_timeout = adaptive_timeout
-            .as_ref()
-            .and_then(|at| at.lock().ok().map(|g| g.current_timeout()))
-            .unwrap_or_else(|| std::time::Duration::from_secs(timeout_secs));
-        let prompt = assemble_output.prompt.clone();
-        let w = Arc::clone(&worker);
-        // Retries (if enabled) happen inside one breaker call, so a request
-        // that recovers on a retry counts as one success, not N failures.
-        let infer_fut =
-            breaker.call(|| async move { retry.run(|| w.infer(&prompt)).await });
-        let cb_result = match tokio::time::timeout(effective_timeout, infer_fut.instrument(span.clone())).await {
-            Ok(result) => result,
-            Err(_elapsed) => {
-                metrics::inc_inference_timeout();
-                let timeout_secs_eff = effective_timeout.as_secs();
-                let _timeout_err =
-                    crate::OrchestratorError::InferenceTimeout { timeout_secs: timeout_secs_eff };
-                metrics::inc_error("inference", "inference_timeout");
-                warn!(
-                    target: "orchestrator::pipeline",
-                    session_id = %session_id,
-                    request_id = %request_id,
-                    timeout_secs = timeout_secs_eff,
-                    "Inference timed out — dropping request into DLQ"
-                );
-                dlq.push(DroppedRequest {
-                    request_id: request_id.clone(),
-                    session_id: session_id.clone(),
-                    reason: format!("inference_timeout:{timeout_secs_eff}s"),
-                    dropped_at: std::time::SystemTime::now(),
-                });
-                continue;
-            }
-        };
-
-        match cb_result {
-            Ok(tokens) => {
-                let elapsed = start.elapsed();
-                // Record elapsed duration into the adaptive timeout sampler so
-                // future calls use an up-to-date P95 estimate.
-                if let Some(at) = &adaptive_timeout {
-                    if let Ok(mut g) = at.lock() {
-                        g.record_duration(elapsed);
+/// One model call through the breaker, with the timeout inside it so a
+/// timeout counts as a breaker failure. A timeout comes back as
+/// `Failed(OrchestratorError::InferenceTimeout)`.
+async fn call_worker(
+    breaker: &CircuitBreaker,
+    worker: Arc<dyn ModelWorker>,
+    retry: InferenceRetry,
+    prompt: String,
+    timeout: std::time::Duration,
+) -> Result<Vec<String>, crate::enhanced::circuit_breaker::CircuitBreakerError<crate::OrchestratorError>> {
+    // Retries (if enabled) happen inside one breaker call, so a request
+    // that recovers on a retry counts as one success, not N failures.
+    breaker
+        .call(|| async move {
+            retry
+                .run(|| async {
+                    match tokio::time::timeout(timeout, worker.infer(&prompt)).await {
+                        Ok(result) => result,
+                        Err(_elapsed) => Err(crate::OrchestratorError::InferenceTimeout {
+                            timeout_secs: timeout.as_secs(),
+                        }),
                     }
-                }
-                metrics::record_stage_latency("inference", elapsed);
-                span.record("duration_ms", elapsed.as_millis() as u64);
-                span.record("outcome", "ok");
+                })
+                .await
+        })
+        .await
+}
 
-                let output = InferenceOutput {
-                    session: assemble_output.session,
-                    request_id: request_id.clone(),
-                    tokens,
-                };
-
-                match send_with_shed(&tx, output, PipelineStage::Inference).instrument(span.clone()).await {
-                    Ok(SendOutcome::Queued) => {}
-                    Ok(SendOutcome::Shed) => {
-                        tracing::trace!(
-                            target: "orchestrator::pipeline",
-                            session_id = %session_id,
-                            request_id = %request_id,
-                            "Inference stage: item shed due to backpressure"
-                        );
-                        metrics::inc_shed("inference");
-                        metrics::inc_dropped("inference");
-                        dlq.push(DroppedRequest {
-                            request_id: request_id.clone(),
-                            session_id: session_id.clone(),
-                            reason: "backpressure:inference".to_string(),
-                            dropped_at: std::time::SystemTime::now(),
-                        });
-                    }
-                    Err(e) => {
-                        warn!(
-                            target: "orchestrator::pipeline",
-                            session_id = %session_id,
-                            request_id = %request_id,
-                            error = ?e,
-                            "Inference stage send failed"
-                        );
-                        metrics::inc_error("inference", "channel_closed");
-                        break;
-                    }
-                }
-            }
-            Err(crate::enhanced::circuit_breaker::CircuitBreakerError::Open) => {
-                let elapsed = start.elapsed();
-                metrics::record_stage_latency("inference", elapsed);
-                span.record("duration_ms", elapsed.as_millis() as u64);
-                span.record("outcome", "err");
-                span.record("error_kind", "circuit_open");
-
-                warn!(
-                    target: "orchestrator::pipeline",
-                    session_id = %session_id,
-                    request_id = %request_id,
-                    "Inference rejected: circuit breaker open"
-                );
-                metrics::inc_error("inference", "circuit_open");
-                metrics::inc_shed("inference");
-                metrics::inc_dropped("inference");
-                dlq.push(DroppedRequest {
-                    request_id: request_id.clone(),
-                    session_id: session_id.clone(),
-                    reason: "circuit_breaker_open".to_string(),
-                    dropped_at: std::time::SystemTime::now(),
-                });
-            }
-            Err(crate::enhanced::circuit_breaker::CircuitBreakerError::Failed(e)) => {
-                let elapsed = start.elapsed();
-                metrics::record_stage_latency("inference", elapsed);
-                span.record("duration_ms", elapsed.as_millis() as u64);
-                span.record("outcome", "err");
-                span.record("error_kind", "inference_failure");
-
-                warn!(
-                    target: "orchestrator::pipeline",
-                    session_id = %session_id,
-                    request_id = %request_id,
-                    error = %e,
-                    "Inference failed"
-                );
-                metrics::inc_error("inference", "inference_failure");
-                metrics::inc_worker_error("unknown", "inference_error");
-                dlq.push(DroppedRequest {
-                    request_id: request_id.clone(),
-                    session_id: session_id.clone(),
-                    reason: format!("inference_failure:{e}"),
-                    dropped_at: std::time::SystemTime::now(),
-                });
-            }
-        }
+/// `30s`, or `500ms` for sub-second timeouts, for DLQ reasons and logs.
+fn timeout_label(timeout: std::time::Duration) -> String {
+    if timeout.subsec_millis() == 0 {
+        format!("{}s", timeout.as_secs())
+    } else {
+        format!("{}ms", timeout.as_millis())
     }
-
-    info!(target: "orchestrator::pipeline", "Inference stage shutting down");
 }
 
 /// Shared-receiver inference worker used by the multi-worker pool.
@@ -1072,7 +932,7 @@ async fn inference_stage_pool_worker(
     tx: mpsc::Sender<InferenceOutput>,
     worker: Arc<dyn ModelWorker>,
     breaker: CircuitBreaker,
-    timeout_secs: u64,
+    timeout: std::time::Duration,
     dlq: Arc<DeadLetterQueue>,
     worker_id: usize,
     adaptive_timeout: Option<Arc<std::sync::Mutex<AdaptiveTimeout>>>,
@@ -1141,37 +1001,43 @@ async fn inference_stage_pool_worker(
         let effective_timeout = adaptive_timeout
             .as_ref()
             .and_then(|at| at.lock().ok().map(|g| g.current_timeout()))
-            .unwrap_or_else(|| std::time::Duration::from_secs(timeout_secs));
-        let prompt = assemble_output.prompt.clone();
-        let w = Arc::clone(&worker);
-        // Retries (if enabled) happen inside one breaker call, so a request
-        // that recovers on a retry counts as one success, not N failures.
-        let infer_fut =
-            breaker.call(|| async move { retry.run(|| w.infer(&prompt)).await });
-        let cb_result = match tokio::time::timeout(effective_timeout, infer_fut.instrument(span.clone())).await {
-            Ok(result) => result,
-            Err(_elapsed) => {
-                metrics::inc_inference_timeout();
-                let timeout_secs_eff = effective_timeout.as_secs();
-                let _timeout_err =
-                    crate::OrchestratorError::InferenceTimeout { timeout_secs: timeout_secs_eff };
-                metrics::inc_error("inference", "inference_timeout");
-                warn!(
-                    target: "orchestrator::pipeline",
-                    session_id = %session_id,
-                    request_id = %request_id,
-                    timeout_secs = timeout_secs_eff,
-                    "Inference pool worker timed out — dropping request into DLQ"
-                );
-                dlq.push(DroppedRequest {
-                    request_id: request_id.clone(),
-                    session_id: session_id.clone(),
-                    reason: format!("inference_timeout:{timeout_secs_eff}s"),
-                    dropped_at: std::time::SystemTime::now(),
-                });
-                continue;
-            }
-        };
+            .unwrap_or(timeout);
+        let cb_result = call_worker(
+            &breaker,
+            Arc::clone(&worker),
+            retry,
+            assemble_output.prompt.clone(),
+            effective_timeout,
+        )
+        .instrument(span.clone())
+        .await;
+        if let Err(crate::enhanced::circuit_breaker::CircuitBreakerError::Failed(
+            crate::OrchestratorError::InferenceTimeout { .. },
+        )) = &cb_result
+        {
+            metrics::inc_inference_timeout();
+            metrics::inc_error("inference", "inference_timeout");
+            let elapsed = start.elapsed();
+            metrics::record_stage_latency("inference", elapsed);
+            span.record("duration_ms", elapsed.as_millis() as u64);
+            span.record("outcome", "err");
+            span.record("error_kind", "inference_timeout");
+            let label = timeout_label(effective_timeout);
+            warn!(
+                target: "orchestrator::pipeline",
+                session_id = %session_id,
+                request_id = %request_id,
+                timeout = %label,
+                "Inference timed out, dropping request into DLQ"
+            );
+            dlq.push(DroppedRequest {
+                request_id: request_id.clone(),
+                session_id: session_id.clone(),
+                reason: format!("inference_timeout:{label}"),
+                dropped_at: std::time::SystemTime::now(),
+            });
+            continue;
+        }
 
         match cb_result {
             Ok(tokens) => {
@@ -1816,6 +1682,114 @@ mod tests {
             .expect("output");
         let seen = seen.lock().expect("lock").clone();
         assert_eq!(seen, vec!["What is 2+2?".to_string()]);
+    }
+
+    /// Worker that sleeps, tracking the most calls in flight at once.
+    struct SlowProbe {
+        delay: std::time::Duration,
+        in_flight: Arc<std::sync::atomic::AtomicUsize>,
+        peak: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ModelWorker for SlowProbe {
+        async fn infer(&self, _prompt: &str) -> Result<Vec<String>, crate::OrchestratorError> {
+            use std::sync::atomic::Ordering;
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(self.delay).await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(vec!["ok".to_string()])
+        }
+    }
+
+    async fn peak_concurrency(concurrency: usize, requests: usize) -> (usize, std::time::Duration) {
+        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let worker = Arc::new(SlowProbe {
+            delay: std::time::Duration::from_millis(200),
+            in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            peak: Arc::clone(&peak),
+        });
+        let options = PipelineOptions {
+            concurrency,
+            ..PipelineOptions::default()
+        };
+        let handles = spawn_pipeline_with(worker, options);
+        let mut out = handles.take_output_rx().await.expect("output receiver");
+        let started = std::time::Instant::now();
+        for i in 0..requests {
+            handles
+                .input_tx
+                .send(make_test_request("s", &format!("r{i}"), &format!("prompt {i}")))
+                .await
+                .expect("send");
+        }
+        for _ in 0..requests {
+            tokio::time::timeout(std::time::Duration::from_secs(10), out.recv())
+                .await
+                .expect("answer in time")
+                .expect("output");
+        }
+        (peak.load(std::sync::atomic::Ordering::SeqCst), started.elapsed())
+    }
+
+    #[tokio::test]
+    async fn test_default_pipeline_runs_sixteen_calls_at_once() {
+        assert_eq!(PipelineOptions::default().concurrency, DEFAULT_INFERENCE_CONCURRENCY);
+        let (peak, wall) = peak_concurrency(DEFAULT_INFERENCE_CONCURRENCY, 20).await;
+        assert_eq!(peak, 16);
+        // Two rounds of 200 ms, not twenty.
+        assert!(wall < std::time::Duration::from_secs(2), "{wall:?}");
+    }
+
+    #[tokio::test]
+    async fn test_concurrency_one_and_zero_send_one_call_at_a_time() {
+        assert_eq!(peak_concurrency(1, 3).await.0, 1);
+        assert_eq!(peak_concurrency(0, 3).await.0, 1, "0 counts as 1");
+    }
+
+    /// Worker that never answers.
+    struct HangingWorker;
+
+    #[async_trait::async_trait]
+    impl ModelWorker for HangingWorker {
+        async fn infer(&self, _prompt: &str) -> Result<Vec<String>, crate::OrchestratorError> {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn test_timeouts_count_as_breaker_failures() {
+        // Before 2.0.3 the timeout wrapped the breaker call, so a hung
+        // provider was cancelled before the breaker saw a failure and the
+        // breaker never opened.
+        let options = PipelineOptions {
+            inference_timeout: std::time::Duration::from_millis(100),
+            ..PipelineOptions::default()
+        };
+        let handles = spawn_pipeline_with(Arc::new(HangingWorker), options);
+        for i in 0..5 {
+            handles
+                .input_tx
+                .send(make_test_request("s", &format!("hang-{i}"), &format!("hang {i}")))
+                .await
+                .expect("send");
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while handles.dlq.peek().len() < 5 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let dropped = handles.dlq.peek();
+        assert_eq!(dropped.len(), 5, "{dropped:?}");
+        assert!(dropped.iter().all(|d| d.reason == "inference_timeout:100ms"), "{dropped:?}");
+        assert!(handles.circuit_breaker.is_open_sync(), "5 timeouts open the breaker");
+    }
+
+    #[test]
+    fn test_timeout_label() {
+        assert_eq!(timeout_label(std::time::Duration::from_secs(30)), "30s");
+        assert_eq!(timeout_label(std::time::Duration::from_millis(1500)), "1500ms");
     }
 
     #[derive(Debug)]

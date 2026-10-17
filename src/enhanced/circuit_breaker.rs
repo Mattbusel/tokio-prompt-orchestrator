@@ -425,6 +425,39 @@ impl CircuitBreaker {
             .unwrap_or(false)
     }
 
+    /// How long until an open circuit lets the next probe request through.
+    ///
+    /// `None` when the circuit is closed or half-open (or the state is
+    /// momentarily locked). `Some(Duration::ZERO)` when the probe is already
+    /// due: the next request will be let through. Servers use this for a
+    /// `Retry-After` header on requests the breaker refuses.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use tokio_prompt_orchestrator::enhanced::CircuitBreaker;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let cb = CircuitBreaker::new(5, 0.8, Duration::from_secs(60));
+    /// assert_eq!(cb.retry_after_sync(), None);
+    /// cb.trip().await;
+    /// let wait = cb.retry_after_sync().expect("open");
+    /// assert!(wait > Duration::from_secs(59) && wait <= Duration::from_secs(60));
+    /// # }
+    /// ```
+    pub fn retry_after_sync(&self) -> Option<Duration> {
+        let state = self.state.try_read().ok()?;
+        if !matches!(state.status, CircuitStatus::Open) {
+            return None;
+        }
+        let last_failure = state.last_failure_time?;
+        let backoff_factor = 1u32 << state.probe_failures.min(6);
+        let probe_interval = self.config.timeout * backoff_factor;
+        Some(probe_interval.saturating_sub(last_failure.elapsed()))
+    }
+
     /// Get current circuit status
     pub async fn status(&self) -> CircuitStatus {
         self.state.read().await.status.clone()
@@ -490,6 +523,25 @@ pub struct CircuitBreakerStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_retry_after_counts_down_while_open_and_is_none_when_closed() {
+        let breaker = CircuitBreaker::new(2, 0.8, Duration::from_secs(30));
+        assert_eq!(breaker.retry_after_sync(), None, "closed breaker has no reset time");
+        for _ in 0..2 {
+            let _: Result<(), CircuitBreakerError<()>> = breaker.call(|| async { Err(()) }).await;
+        }
+        let wait = breaker.retry_after_sync().expect("open breaker knows its reset time");
+        assert!(wait <= Duration::from_secs(30) && wait > Duration::from_secs(29), "{wait:?}");
+
+        // Past the probe interval the probe is due now.
+        let quick = CircuitBreaker::new(1, 0.8, Duration::from_millis(20));
+        let _: Result<(), CircuitBreakerError<()>> = quick.call(|| async { Err(()) }).await;
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert_eq!(quick.retry_after_sync(), Some(Duration::ZERO));
+        breaker.reset().await;
+        assert_eq!(breaker.retry_after_sync(), None);
+    }
 
     #[tokio::test]
     async fn test_circuit_opens_on_failures() {

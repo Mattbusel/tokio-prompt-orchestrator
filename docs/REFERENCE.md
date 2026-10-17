@@ -202,7 +202,7 @@ All features are opt-in. The default build has no optional dependencies.
 | `POST /v1/chat/completions` | Standard request body. Returns a `chat.completion` object with `usage`, or with `"stream": true` Server-Sent Events in `chat.completion.chunk` format ending with `data: [DONE]`. `stream_options.include_usage` adds the final usage chunk. |
 | `GET /v1/models` | One entry: the model the orchestrator was started with, `owned_by` set to the provider. |
 
-**What happens to a request.** It goes into the same five-stage pipeline as `POST /api/v1/infer`: bounded queues, the circuit breaker (5 failures open it, one probe after 60 s), the 120 s inference timeout, and the dead-letter queue. A dropped request is answered at once with an error that says why, instead of hanging until the client times out.
+**What happens to a request.** It goes into the same five-stage pipeline as `POST /api/v1/infer`: bounded queues, up to `--concurrency` upstream calls at once (default 16), the circuit breaker (5 failures open it, one probe after 60 s), the upstream timeout (`--timeout`, default 30 s, 60 s for Anthropic; a call past it counts as a breaker failure), and the dead-letter queue. A dropped request is answered at once with an error that says why, instead of hanging until the client times out.
 
 - **Messages.** A single user message is sent to the model exactly as written. A longer conversation is flattened into one prompt, one `Role: text` turn per message separated by blank lines (`System`, `User`, `Assistant`, `Tool`). Content may be a string or an array of `text` parts.
 - **Model and sampling.** The worker calls the provider and model given at startup (`--provider`, `--model`), and the response's `model` field reports that model. The request's `model`, `temperature`, `max_tokens`, `top_p` and other unknown fields are accepted and ignored.
@@ -221,7 +221,7 @@ All features are opt-in. The default build has no optional dependencies.
 | 429 | `server_busy` | A pipeline queue is full (`Retry-After: 5`) |
 | 429 | `upstream_rate_limited` | The provider answered 429 |
 | 502 | `upstream_error` | The provider call failed |
-| 503 | `circuit_open` | The circuit breaker is open, so the provider was not called |
+| 503 | `circuit_open` | The circuit breaker is open, so the provider was not called. Sent with `x-should-retry: false` (the OpenAI and Anthropic SDKs then skip their automatic retries) and `Retry-After` set to when the breaker probes the provider again |
 | 503 | `shutting_down`, `pipeline_closed`, `tracker_full` | The server cannot take the request |
 | 504 | `upstream_timeout`, `timeout` | The provider or the whole request ran past its time limit |
 

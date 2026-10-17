@@ -23,7 +23,8 @@ use tokio_prompt_orchestrator::web_api::{start_server, ServerConfig};
 use tokio_prompt_orchestrator::enhanced::InferenceRetry;
 use tokio_prompt_orchestrator::token_counter::{exact_chat_prompt_tokens, exact_token_count};
 use tokio_prompt_orchestrator::{
-    spawn_pipeline, spawn_pipeline_with_retry, EchoWorker, ModelWorker, OrchestratorError,
+    spawn_pipeline, spawn_pipeline_with, spawn_pipeline_with_retry, EchoWorker, ModelWorker,
+    OrchestratorError, PipelineOptions,
 };
 
 // ============================================================================
@@ -758,4 +759,162 @@ async fn anthropic_auth_accepts_x_api_key_and_rejects_a_wrong_one() {
     assert_eq!(bad.status(), StatusCode::UNAUTHORIZED);
     let v: Value = bad.json().await.expect("json");
     assert_eq!(v["error"]["type"], "authentication_error");
+}
+
+// ============================================================================
+// 2.0.3: concurrent upstream calls, x-should-retry, upstream timeout
+// ============================================================================
+
+/// Worker that records how many calls are in flight at once.
+struct ConcurrencyProbe {
+    delay: Duration,
+    calls: Arc<AtomicUsize>,
+    in_flight: Arc<AtomicUsize>,
+    max_in_flight: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl ModelWorker for ConcurrencyProbe {
+    async fn infer(&self, prompt: &str) -> Result<Vec<String>, OrchestratorError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_in_flight.fetch_max(now, Ordering::SeqCst);
+        tokio::time::sleep(self.delay).await;
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        Ok(prompt.split_whitespace().map(str::to_string).collect())
+    }
+}
+
+fn probe(delay_ms: u64) -> (Arc<ConcurrencyProbe>, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let max = Arc::new(AtomicUsize::new(0));
+    let worker = Arc::new(ConcurrencyProbe {
+        delay: Duration::from_millis(delay_ms),
+        calls: Arc::clone(&calls),
+        in_flight: Arc::new(AtomicUsize::new(0)),
+        max_in_flight: Arc::clone(&max),
+    });
+    (worker, calls, max)
+}
+
+fn options(concurrency: usize, timeout: Duration) -> PipelineOptions {
+    let mut o = PipelineOptions::default();
+    o.concurrency = concurrency;
+    o.inference_timeout = timeout;
+    o
+}
+
+#[tokio::test]
+async fn different_concurrent_requests_run_in_parallel() {
+    // 20 different prompts, 500 ms each. One at a time this takes 10 s;
+    // with the default 16 workers it takes two rounds, about 1 s.
+    let (worker, calls, max) = probe(500);
+    let s = start(worker, |_| {}).await;
+    let started = std::time::Instant::now();
+    let bodies: Vec<Value> = (0..20).map(|i| chat_body(&format!("distinct question {i}"))).collect();
+    let resps = futures::future::join_all(bodies.iter().map(|b| post_chat(&s.base, b))).await;
+    let wall = started.elapsed();
+    for (i, r) in resps.into_iter().enumerate() {
+        assert_eq!(r.status(), StatusCode::OK);
+        let v: Value = r.json().await.expect("json");
+        // Answers reach the right caller even when they finish out of order.
+        assert_eq!(v["choices"][0]["message"]["content"], format!("distinct question {i}"));
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 20);
+    let peak = max.load(Ordering::SeqCst);
+    assert_eq!(peak, 16, "default concurrency is 16, saw {peak} in flight");
+    assert!(wall < Duration::from_secs(4), "20 x 500 ms took {wall:?}");
+}
+
+#[tokio::test]
+async fn concurrency_one_sends_one_call_at_a_time() {
+    let (worker, calls, max) = probe(100);
+    let s = start_with(spawn_pipeline_with(worker, options(1, Duration::from_secs(30))), |_| {}).await;
+    let bodies: Vec<Value> = (0..4).map(|i| chat_body(&format!("serial {i}"))).collect();
+    let resps = futures::future::join_all(bodies.iter().map(|b| post_chat(&s.base, b))).await;
+    assert!(resps.iter().all(|r| r.status() == StatusCode::OK));
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    assert_eq!(max.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn identical_requests_still_coalesce_with_concurrent_workers() {
+    // 10 copies of one prompt plus 10 different prompts, all at once:
+    // the copies share one upstream call, the others run in parallel.
+    let (worker, calls, max) = probe(400);
+    let s = start(worker, |_| {}).await;
+    let mut bodies: Vec<Value> = (0..10).map(|_| chat_body("the same question")).collect();
+    bodies.extend((0..10).map(|i| chat_body(&format!("other question {i}"))));
+    let resps = futures::future::join_all(bodies.iter().map(|b| post_chat(&s.base, b))).await;
+    let mut joined = 0;
+    for r in resps {
+        assert_eq!(r.status(), StatusCode::OK);
+        if r.headers()["x-orchestrator-dedup"] == "joined" {
+            joined += 1;
+        }
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 11, "1 shared call + 10 distinct");
+    assert_eq!(joined, 9);
+    assert!(max.load(Ordering::SeqCst) > 1);
+}
+
+#[tokio::test]
+async fn breaker_rejections_tell_sdks_not_to_retry() {
+    let s = start_echo().await;
+    s.handles.circuit_breaker.trip().await;
+    let resp = post_chat(&s.base, &chat_body("is anyone there")).await;
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(resp.headers()["x-should-retry"], "false");
+    // The default breaker probes again after 60 s.
+    let secs: u64 = resp.headers()["retry-after"].to_str().expect("ascii").parse().expect("seconds");
+    assert!((1..=60).contains(&secs), "Retry-After {secs}");
+    assert_openai_error(&resp.json().await.expect("json"), "circuit_open");
+
+    // The Anthropic endpoint sends the same headers (its SDK reads them too).
+    let r = post_messages(
+        &s.base,
+        &json!({"model": "m", "max_tokens": 8, "messages": [{"role": "user", "content": "anyone?"}]}),
+    )
+    .await;
+    assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(r.headers()["x-should-retry"], "false");
+    assert!(r.headers().contains_key("retry-after"));
+}
+
+#[tokio::test]
+async fn other_errors_leave_retry_decisions_to_the_sdk() {
+    let s = start(Arc::new(FailingWorker), |_| {}).await;
+    let resp = post_chat(&s.base, &chat_body("provider error")).await;
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    assert!(!resp.headers().contains_key("x-should-retry"));
+}
+
+#[tokio::test]
+async fn hung_upstream_times_out_and_opens_the_breaker() {
+    struct Hang;
+    #[async_trait]
+    impl ModelWorker for Hang {
+        async fn infer(&self, _p: &str) -> Result<Vec<String>, OrchestratorError> {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            Ok(vec![])
+        }
+    }
+    let handles = spawn_pipeline_with(Arc::new(Hang), options(16, Duration::from_millis(300)));
+    let s = start_with(handles, |_| {}).await;
+    let started = std::time::Instant::now();
+    // Five hung calls at once: each times out after 300 ms, and each counts
+    // as a breaker failure.
+    let bodies: Vec<Value> = (0..5).map(|i| chat_body(&format!("hang {i}"))).collect();
+    let resps = futures::future::join_all(bodies.iter().map(|b| post_chat(&s.base, b))).await;
+    for r in resps {
+        assert_eq!(r.status(), StatusCode::GATEWAY_TIMEOUT);
+        let v: Value = r.json().await.expect("json");
+        assert_openai_error(&v, "upstream_timeout");
+        assert!(v["error"]["message"].as_str().unwrap_or_default().contains("300ms"), "{v}");
+    }
+    assert!(started.elapsed() < Duration::from_secs(3), "timeouts ran in parallel");
+    assert!(s.handles.circuit_breaker.is_open_sync(), "5 timeouts open the breaker");
+    let resp = post_chat(&s.base, &chat_body("hang 5")).await;
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(resp.headers()["x-should-retry"], "false");
 }

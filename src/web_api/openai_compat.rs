@@ -114,6 +114,10 @@ pub(super) struct ApiError {
     param: Option<&'static str>,
     code: &'static str,
     retry_after_secs: Option<u64>,
+    /// Sent as `x-should-retry`, the header the OpenAI and Anthropic SDKs
+    /// check before their own retry logic. `Some(false)` stops their
+    /// automatic retries; `None` leaves the header out.
+    should_retry: Option<bool>,
 }
 
 impl ApiError {
@@ -125,6 +129,7 @@ impl ApiError {
             param: None,
             code,
             retry_after_secs: None,
+            should_retry: None,
         }
     }
 
@@ -140,6 +145,41 @@ impl ApiError {
         self
     }
 
+    fn should_retry(mut self, retry: bool) -> Self {
+        self.should_retry = Some(retry);
+        self
+    }
+
+    /// Error for a request the pipeline dropped, with what the circuit
+    /// breaker knows: a refusal carries `Retry-After` set to when the
+    /// breaker lets the next probe through.
+    fn from_dlq(reason: &str, breaker: &crate::enhanced::CircuitBreaker) -> Self {
+        let err = Self::from_dlq_reason(reason);
+        if err.code == "circuit_open" {
+            if let Some(wait) = breaker.retry_after_sync() {
+                // Round up: a client that waits this long finds the probe due.
+                let secs = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
+                return err.retry_after(secs.max(1));
+            }
+        }
+        err
+    }
+
+    /// Add `Retry-After` and `x-should-retry` to `resp`.
+    fn add_headers(&self, resp: &mut Response) {
+        if let Some(secs) = self.retry_after_secs {
+            if let Ok(v) = HeaderValue::from_str(&secs.to_string()) {
+                resp.headers_mut().insert(header::RETRY_AFTER, v);
+            }
+        }
+        if let Some(retry) = self.should_retry {
+            resp.headers_mut().insert(
+                "x-should-retry",
+                HeaderValue::from_static(if retry { "true" } else { "false" }),
+            );
+        }
+    }
+
     /// Map a dead-letter reason from the pipeline to an HTTP error.
     fn from_dlq_reason(reason: &str) -> Self {
         if reason == "circuit_breaker_open" {
@@ -150,6 +190,9 @@ impl ApiError {
                 "The upstream model is failing, so the orchestrator's circuit breaker is open and \
                  this request was refused without calling it. Retry later.",
             )
+            // Retrying at once only hits the open breaker again, so tell
+            // SDK clients not to (they would otherwise retry twice).
+            .should_retry(false)
         } else if let Some(t) = reason.strip_prefix("inference_timeout:") {
             Self::new(
                 StatusCode::GATEWAY_TIMEOUT,
@@ -210,11 +253,7 @@ impl IntoResponse for ApiError {
             }
         });
         let mut resp = (self.status, Json(body)).into_response();
-        if let Some(secs) = self.retry_after_secs {
-            if let Ok(v) = HeaderValue::from_str(&secs.to_string()) {
-                resp.headers_mut().insert(header::RETRY_AFTER, v);
-            }
-        }
+        self.add_headers(&mut resp);
         resp
     }
 }
@@ -448,7 +487,7 @@ async fn run_pipeline(
     let timeout = Duration::from_secs(state.config.timeout_seconds);
     match tokio::time::timeout(timeout, rx).await {
         Ok(Ok(Ok(text))) => Ok(text),
-        Ok(Ok(Err(reason))) => Err(ApiError::from_dlq_reason(&reason)),
+        Ok(Ok(Err(reason))) => Err(ApiError::from_dlq(&reason, &state.circuit_breaker)),
         Ok(Err(_closed)) => Err(ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "server_error",
@@ -765,11 +804,7 @@ fn anthropic_error(err: &ApiError) -> Response {
         "error": {"type": kind, "message": err.message},
     });
     let mut resp = (err.status, Json(body)).into_response();
-    if let Some(secs) = err.retry_after_secs {
-        if let Ok(v) = HeaderValue::from_str(&secs.to_string()) {
-            resp.headers_mut().insert(header::RETRY_AFTER, v);
-        }
-    }
+    err.add_headers(&mut resp);
     resp
 }
 

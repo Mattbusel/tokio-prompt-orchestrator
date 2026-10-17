@@ -80,7 +80,7 @@ x-orchestrator-dedup: cached
 {"choices":[{"finish_reason":"stop","index":0,"logprobs":null,"message":{"content":"Summarize this ticket","refusal":null,"role":"assistant"}}],"created":1790804186,"id":"chatcmpl-4d5284a811bd4c0f90bee01018103e1a","model":"echo","object":"chat.completion","system_fingerprint":null,"usage":{"completion_tokens":5,"prompt_tokens":5,"total_tokens":10}}
 ```
 
-The orchestrator answers with the provider and model it was started with (`--provider openai --model gpt-4o-mini`, say), whatever `model` the request names. Errors come back in OpenAI's format: 503 while the breaker is open, 429 at the spend cap. Details, auth and limits: [docs/REFERENCE.md](docs/REFERENCE.md#openai-compatible-api).
+The orchestrator answers with the provider and model it was started with (`--provider openai --model gpt-4o-mini`, say), whatever `model` the request names. Errors come back in OpenAI's format: 503 while the breaker is open (with `x-should-retry: false`, so the SDK does not retry it), 429 at the spend cap. Details, auth and limits: [docs/REFERENCE.md](docs/REFERENCE.md#openai-compatible-api).
 
 For OpenAI models the token counts in `usage` (and so the spend cap) come from the model's own tokenizer, so they match your OpenAI bill. Other models get an estimate of about 4 characters per token, which is what you see from `echo` above.
 
@@ -109,6 +109,21 @@ Now stream it
 ```
 
 Text conversations, system prompts and streaming are supported; image and tool blocks are rejected with a clear `invalid_request_error`. The key goes in `x-api-key` (as the Anthropic SDKs send it) or `Authorization: Bearer`.
+
+## Server flags
+
+The flags that change how `orchestrator` treats your provider (`orchestrator --help` lists them all):
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--concurrency <N>` | 16 | Model calls sent upstream at the same time. 20 different prompts at once with a 1.5 s provider take about 1.5 s at the default; with `--concurrency 1` they queue and take about 30 s. Identical prompts in flight still share one call whatever the setting. |
+| `--timeout <seconds>` | 30 (60 for `anthropic`) | Longest one upstream call may take. A call that runs past it is answered `504 upstream_timeout` and counts as a failure for the circuit breaker, so a provider that accepts connections and never answers opens the breaker instead of holding every caller. |
+| `--retries <N>` | 0 | Retry a call that failed with a 429, a 5xx or a network error, with backoff. |
+| `--max-spend <dollars>` | none | Spend cap: the API answers 429 once it is reached. |
+| `--semantic-dedup [0.5-1.0]` | off | Also reuse answers to reworded questions (needs `fastembed`). |
+| `--docs <folder>` | off | Answer from your own Markdown and text files (needs `tantivy`). |
+
+When the breaker is open, refused requests come back as `503 circuit_open` with `x-should-retry: false` and a `Retry-After` set to when the breaker will try the provider again. The OpenAI and Anthropic SDKs read `x-should-retry`, so they fail at once instead of retrying a request that cannot succeed yet.
 
 ## Answer from your own documents
 

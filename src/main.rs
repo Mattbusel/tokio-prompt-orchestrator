@@ -130,6 +130,10 @@ struct CliArgs {
     docs: Option<std::path::PathBuf>,
     /// Semantic dedup threshold (`--semantic-dedup`), local embeddings.
     semantic_dedup: Option<f32>,
+    /// Model calls in flight at once (`--concurrency`).
+    concurrency: usize,
+    /// Per-call upstream timeout in seconds (`--timeout`); `None` = provider default.
+    timeout: Option<u64>,
     no_web: bool,
     reset: bool,
 }
@@ -172,6 +176,12 @@ OPTIONS:
     --docs <folder>                            Answer from your own documents: Markdown and
                                                text files in <folder> are searched for each
                                                prompt and the best passages sent with it
+    --concurrency <N>                          Model calls sent upstream at the same time
+                                               (default: 16, max 1024). Identical requests
+                                               in flight still share one call
+    --timeout <seconds>                        Give up on one upstream call after this long and
+                                               count it as a failure for the circuit breaker
+                                               (default: 30; 60 for anthropic; max 3600)
     --semantic-dedup [0.5-1.0]                 Also reuse answers to differently worded
                                                questions that mean the same thing (OpenAI
                                                endpoint; local embedding model, downloaded
@@ -237,6 +247,8 @@ fn parse_args() -> Result<CliArgs, String> {
     let mut retries: Option<u32> = None;
     let mut docs: Option<std::path::PathBuf> = None;
     let mut semantic_dedup: Option<f32> = None;
+    let mut concurrency: usize = DEFAULT_CONCURRENCY;
+    let mut timeout: Option<u64> = None;
     let mut no_web = false;
     let mut reset = false;
 
@@ -268,7 +280,7 @@ fn parse_args() -> Result<CliArgs, String> {
             }
             "--reset" => reset = true,
             flag @ ("--provider" | "--model" | "--port" | "--host" | "--log-level"
-            | "--max-spend" | "--retries" | "--docs") => {
+            | "--max-spend" | "--retries" | "--docs" | "--concurrency" | "--timeout") => {
                 i += 1;
                 if i >= args.len() {
                     return Err(format!("{flag} requires a value"));
@@ -300,6 +312,8 @@ fn parse_args() -> Result<CliArgs, String> {
                             })?);
                     }
                     "--retries" => retries = Some(parse_retries(&val)?),
+                    "--concurrency" => concurrency = parse_concurrency(&val)?,
+                    "--timeout" => timeout = Some(parse_timeout(&val)?),
                     "--docs" => {
                         let path = std::path::PathBuf::from(&val);
                         if !path.is_dir() {
@@ -333,9 +347,40 @@ fn parse_args() -> Result<CliArgs, String> {
         retries,
         docs,
         semantic_dedup,
+        concurrency,
+        timeout,
         no_web,
         reset,
     })
+}
+
+/// Default for `--concurrency`.
+const DEFAULT_CONCURRENCY: usize = tokio_prompt_orchestrator::stages::DEFAULT_INFERENCE_CONCURRENCY;
+
+/// Parse a `--concurrency` value: a whole number from 1 to 1024.
+fn parse_concurrency(val: &str) -> Result<usize, String> {
+    match val.parse::<usize>() {
+        Ok(n) if (1..=1024).contains(&n) => Ok(n),
+        _ => Err(format!("--concurrency must be a whole number from 1 to 1024, got: {val}")),
+    }
+}
+
+/// Parse a `--timeout` value: whole seconds from 1 to 3600.
+fn parse_timeout(val: &str) -> Result<u64, String> {
+    match val.parse::<u64>() {
+        Ok(n) if (1..=3600).contains(&n) => Ok(n),
+        _ => Err(format!("--timeout must be a whole number of seconds from 1 to 3600, got: {val}")),
+    }
+}
+
+/// How long one upstream call may take: `--timeout`, else the provider's
+/// default (30 s, or 60 s for Anthropic, whose answers run longer).
+fn upstream_timeout(cfg: &ResolvedConfig) -> std::time::Duration {
+    let secs = cfg.timeout.unwrap_or(match cfg.provider.as_str() {
+        "anthropic" => 60,
+        _ => 30,
+    });
+    std::time::Duration::from_secs(secs)
 }
 
 /// Parse a `--retries` value: a whole number from 0 to 10.
@@ -364,6 +409,10 @@ struct ResolvedConfig {
     // Read only by the web server, so unused in builds without `web-api`.
     #[cfg_attr(not(feature = "web-api"), allow(dead_code))]
     semantic_dedup: Option<f32>,
+    /// Model calls in flight at once.
+    concurrency: usize,
+    /// Per-call upstream timeout in seconds; `None` = provider default.
+    timeout: Option<u64>,
     no_web: bool,
 }
 
@@ -470,8 +519,10 @@ fn run_wizard(args: CliArgs) -> ResolvedConfig {
                     log_level: args.log_level,
                     max_spend: args.max_spend,
                     retries: args.retries,
-        docs: args.docs.clone(),
-        semantic_dedup: args.semantic_dedup,
+                    docs: args.docs.clone(),
+                    semantic_dedup: args.semantic_dedup,
+                    concurrency: args.concurrency,
+                    timeout: args.timeout,
                     no_web: args.no_web,
                 };
             }
@@ -640,6 +691,8 @@ fn run_wizard(args: CliArgs) -> ResolvedConfig {
         retries: args.retries,
         docs: args.docs.clone(),
         semantic_dedup: args.semantic_dedup,
+        concurrency: args.concurrency,
+        timeout: args.timeout,
         no_web,
     }
 }
@@ -744,6 +797,9 @@ fn missing_key_help(provider: &str, var: &str, example: &str, url: &str) -> Stri
 }
 
 fn build_worker(cfg: &ResolvedConfig) -> Result<Arc<dyn ModelWorker>, String> {
+    // The pipeline enforces the upstream timeout (and counts it against the
+    // circuit breaker); the worker's own HTTP timeout is a backstop 1 s later.
+    let http_timeout = upstream_timeout(cfg) + std::time::Duration::from_secs(1);
     match cfg.provider.as_str() {
         "anthropic" => {
             if env::var("ANTHROPIC_API_KEY")
@@ -758,7 +814,7 @@ fn build_worker(cfg: &ResolvedConfig) -> Result<Arc<dyn ModelWorker>, String> {
                 ));
             }
             AnthropicWorker::new(cfg.model.clone())
-                .map(|w| Arc::new(w) as Arc<dyn ModelWorker>)
+                .map(|w| Arc::new(w.with_timeout(http_timeout)) as Arc<dyn ModelWorker>)
                 .map_err(|e| {
                     format!(
                         "Could not connect to Anthropic: {e}\n\n\
@@ -780,7 +836,7 @@ fn build_worker(cfg: &ResolvedConfig) -> Result<Arc<dyn ModelWorker>, String> {
                 ));
             }
             OpenAiWorker::new(cfg.model.clone())
-                .map(|w| Arc::new(w) as Arc<dyn ModelWorker>)
+                .map(|w| Arc::new(w.with_timeout(http_timeout)) as Arc<dyn ModelWorker>)
                 .map_err(|e| {
                     format!(
                         "Could not connect to OpenAI: {e}\n\n\
@@ -789,7 +845,7 @@ fn build_worker(cfg: &ResolvedConfig) -> Result<Arc<dyn ModelWorker>, String> {
                     )
                 })
         }
-        "llama" => Ok(Arc::new(LlamaCppWorker::new()) as Arc<dyn ModelWorker>),
+        "llama" => Ok(Arc::new(LlamaCppWorker::new().with_timeout(http_timeout)) as Arc<dyn ModelWorker>),
         "echo" => Ok(Arc::new(EchoWorker::with_delay(10)) as Arc<dyn ModelWorker>),
         unknown => Err(format!(
             "Unknown provider '{unknown}'.\n\
@@ -1063,6 +1119,8 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
     );
     let mut options = PipelineOptions::default();
     options.retry = retry;
+    options.concurrency = cfg.concurrency;
+    options.inference_timeout = upstream_timeout(&cfg);
     if let Some(dir) = &cfg.docs {
         match load_docs(dir) {
             Ok(retriever) => options.retriever = Some(retriever),
@@ -1073,7 +1131,13 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
         }
     }
     let handles = spawn_pipeline_with(worker, options);
-    tracing::info!(retries = cfg.retries, docs = cfg.docs.is_some(), "Pipeline stages spawned");
+    tracing::info!(
+        retries = cfg.retries,
+        docs = cfg.docs.is_some(),
+        concurrency = cfg.concurrency,
+        timeout_secs = upstream_timeout(&cfg).as_secs(),
+        "Pipeline stages spawned"
+    );
 
     // ── Config hot-reload: poll orchestrator.env every 5 s ──────────────────
     {
@@ -1263,6 +1327,8 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
                 model: cfg.model.clone(),
                 max_spend_usd: cfg.max_spend,
                 dedup_window_secs,
+                timeout_seconds: http_wait_secs(upstream_timeout(&cfg).as_secs(), cfg.retries)
+                    .max(defaults.timeout_seconds),
                 ..defaults
             };
             tracing::info!(addr = %format!("{}:{}", cfg.host, cfg.port), "Starting web API");
@@ -1304,6 +1370,13 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
 
     drop(handles.input_tx);
     Ok(())
+}
+
+/// Longest an HTTP request can need from the pipeline: every attempt timing
+/// out, plus the retry backoff (each wait at most 10 s), plus slack.
+#[cfg_attr(not(feature = "web-api"), allow(dead_code))]
+fn http_wait_secs(timeout_secs: u64, retries: u32) -> u64 {
+    timeout_secs * (u64::from(retries) + 1) + 10 * u64::from(retries) + 5
 }
 
 // ---------------------------------------------------------------------------
@@ -1379,6 +1452,8 @@ mod tests {
             retries: 0,
             docs: None,
             semantic_dedup: None,
+            concurrency: DEFAULT_CONCURRENCY,
+            timeout: None,
             no_web: false,
         };
         assert!(build_worker(&cfg).is_ok());
@@ -1402,6 +1477,8 @@ mod tests {
             retries: 0,
             docs: None,
             semantic_dedup: None,
+            concurrency: DEFAULT_CONCURRENCY,
+            timeout: None,
             no_web: false,
         };
         let err = build_worker(&cfg).err().unwrap();
@@ -1424,6 +1501,8 @@ mod tests {
             retries: 0,
             docs: None,
             semantic_dedup: None,
+            concurrency: DEFAULT_CONCURRENCY,
+            timeout: None,
             no_web: false,
         };
         let err = build_worker(&cfg).err().unwrap();
@@ -1443,6 +1522,8 @@ mod tests {
             retries: 0,
             docs: None,
             semantic_dedup: None,
+            concurrency: DEFAULT_CONCURRENCY,
+            timeout: None,
             no_web: false,
         };
         let err = build_worker(&cfg).err().unwrap();
@@ -1462,6 +1543,8 @@ mod tests {
             retries: 0,
             docs: None,
             semantic_dedup: None,
+            concurrency: DEFAULT_CONCURRENCY,
+            timeout: None,
             no_web: false,
         };
         assert!(build_worker(&cfg).is_ok());
@@ -1486,6 +1569,60 @@ mod tests {
         assert!(!result.contains("PROVIDER="));
         assert!(result.contains("MODEL="));
         let _ = fs::remove_file(tmp);
+    }
+
+    #[test]
+    fn test_parse_concurrency_bounds() {
+        assert_eq!(parse_concurrency("1"), Ok(1));
+        assert_eq!(parse_concurrency("16"), Ok(16));
+        assert_eq!(parse_concurrency("1024"), Ok(1024));
+        assert!(parse_concurrency("0").is_err());
+        assert!(parse_concurrency("1025").is_err());
+        assert!(parse_concurrency("lots").is_err());
+        assert_eq!(DEFAULT_CONCURRENCY, 16);
+    }
+
+    #[test]
+    fn test_parse_timeout_bounds() {
+        assert_eq!(parse_timeout("5"), Ok(5));
+        assert_eq!(parse_timeout("3600"), Ok(3600));
+        assert!(parse_timeout("0").is_err());
+        assert!(parse_timeout("3601").is_err());
+        assert!(parse_timeout("1.5").is_err());
+    }
+
+    fn cfg_for(provider: &str, timeout: Option<u64>) -> ResolvedConfig {
+        ResolvedConfig {
+            provider: provider.to_string(),
+            model: "m".to_string(),
+            port: 8080,
+            host: "127.0.0.1".to_string(),
+            log_level: "info".to_string(),
+            max_spend: None,
+            retries: 0,
+            docs: None,
+            semantic_dedup: None,
+            concurrency: DEFAULT_CONCURRENCY,
+            timeout,
+            no_web: false,
+        }
+    }
+
+    #[test]
+    fn test_upstream_timeout_defaults_and_flag() {
+        use std::time::Duration;
+        assert_eq!(upstream_timeout(&cfg_for("llama", None)), Duration::from_secs(30));
+        assert_eq!(upstream_timeout(&cfg_for("openai", None)), Duration::from_secs(30));
+        assert_eq!(upstream_timeout(&cfg_for("anthropic", None)), Duration::from_secs(60));
+        assert_eq!(upstream_timeout(&cfg_for("llama", Some(5))), Duration::from_secs(5));
+        assert_eq!(upstream_timeout(&cfg_for("anthropic", Some(5))), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn test_http_wait_covers_every_attempt() {
+        assert_eq!(http_wait_secs(30, 0), 35);
+        // 3 attempts of 30 s plus two backoffs of up to 10 s.
+        assert_eq!(http_wait_secs(30, 2), 115);
     }
 
     #[test]

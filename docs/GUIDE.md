@@ -92,7 +92,7 @@ cargo build --release --features full
 ./target/release/orchestrator --provider anthropic --model claude-sonnet-4-6
 ```
 
-Flags: `--port` (default 8080), `--host` (default 127.0.0.1), `--no-web`, `--max-spend <dollars>`, `--retries <N>` (retry a model call that fails with a 429, a 5xx or a network error up to N times, with backoff; default 0), `--log-level`. Settings persist in `orchestrator.env` next to the binary. Prometheus metrics are served at `/metrics` on the web API port when built with `metrics-server`.
+Flags: `--port` (default 8080), `--host` (default 127.0.0.1), `--no-web`, `--max-spend <dollars>`, `--retries <N>` (retry a model call that fails with a 429, a 5xx or a network error up to N times, with backoff; default 0), `--concurrency <N>` (model calls in flight at once; default 16), `--timeout <seconds>` (longest one upstream call may take before it counts as a failure; default 30, 60 for anthropic), `--log-level`. Settings persist in `orchestrator.env` next to the binary. Prometheus metrics are served at `/metrics` on the web API port when built with `metrics-server`.
 
 ### Docker
 

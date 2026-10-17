@@ -76,7 +76,7 @@ fn warn_if_low_remaining(headers: &reqwest::header::HeaderMap, provider: &str) {
 /// # Resilience
 ///
 /// Worker implementations do **not** include retry logic. Retries are handled
-/// by the pipeline's inference stage (see `stages::inference_stage`). If you
+/// by the pipeline's inference stage (see `stages::spawn_inference_pool`). If you
 /// call a worker directly outside of the pipeline, you are responsible for
 /// implementing appropriate retry, timeout, and backoff logic.
 #[async_trait]
