@@ -1,6 +1,14 @@
 (function () {
   "use strict";
   var root = document.documentElement;
+  // pages in /zh/, /ja/, /ko/ share these assets: resolve paths from this script, not the page
+  var me = document.currentScript && document.currentScript.src;
+  var base = me ? new URL("../", me).href : "";
+  var L = {
+    "zh-CN": ["已复制", "复制", "请手动选择并复制"],
+    "ja": ["コピーしました", "コピー", "選択してコピーしてください"],
+    "ko": ["복사됨", "복사", "직접 선택해 복사하세요"]
+  }[root.lang] || ["Copied", "Copy", "Select and copy"];
 
   // theme: system by default, a button flips and remembers it
   function effective() {
@@ -14,7 +22,7 @@
     var pic = img.parentNode;
     var src = pic.querySelector("source");
     if (root.getAttribute("data-theme") && src) src.remove();
-    if (root.getAttribute("data-theme")) img.src = "assets/architecture-" + effective() + ".svg";
+    if (root.getAttribute("data-theme")) img.src = base + "assets/architecture-" + effective() + ".svg";
   }
   var btn = document.getElementById("theme");
   if (btn) btn.addEventListener("click", function () {
@@ -33,15 +41,15 @@
         var t = document.getElementById(b.getAttribute("data-target"));
         text = t ? t.textContent : "";
       }
-      var done = function () { b.textContent = "Copied"; setTimeout(function () { b.textContent = "Copy"; }, 1400); };
+      var done = function () { b.textContent = L[0]; setTimeout(function () { b.textContent = L[1]; }, 1400); };
       if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).then(done, function () { b.textContent = "Select and copy"; });
-      } else { b.textContent = "Select and copy"; }
+        navigator.clipboard.writeText(text).then(done, function () { b.textContent = L[2]; });
+      } else { b.textContent = L[2]; }
     });
   });
 
   // the real stdout of the example
-  fetch("data/llm_pipeline_output.txt").then(function (r) { return r.text(); }).then(function (t) {
+  fetch(base + "data/llm_pipeline_output.txt").then(function (r) { return r.text(); }).then(function (t) {
     var pre = document.getElementById("llm-out");
     if (!pre) return;
     var esc = function (s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;"); };
@@ -52,7 +60,7 @@
   }).catch(function () {});
 
   // the replay
-  fetch("data/llm_pipeline_trace.json").then(function (r) { return r.json(); }).then(function (d) {
+  fetch(base + "data/llm_pipeline_trace.json").then(function (r) { return r.json(); }).then(function (d) {
     PipelineReplay.start(document.getElementById("flow"), d, {
       clock: document.getElementById("r-clock"),
       calls: document.getElementById("r-calls"),

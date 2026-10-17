@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:xhtml="http://www.w3.org/1999/xhtml">
+  <url>
+    <loc>https://tokio-prompt-orchestrator.vercel.app/</loc>
+    <xhtml:link rel="alternate" hreflang="en" href="https://tokio-prompt-orchestrator.vercel.app/"/>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://tokio-prompt-orchestrator.vercel.app/zh/"/>
+    <xhtml:link rel="alternate" hreflang="ja" href="https://tokio-prompt-orchestrator.vercel.app/ja/"/>
+    <xhtml:link rel="alternate" hreflang="ko" href="https://tokio-prompt-orchestrator.vercel.app/ko/"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://tokio-prompt-orchestrator.vercel.app/"/>
+  </url>
+  <url>
+    <loc>https://tokio-prompt-orchestrator.vercel.app/zh/</loc>
+    <xhtml:link rel="alternate" hreflang="en" href="https://tokio-prompt-orchestrator.vercel.app/"/>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://tokio-prompt-orchestrator.vercel.app/zh/"/>
+    <xhtml:link rel="alternate" hreflang="ja" href="https://tokio-prompt-orchestrator.vercel.app/ja/"/>
+    <xhtml:link rel="alternate" hreflang="ko" href="https://tokio-prompt-orchestrator.vercel.app/ko/"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://tokio-prompt-orchestrator.vercel.app/"/>
+  </url>
+  <url>
+    <loc>https://tokio-prompt-orchestrator.vercel.app/ja/</loc>
+    <xhtml:link rel="alternate" hreflang="en" href="https://tokio-prompt-orchestrator.vercel.app/"/>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://tokio-prompt-orchestrator.vercel.app/zh/"/>
+    <xhtml:link rel="alternate" hreflang="ja" href="https://tokio-prompt-orchestrator.vercel.app/ja/"/>
+    <xhtml:link rel="alternate" hreflang="ko" href="https://tokio-prompt-orchestrator.vercel.app/ko/"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://tokio-prompt-orchestrator.vercel.app/"/>
+  </url>
+  <url>
+    <loc>https://tokio-prompt-orchestrator.vercel.app/ko/</loc>
+    <xhtml:link rel="alternate" hreflang="en" href="https://tokio-prompt-orchestrator.vercel.app/"/>
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="https://tokio-prompt-orchestrator.vercel.app/zh/"/>
+    <xhtml:link rel="alternate" hreflang="ja" href="https://tokio-prompt-orchestrator.vercel.app/ja/"/>
+    <xhtml:link rel="alternate" hreflang="ko" href="https://tokio-prompt-orchestrator.vercel.app/ko/"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://tokio-prompt-orchestrator.vercel.app/"/>
+  </url>
+</urlset>
