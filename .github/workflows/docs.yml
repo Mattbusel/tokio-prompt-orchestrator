@@ -28,9 +28,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build rustdoc
+        # No --cfg docsrs here: lib.rs enables the nightly-only doc_cfg feature
+        # under that cfg (for docs.rs), which fails on the stable toolchain.
         run: cargo doc --no-deps
-        env:
-          RUSTDOCFLAGS: "--cfg docsrs"
 
       - name: Assemble site
         run: |
