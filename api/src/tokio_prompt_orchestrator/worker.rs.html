@@ -76,7 +76,7 @@
 <a href=#76 id=76 data-nosnippet>76</a>/// # Resilience
 <a href=#77 id=77 data-nosnippet>77</a>///
 <a href=#78 id=78 data-nosnippet>78</a>/// Worker implementations do **not** include retry logic. Retries are handled
-<a href=#79 id=79 data-nosnippet>79</a>/// by the pipeline's inference stage (see `stages::inference_stage`). If you
+<a href=#79 id=79 data-nosnippet>79</a>/// by the pipeline's inference stage (see `stages::spawn_inference_pool`). If you
 <a href=#80 id=80 data-nosnippet>80</a>/// call a worker directly outside of the pipeline, you are responsible for
 <a href=#81 id=81 data-nosnippet>81</a>/// implementing appropriate retry, timeout, and backoff logic.
 <a href=#82 id=82 data-nosnippet>82</a></span><span class="attr">#[async_trait]
