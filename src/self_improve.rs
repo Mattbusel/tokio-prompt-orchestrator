@@ -289,7 +289,7 @@ impl SelfImprovingLoop {
                 }
 
                 // 6. Periodically snapshot current configuration
-                if tick % cfg.snapshot_every_n_ticks == 0 {
+                if tick.is_multiple_of(cfg.snapshot_every_n_ticks) {
                     Self::step_snapshot(&handles, &snap);
                 }
 

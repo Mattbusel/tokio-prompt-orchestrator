@@ -1,4 +1,4 @@
-//! Adapters between [`ModelWorker`] and [`tower::Service`](tower::Service).
+//! Adapters between [`ModelWorker`] and [`tower::Service`].
 //!
 //! tower is the middleware layer most of async Rust is built on (axum,
 //! tonic, reqwest's ecosystem). These two types let the orchestrator and

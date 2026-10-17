@@ -300,7 +300,7 @@ impl MockMetrics {
         match phase_tick {
             // Warmup: occasional info
             0..=29 => {
-                if tick % 5 == 0 {
+                if tick.is_multiple_of(5) {
                     app.push_log(LogEntry {
                         timestamp: ts,
                         level: LogLevel::Info,
@@ -315,7 +315,7 @@ impl MockMetrics {
             }
             // Load ramp: more frequent info + occasional warn
             30..=44 => {
-                if tick % 3 == 0 {
+                if tick.is_multiple_of(3) {
                     app.push_log(LogEntry {
                         timestamp: ts.clone(),
                         level: LogLevel::Info,
@@ -338,7 +338,7 @@ impl MockMetrics {
             }
             // Failure: errors + warns
             45..=59 => {
-                if tick % 3 == 0 {
+                if tick.is_multiple_of(3) {
                     app.push_log(LogEntry {
                         timestamp: ts.clone(),
                         level: LogLevel::Error,
@@ -354,7 +354,7 @@ impl MockMetrics {
                         fields: "worker=llama.cpp failures=5 threshold=5".to_string(),
                     });
                 }
-                if tick % 5 == 0 {
+                if tick.is_multiple_of(5) {
                     app.push_log(LogEntry {
                         timestamp: ts,
                         level: LogLevel::Warn,
@@ -376,7 +376,7 @@ impl MockMetrics {
                         fields: "worker=llama.cpp probing=true".to_string(),
                     });
                 }
-                if tick % 5 == 0 {
+                if tick.is_multiple_of(5) {
                     app.push_log(LogEntry {
                         timestamp: ts,
                         level: LogLevel::Debug,
@@ -395,7 +395,7 @@ impl MockMetrics {
                         fields: "worker=llama.cpp recovered=true".to_string(),
                     });
                 }
-                if tick % 4 == 0 {
+                if tick.is_multiple_of(4) {
                     app.push_log(LogEntry {
                         timestamp: ts,
                         level: LogLevel::Info,
@@ -410,7 +410,7 @@ impl MockMetrics {
             }
             // Steady: nominal info
             _ => {
-                if tick % 4 == 0 {
+                if tick.is_multiple_of(4) {
                     let messages = [
                         (
                             "Request deduped",

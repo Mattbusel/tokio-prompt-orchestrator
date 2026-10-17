@@ -82,9 +82,6 @@
 //! - **Thread safety**: the index is protected by an `Arc<RwLock<Vec<_>>>`.
 //!   Concurrent lookups (read path) do not block each other; inserts briefly
 //!   acquire an exclusive write lock.
-//!
-//! [`LexicalDedup::lookup_jaccard`]: LexicalDedup::lookup_jaccard
-//! [`LexicalDedup::lookup`]: LexicalDedup::lookup
 
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;

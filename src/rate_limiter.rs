@@ -89,6 +89,9 @@ impl TokenBucket {
     /// Refills the bucket based on elapsed time first, then deducts `n`.
     /// Returns `true` if the tokens were available and consumed, `false`
     /// otherwise (bucket remains unchanged on failure).
+    // `fetch_update` is deprecated in favour of `try_update` on newer Rust,
+    // which the 1.88 MSRV does not have yet.
+    #[allow(deprecated)]
     pub fn try_consume(&self, n: u64) -> bool {
         // Refill
         let elapsed_ms = {

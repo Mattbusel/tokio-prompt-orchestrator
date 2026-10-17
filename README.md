@@ -11,6 +11,8 @@ For developers who call an LLM API from an app, an agent or a script and want it
   <a href="https://docs.rs/tokio-prompt-orchestrator"><img alt="docs.rs" src="https://img.shields.io/docsrs/tokio-prompt-orchestrator"></a>
   <a href="https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/releases"><img alt="release" src="https://img.shields.io/gitlab/v/release/mattbusel%2Ftokio-prompt-orchestrator"></a>
   <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
+  <a href="https://github.com/Mattbusel/tokio-prompt-orchestrator/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Mattbusel/tokio-prompt-orchestrator/actions/workflows/ci.yml/badge.svg"></a>
+  <img alt="MSRV 1.88" src="https://img.shields.io/badge/MSRV-1.88-blue.svg">
 </p>
 
 <img alt="Recorded session. Part 1: cargo run --example llm_pipeline answers 12 requests with 3 model calls, then during a simulated outage 5 calls fail with 503, the circuit breaker opens and the next 3 fail fast. Part 2: orchestrator --provider echo answers a question typed at its prompt while a second terminal sends a prompt with curl, fetches the result and reads /health." src="assets/demo.gif" width="100%">
@@ -295,6 +297,8 @@ With no features the library is the pipeline, the workers and the resilience par
 | [docs.rs](https://docs.rs/tokio-prompt-orchestrator) | Full Rust API |
 
 Contributions welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). MIT licensed, see [LICENSE](LICENSE).
+
+Source, issues and stars: [GitHub](https://github.com/Mattbusel/tokio-prompt-orchestrator). Mirror and release downloads: [GitLab](https://gitlab.com/mattbusel/tokio-prompt-orchestrator). More open-source Rust from the same author: [tensorust.com/open-source](https://tensorust.com/open-source/).
 
 ## Hire the author
 

@@ -119,7 +119,7 @@ impl CronField {
     fn matches(&self, value: u32) -> bool {
         match self {
             Self::Any => true,
-            Self::Every(n) => value % n == 0,
+            Self::Every(n) => value.is_multiple_of(*n),
             Self::Exact(v) => *v == value,
         }
     }

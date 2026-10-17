@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.2] - 2026-10-17
+
+### Security
+
+- `Cargo.lock` moves rustls 0.23.45 to 0.23.46 for RUSTSEC-2026-0346, -0347, -0348
+  and -0349 (TLS secrets in `Debug` output, ECH rejection data leak, Brotli
+  certificate decompression allocation, ServerHello key-exchange downgrade). This
+  reaches anyone who installs the binaries with `cargo install --locked`; library
+  users get it with `cargo update -p rustls`.
+
+### Fixed
+
+- Builds clean on Rust 1.99 with `-D warnings`: clippy `manual_is_multiple_of`,
+  the deprecated `fetch_update` (kept, because `try_update` needs a newer Rust than
+  the 1.88 MSRV) and a redundant rustdoc link.
+
+### Changed
+
+- `repository` now points at GitHub; GitLab stays the mirror and hosts the release
+  downloads, so the `cargo binstall` URLs name GitLab directly.
+
 ## [2.0.1] - 2026-10-04
 
 ### Fixed

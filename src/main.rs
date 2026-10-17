@@ -361,6 +361,8 @@ struct ResolvedConfig {
     /// Retries for transient model errors (0 = off).
     retries: u32,
     docs: Option<std::path::PathBuf>,
+    // Read only by the web server, so unused in builds without `web-api`.
+    #[cfg_attr(not(feature = "web-api"), allow(dead_code))]
     semantic_dedup: Option<f32>,
     no_web: bool,
 }
@@ -985,6 +987,7 @@ fn load_docs(
 
 /// Load the local embedding model for `--semantic-dedup`.
 #[cfg(feature = "fastembed")]
+#[cfg_attr(not(feature = "web-api"), allow(dead_code))]
 fn load_embedder() -> Result<std::sync::Arc<dyn tokio_prompt_orchestrator::Embedder>, String> {
     println!("  Loading the embedding model for --semantic-dedup (128 MB, downloaded once)...");
     tokio_prompt_orchestrator::integrations::FastEmbedder::try_default()
@@ -993,6 +996,7 @@ fn load_embedder() -> Result<std::sync::Arc<dyn tokio_prompt_orchestrator::Embed
 }
 
 #[cfg(not(feature = "fastembed"))]
+#[cfg_attr(not(feature = "web-api"), allow(dead_code))]
 fn load_embedder() -> Result<std::sync::Arc<dyn tokio_prompt_orchestrator::Embedder>, String> {
     Err("This build has no --semantic-dedup support. Install with: cargo install tokio-prompt-orchestrator --features web-api,fastembed".to_string())
 }

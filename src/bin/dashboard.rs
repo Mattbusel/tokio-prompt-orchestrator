@@ -687,7 +687,7 @@ impl MockDashboardState {
 
         let entry = match phase_tick {
             0..=29 => {
-                if tick % 3 == 0 {
+                if tick.is_multiple_of(3) {
                     Some(RecentRequest {
                         timestamp: ts,
                         session_id: format!("user-{}", tick % 100),
@@ -704,7 +704,7 @@ impl MockDashboardState {
                 session_id: format!("user-{}", tick % 200),
                 stage: stages[stage_idx].to_string(),
                 latency_ms: self.stage_latencies[stage_idx],
-                status: if tick % 5 == 0 {
+                status: if tick.is_multiple_of(5) {
                     "deduped".to_string()
                 } else {
                     "ok".to_string()
@@ -715,7 +715,7 @@ impl MockDashboardState {
                 session_id: format!("user-{}", tick % 50),
                 stage: "inference".to_string(),
                 latency_ms: self.stage_latencies[2],
-                status: if tick % 3 == 0 {
+                status: if tick.is_multiple_of(3) {
                     "error".to_string()
                 } else {
                     "shed".to_string()
@@ -736,13 +736,13 @@ impl MockDashboardState {
                 status: "ok".to_string(),
             }),
             _ => {
-                if tick % 2 == 0 {
+                if tick.is_multiple_of(2) {
                     Some(RecentRequest {
                         timestamp: ts,
                         session_id: format!("user-{}", tick % 500),
                         stage: stages[stage_idx].to_string(),
                         latency_ms: self.stage_latencies[stage_idx],
-                        status: if tick % 4 == 0 {
+                        status: if tick.is_multiple_of(4) {
                             "deduped".to_string()
                         } else {
                             "ok".to_string()

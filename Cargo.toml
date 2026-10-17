@@ -1,13 +1,13 @@
 [package]
 name = "tokio-prompt-orchestrator"
-version = "2.0.1"
+version = "2.0.2"
 edition = "2021"
 rust-version = "1.88"
 default-run = "orchestrator"
 description = "Put a queue, deduplication and a circuit breaker in front of any LLM API, so repeated prompts cost one call and outages fail fast. Rust library, HTTP server and CLI."
 documentation = "https://docs.rs/tokio-prompt-orchestrator"
 homepage = "https://tokio-prompt-orchestrator.vercel.app/"
-repository = "https://gitlab.com/mattbusel/tokio-prompt-orchestrator"
+repository = "https://github.com/Mattbusel/tokio-prompt-orchestrator"
 license = "MIT"
 readme = "README.md"
 keywords = ["llm", "openai", "anthropic", "proxy", "circuit-breaker"]
@@ -19,20 +19,21 @@ unwrap_used = "deny"
 expect_used = "deny"
 
 # `cargo binstall tokio-prompt-orchestrator` downloads the GitLab release
+# (release assets live on GitLab; `repository` points at GitHub, so the URL is spelled out)
 # asset instead of compiling. Asset names come from .gitlab-ci.yml. Targets
 # without a prebuilt binary 404 on the default URL, and binstall then builds
 # from source.
 [package.metadata.binstall]
-pkg-url = "{ repo }/-/releases/v{ version }/downloads/orchestrator-{ target }.tar.gz"
+pkg-url = "https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/releases/v{ version }/downloads/orchestrator-{ target }.tar.gz"
 pkg-fmt = "tgz"
 disabled-strategies = ["quick-install"]
 
 [package.metadata.binstall.overrides.x86_64-unknown-linux-gnu]
-pkg-url = "{ repo }/-/releases/v{ version }/downloads/orchestrator-linux-x86_64.tar.gz"
+pkg-url = "https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/releases/v{ version }/downloads/orchestrator-linux-x86_64.tar.gz"
 bin-dir = "orchestrator-v{ version }-x86_64-unknown-linux-gnu/{ bin }"
 
 [package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
-pkg-url = "{ repo }/-/releases/v{ version }/downloads/orchestrator-windows-x86_64.zip"
+pkg-url = "https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/releases/v{ version }/downloads/orchestrator-windows-x86_64.zip"
 pkg-fmt = "zip"
 bin-dir = "orchestrator-v{ version }-x86_64-pc-windows-msvc/{ bin }{ binary-ext }"
 
