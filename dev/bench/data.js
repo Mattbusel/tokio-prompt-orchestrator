@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792050682225,
+  "lastUpdate": 1792274680506,
   "repoUrl": "https://github.com/Mattbusel/tokio-prompt-orchestrator",
   "entries": {
     "Pipeline Benchmarks": [
@@ -1078,6 +1078,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "send_with_shed_normal",
             "value": 113,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "shard_session",
+            "value": 9,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "session_id_creation",
+            "value": 12,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "committer": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "distinct": true,
+          "id": "b77693a2a16de89539887d70cd8f37c7744449c8",
+          "message": "2.0.2: rustls security update, CI green on Rust 1.99, GitHub as repository\n\n- Cargo.lock: rustls 0.23.45 -> 0.23.46 (RUSTSEC-2026-0346, -0347, -0348, -0349).\n- Clean clippy and rustdoc on Rust 1.99 with -D warnings: is_multiple_of,\n  fetch_update kept behind allow(deprecated) for the 1.88 MSRV, redundant\n  intra-doc links, feature-gated dead code in the orchestrator binary.\n- Cargo.toml: repository points at GitHub; cargo binstall URLs name the GitLab\n  releases directly.\n- README: CI and MSRV badges, GitHub/GitLab line. New V2 social preview image.",
+          "timestamp": "2026-10-17T18:01:14-04:00",
+          "tree_id": "03b80bbc5aacbc1314883fd7b6b709ea56ac6d04",
+          "url": "https://github.com/Mattbusel/tokio-prompt-orchestrator/commit/b77693a2a16de89539887d70cd8f37c7744449c8"
+        },
+        "date": 1792274678455,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "full_pipeline_echo_worker",
+            "value": 11071293,
+            "range": "± 133245",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/10",
+            "value": 51001280,
+            "range": "± 257246",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/50",
+            "value": 51192177,
+            "range": "± 126837",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/100",
+            "value": 51095478,
+            "range": "± 140047",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/512",
+            "value": 24755,
+            "range": "± 411",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/1024",
+            "value": 24981,
+            "range": "± 393",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/2048",
+            "value": 24871,
+            "range": "± 391",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "send_with_shed_normal",
+            "value": 130,
             "range": "± 0",
             "unit": "ns/iter"
           },
