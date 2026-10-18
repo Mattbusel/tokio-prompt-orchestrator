@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792277141361,
+  "lastUpdate": 1792281648139,
   "repoUrl": "https://github.com/Mattbusel/tokio-prompt-orchestrator",
   "entries": {
     "Pipeline Benchmarks": [
@@ -1258,6 +1258,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "session_id_creation",
             "value": 15,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "committer": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "distinct": true,
+          "id": "1f251b83aa9b6e675eea7ab51ecf03511f52f2cf",
+          "message": "Concurrent upstream workers, x-should-retry on breaker rejects, --timeout flag\n\n- The orchestrator server ran one inference task, so different prompts sent\n  at once queued behind each other (20 prompts x 1.5 s = 30 s). The inference\n  stage is now a pool: PipelineOptions::concurrency, default 16, and\n  --concurrency <N>. Identical in-flight requests still share one call.\n- The per-call timeout ran outside the circuit breaker, so a hung provider\n  never counted as a failure. It now runs inside: timeouts open the breaker.\n  PipelineOptions::inference_timeout and --timeout <seconds> (default 30 s,\n  60 s for anthropic).\n- 503 circuit_open responses carry x-should-retry: false and a Retry-After\n  from the breaker's next probe time (CircuitBreaker::retry_after_sync), so\n  OpenAI/Anthropic SDKs stop retrying refused requests.\n- stages.inference.timeout_ms keeps sub-second values.\n- Version 2.0.3, CHANGELOG, README server flags, REFERENCE and GUIDE.",
+          "timestamp": "2026-10-17T19:57:12-04:00",
+          "tree_id": "9b2514961fc1564fbf52576f51c333be4904a39d",
+          "url": "https://github.com/Mattbusel/tokio-prompt-orchestrator/commit/1f251b83aa9b6e675eea7ab51ecf03511f52f2cf"
+        },
+        "date": 1792281645761,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "full_pipeline_echo_worker",
+            "value": 11100092,
+            "range": "± 107350",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/10",
+            "value": 51238833,
+            "range": "± 134162",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/50",
+            "value": 51342816,
+            "range": "± 106036",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/100",
+            "value": 51212623,
+            "range": "± 161376",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/512",
+            "value": 24768,
+            "range": "± 3265",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/1024",
+            "value": 24560,
+            "range": "± 554",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/2048",
+            "value": 24827,
+            "range": "± 448",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "send_with_shed_normal",
+            "value": 136,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "shard_session",
+            "value": 9,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "session_id_creation",
+            "value": 12,
             "range": "± 0",
             "unit": "ns/iter"
           }
