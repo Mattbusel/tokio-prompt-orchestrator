@@ -1331,7 +1331,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1444,7 +1444,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2285,7 +2285,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2868,7 +2868,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3572,7 +3572,7 @@ dependencies = [
  "once_cell",
  "socket2 0.6.5",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4018,9 +4018,9 @@ dependencies = [
 
 [[package]]
 name = "rig-core"
-version = "0.43.0"
+version = "0.44.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82919b6bebd878efc3dae97093e313584ebc7c46518514b0e26bde2e838271fd"
+checksum = "6c60db6e3da7681abbdfa9637c1a76dbd5a713f935f0a6753d72c5d2770ed4c6"
 dependencies = [
  "async-stream",
  "base64 0.22.1",
@@ -4047,9 +4047,9 @@ dependencies = [
 
 [[package]]
 name = "rig-http"
-version = "0.43.0"
+version = "0.44.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8359e3dbb4ba32c5d9ea08d59fa74819deb71915c86ebfc93ad9b30abebeaa27"
+checksum = "e9b68e5fe7258d64aeffb0a976ad0665ad2f94104d41eb4cdf463065ba57ec0b"
 dependencies = [
  "bytes",
  "futures",
@@ -4062,9 +4062,9 @@ dependencies = [
 
 [[package]]
 name = "rig-reqwest"
-version = "0.43.0"
+version = "0.44.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80774c44c501b8283d1a385a0a72b7ffbeedd68106f81fcbb24a6db9cf6c1be6"
+checksum = "d478ca821bdf7030b4cabfdc7acc07ab5f0449886f9a7e472de205a6ec4b2b1d"
 dependencies = [
  "bytes",
  "futures",
@@ -4078,9 +4078,9 @@ dependencies = [
 
 [[package]]
 name = "rig-tungstenite"
-version = "0.43.0"
+version = "0.44.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5466d96648810fe94747d48e1e952c9bc4fe1f6bb7baa46a9af16bfe5d1e8214"
+checksum = "d145d2d41722fd040dbb47f05b797c8119884697bb4ee7e53fc5c1c1ec9610df"
 dependencies = [
  "futures",
  "rig-http",
@@ -4186,7 +4186,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4267,7 +4267,7 @@ dependencies = [
  "security-framework 3.7.0",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4538,6 +4538,7 @@ version = "1.0.151"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
 dependencies = [
+ "indexmap 2.14.2",
  "itoa",
  "memchr",
  "serde",
@@ -5112,10 +5113,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.5",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6260,7 +6261,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

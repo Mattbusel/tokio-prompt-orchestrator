@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The `rig` feature accepts rig-core 0.43 and 0.44 (`>=0.43, <0.45`), so a
+  project already on rig-core 0.44 gets one copy of rig and `RigWorker::new`
+  takes its models directly. Before, it pulled a second rig-core 0.43 and
+  rig 0.44 models did not fit. Tested: `integrations_tests` passes on 0.44.
+
 ## [2.0.3] - 2026-10-18
 
 ### Fixed

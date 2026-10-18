@@ -128,7 +128,7 @@ async-openai = { version = "0.42", default-features = false, features = ["rustls
 genai = { version = "0.6", default-features = false, features = ["rustls-tls"], optional = true }
 tantivy = { version = "0.26", default-features = false, features = ["stopwords", "stemmer"], optional = true }
 fastembed = { version = "7.1", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls"], optional = true }
-rig-core = { version = "0.43", default-features = false, features = ["reqwest", "rustls"], optional = true }
+rig-core = { version = ">=0.43, <0.45", default-features = false, features = ["reqwest", "rustls"], optional = true }
 
 # MCP server
 rmcp = { version = "0.16", optional = true, features = ["server", "macros", "transport-io"] }

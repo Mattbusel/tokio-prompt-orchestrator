@@ -256,7 +256,7 @@ Keep your client. Each of these is a cargo feature that turns it into a worker, 
 |---|---|---|
 | [async-openai](https://crates.io/crates/async-openai) | `features = ["async-openai"]` | `AsyncOpenAiWorker::new(client, "gpt-4o-mini")`: OpenAI, Azure, or any OpenAI-compatible server (Ollama, vLLM, llama.cpp, LM Studio) |
 | [genai](https://crates.io/crates/genai) | `features = ["genai"]` | `GenaiWorker::new(genai::Client::default(), "claude-sonnet-4-6")`: OpenAI, Anthropic, Gemini, Ollama, Groq, DeepSeek, xAI and more, picked by model name |
-| [rig](https://crates.io/crates/rig-core) | `features = ["rig"]` | `RigWorker::new(OpenAI::from_env()?.completion("gpt-5.2"))`: any rig completion model (needs Rust 1.95+) |
+| [rig](https://crates.io/crates/rig-core) | `features = ["rig"]` | `RigWorker::new(OpenAI::from_env()?.completion("gpt-5.2"))`: any rig completion model; rig-core 0.43 or 0.44 (needs Rust 1.95+) |
 | [tower](https://crates.io/crates/tower) | `features = ["tower"]` | `ServiceWorker::new(svc)` runs any `Service<String>` (with your tower layers) as a worker; `WorkerService::new(worker)` goes the other way |
 
 ```rust,ignore
