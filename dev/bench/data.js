@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792281648139,
+  "lastUpdate": 1792339202172,
   "repoUrl": "https://github.com/Mattbusel/tokio-prompt-orchestrator",
   "entries": {
     "Pipeline Benchmarks": [
@@ -1342,6 +1342,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "session_id_creation",
             "value": 12,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "committer": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "distinct": true,
+          "id": "91df9016f3f4f80c3ad2536df0efb3d75a9e6a0f",
+          "message": "rig feature: accept rig-core 0.43 and 0.44\n\nA project already on rig-core 0.44 got a second rig-core 0.43 from the\nrig feature, and its models did not fit RigWorker::new. The requirement is\nnow >=0.43, <0.45; the lockfile resolves 0.44. integrations_tests passes\non 0.44 (cargo +1.99.0 test --features rig --test integrations_tests).",
+          "timestamp": "2026-10-18T11:56:04-04:00",
+          "tree_id": "24da8b43db6c9f443a8e7afd47d65666af163a87",
+          "url": "https://github.com/Mattbusel/tokio-prompt-orchestrator/commit/91df9016f3f4f80c3ad2536df0efb3d75a9e6a0f"
+        },
+        "date": 1792339200512,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "full_pipeline_echo_worker",
+            "value": 11163742,
+            "range": "± 144088",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/10",
+            "value": 51095464,
+            "range": "± 209418",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/50",
+            "value": 51304642,
+            "range": "± 329178",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/100",
+            "value": 51370958,
+            "range": "± 132160",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/512",
+            "value": 38531,
+            "range": "± 5867",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/1024",
+            "value": 36989,
+            "range": "± 1557",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/2048",
+            "value": 38473,
+            "range": "± 4160",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "send_with_shed_normal",
+            "value": 147,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "shard_session",
+            "value": 12,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "session_id_creation",
+            "value": 15,
             "range": "± 0",
             "unit": "ns/iter"
           }
