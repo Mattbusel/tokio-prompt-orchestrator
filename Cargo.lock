@@ -5378,7 +5378,7 @@ dependencies = [
 
 [[package]]
 name = "tokio-prompt-orchestrator"
-version = "2.0.3"
+version = "2.0.4"
 dependencies = [
  "async-nats",
  "async-openai",

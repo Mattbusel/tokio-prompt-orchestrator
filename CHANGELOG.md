@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.4] - 2026-10-19
+
 ### Changed
 
 - The `rig` feature accepts rig-core 0.43 and 0.44 (`>=0.43, <0.45`), so a
