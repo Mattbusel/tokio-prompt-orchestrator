@@ -1,5 +1,13 @@
 # tokio-prompt-orchestrator
 
+<!-- outcome-block -->
+**Run many LLM agents at once without blowing your rate limit or your bill: 24 Claude Code agents ran on one RTX 4070, and deduplication cut API use to 26% of expected.**
+
+**Why this over the alternatives:** A plain request queue sends every duplicated context to the API. This collapses duplicates into one call, with backpressure and circuit breakers built in.
+
+**Guarantee:** if it doesn't do what this README says, [open an issue](https://github.com/Mattbusel/tokio-prompt-orchestrator/issues) and I'll fix it.
+<!-- outcome-block -->
+
 English | [简体中文](README.zh-CN.md) | [日本語](README.ja.md) | [한국어](README.ko.md)
 
 **A Rust LLM request orchestrator: it sits between your app and an AI model (Anthropic, OpenAI, llama.cpp, vLLM), so the same prompt asked twice costs one model call, and when the provider goes down your requests fail fast with a clear reason instead of piling up.**
