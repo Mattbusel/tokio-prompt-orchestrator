@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792425576691,
+  "lastUpdate": 1792624757523,
   "repoUrl": "https://github.com/Mattbusel/tokio-prompt-orchestrator",
   "entries": {
     "Pipeline Benchmarks": [
@@ -1510,6 +1510,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "session_id_creation",
             "value": 17,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Vladislav Busel",
+            "username": "Mattbusel"
+          },
+          "committer": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Vladislav Busel",
+            "username": "Mattbusel"
+          },
+          "distinct": true,
+          "id": "a10658196dc3991718582fb1b5151e1cc039b78a",
+          "message": "README: lead with the outcome, why it beats the alternatives, and a fix-it guarantee",
+          "timestamp": "2026-10-21T19:10:04-04:00",
+          "tree_id": "b72f8fde8856d996f08eb210db9fa2f9318663c5",
+          "url": "https://github.com/Mattbusel/tokio-prompt-orchestrator/commit/a10658196dc3991718582fb1b5151e1cc039b78a"
+        },
+        "date": 1792624755560,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "full_pipeline_echo_worker",
+            "value": 11107440,
+            "range": "± 126059",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/10",
+            "value": 51348246,
+            "range": "± 201782",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/50",
+            "value": 51544419,
+            "range": "± 390964",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/100",
+            "value": 51335563,
+            "range": "± 95692",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/512",
+            "value": 27678,
+            "range": "± 670",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/1024",
+            "value": 27692,
+            "range": "± 826",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/2048",
+            "value": 28158,
+            "range": "± 787",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "send_with_shed_normal",
+            "value": 146,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "shard_session",
+            "value": 12,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "session_id_creation",
+            "value": 15,
             "range": "± 0",
             "unit": "ns/iter"
           }
