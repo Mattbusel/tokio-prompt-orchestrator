@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792624757523,
+  "lastUpdate": 1792741230777,
   "repoUrl": "https://github.com/Mattbusel/tokio-prompt-orchestrator",
   "entries": {
     "Pipeline Benchmarks": [
@@ -1583,6 +1583,90 @@ window.BENCHMARK_DATA = {
             "name": "send_with_shed_normal",
             "value": 146,
             "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "shard_session",
+            "value": 12,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "session_id_creation",
+            "value": 15,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matt Busel",
+            "username": "Mattbusel"
+          },
+          "committer": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matt Busel",
+            "username": "Mattbusel"
+          },
+          "distinct": true,
+          "id": "ebc4f8a458c5dfd0306bf516abf49924673cbbd0",
+          "message": "README: link the shipped game, live tools and measured write-ups",
+          "timestamp": "2026-10-23T03:36:37-04:00",
+          "tree_id": "50d3fcd387d1272da3bf1ee8b3c829dafc1cc365",
+          "url": "https://github.com/Mattbusel/tokio-prompt-orchestrator/commit/ebc4f8a458c5dfd0306bf516abf49924673cbbd0"
+        },
+        "date": 1792741229419,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "full_pipeline_echo_worker",
+            "value": 11159556,
+            "range": "± 164104",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/10",
+            "value": 51115379,
+            "range": "± 202840",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/50",
+            "value": 51180914,
+            "range": "± 287785",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/100",
+            "value": 51213829,
+            "range": "± 134098",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/512",
+            "value": 37157,
+            "range": "± 1455",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/1024",
+            "value": 37529,
+            "range": "± 1307",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/2048",
+            "value": 37881,
+            "range": "± 1711",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "send_with_shed_normal",
+            "value": 169,
+            "range": "± 0",
             "unit": "ns/iter"
           },
           {
