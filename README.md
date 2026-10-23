@@ -27,6 +27,13 @@ For developers who call an LLM API from an app, an agent or a script and want it
 
 <sub>A real recording, sped up only where it was waiting. <a href="https://tokio-prompt-orchestrator.vercel.app/">The site</a> replays the same run step by step.</sub>
 
+## See the numbers before you install
+
+- [LLM proxy benchmark: 200 duplicate calls became 1](https://tensorust.com/articles/llm-proxy-benchmark/?utm_source=github&utm_medium=readme&utm_campaign=tokio-prompt-orchestrator) measures this crate's deduplication on real traffic, including the one bug it found.
+- [LLM semantic cache: stop paying twice for the same answer](https://tensorust.com/articles/llm-semantic-cache-duplicate-prompts/?utm_source=github&utm_medium=readme&utm_campaign=tokio-prompt-orchestrator) covers when a cache in front of the pipeline pays off.
+- [Exponential backoff with jitter: 64 of 100 LLM calls failed](https://tensorust.com/articles/exponential-backoff-jitter/?utm_source=github&utm_medium=readme&utm_campaign=tokio-prompt-orchestrator) shows why the retry stage works the way it does.
+- Price your own workload first with the free [LLM API cost calculator](https://tensorust.com/tools/llm-api-cost/?utm_source=github&utm_medium=readme&utm_campaign=tokio-prompt-orchestrator) and [token counter](https://tensorust.com/tools/token-counter/?utm_source=github&utm_medium=readme&utm_campaign=tokio-prompt-orchestrator).
+
 ## Install
 
 **Linux** (x86_64, Ubuntu 20.04+ / Debian 11+). One line, no dependencies, installs to `~/.local/bin`:
