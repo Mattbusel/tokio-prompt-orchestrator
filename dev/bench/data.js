@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792741230777,
+  "lastUpdate": 1793353540059,
   "repoUrl": "https://github.com/Mattbusel/tokio-prompt-orchestrator",
   "entries": {
     "Pipeline Benchmarks": [
@@ -1678,6 +1678,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "session_id_creation",
             "value": 15,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Vladislav Busel",
+            "username": "Mattbusel"
+          },
+          "committer": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Vladislav Busel",
+            "username": "Mattbusel"
+          },
+          "distinct": true,
+          "id": "60fcccb922906667fc37501a2ad7c184ecb7c42e",
+          "message": "Add FUNDING.yml (GitHub Sponsors + tensorust.com)",
+          "timestamp": "2026-10-30T05:41:40-04:00",
+          "tree_id": "cd095f89ab6d92b61f64f4513c0614b3a4a5955b",
+          "url": "https://github.com/Mattbusel/tokio-prompt-orchestrator/commit/60fcccb922906667fc37501a2ad7c184ecb7c42e"
+        },
+        "date": 1793353538079,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "full_pipeline_echo_worker",
+            "value": 11172859,
+            "range": "± 141717",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/10",
+            "value": 51321069,
+            "range": "± 198357",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/50",
+            "value": 51579948,
+            "range": "± 355965",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/100",
+            "value": 51385361,
+            "range": "± 119804",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/512",
+            "value": 31639,
+            "range": "± 4421",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/1024",
+            "value": 32504,
+            "range": "± 4965",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/2048",
+            "value": 31975,
+            "range": "± 4267",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "send_with_shed_normal",
+            "value": 280,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "shard_session",
+            "value": 11,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "session_id_creation",
+            "value": 14,
             "range": "± 0",
             "unit": "ns/iter"
           }
