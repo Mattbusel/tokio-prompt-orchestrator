@@ -1,0 +1,110 @@
+{
+  "$schema": "https://fundingjson.org/schema/v1.1.0.json",
+  "version": "v1.1.0",
+  "entity": {
+    "type": "individual",
+    "role": "maintainer",
+    "name": "Matthew Busel",
+    "email": "mattbusel@tensorust.com",
+    "description": "Independent open-source maintainer in New York, working through my one-person company Tensorust LLC. I build and maintain Rust infrastructure for running AI agents and LLM workloads safely and cheaply, plus Rust supply-chain tooling: 70 crates on crates.io, all MIT or Apache-2.0. I publish the measurements behind the tools (benchmarks, patch-latency studies, price data) openly at tensorust.com.",
+    "webpageUrl": {
+      "url": "https://github.com/Mattbusel"
+    }
+  },
+  "projects": [
+    {
+      "guid": "tokio-prompt-orchestrator",
+      "name": "tokio-prompt-orchestrator",
+      "description": "Rust LLM request orchestrator and drop-in OpenAI-compatible proxy. Requests flow through a bounded five-stage pipeline with deduplication (the same prompt asked twice costs one model call), circuit breakers, retries with jitter, rate limits, a spend cap and a dead-letter queue, in front of Anthropic, OpenAI, llama.cpp or vLLM. Ships as a library, a server binary, REST/SSE, an MCP server and a TUI.",
+      "webpageUrl": {
+        "url": "https://github.com/Mattbusel/tokio-prompt-orchestrator"
+      },
+      "repositoryUrl": {
+        "url": "https://github.com/Mattbusel/tokio-prompt-orchestrator"
+      },
+      "licenses": ["spdx:MIT"],
+      "tags": ["rust", "llm", "ai-agents", "proxy", "rate-limiting", "mcp", "infrastructure"]
+    },
+    {
+      "guid": "corescout",
+      "name": "CoreScout",
+      "description": "Local-first Rust service and MCP server that records what AI coding agents do on a machine (commands, exit codes, files touched, whether anything checked the result), keeps 'seen together' separate from 'verified by randomized trial', and serves the verified lessons back to any AI client. No account, no server, no telemetry.",
+      "webpageUrl": {
+        "url": "https://github.com/Mattbusel/corescout"
+      },
+      "repositoryUrl": {
+        "url": "https://github.com/Mattbusel/corescout"
+      },
+      "licenses": ["spdx:MIT", "spdx:Apache-2.0"],
+      "tags": ["rust", "ai-agents", "mcp", "observability", "developer-tools", "local-first"]
+    },
+    {
+      "guid": "tensorust-cargo-check",
+      "name": "Tensorust Cargo Check",
+      "description": "GitHub Action for Rust projects. On every pull request that touches Cargo.toml or Cargo.lock it posts one comment with security advisories (OSV/RustSec) for the exact locked versions and the smallest fixing upgrade, yanked and unmaintained crates, licenses, MSRV and new dependencies. Fix mode opens a tested pull request with the smallest in-requirement upgrades. Free for public repositories.",
+      "webpageUrl": {
+        "url": "https://github.com/Mattbusel/tensorust-cargo-check"
+      },
+      "repositoryUrl": {
+        "url": "https://github.com/Mattbusel/tensorust-cargo-check"
+      },
+      "licenses": ["spdx:MIT"],
+      "tags": ["rust", "security", "supply-chain", "github-actions", "dependencies"]
+    }
+  ],
+  "funding": {
+    "channels": [
+      {
+        "guid": "bank",
+        "type": "bank",
+        "description": "US bank transfer (ACH or wire) to Tensorust LLC, my single-member company. Details on request."
+      },
+      {
+        "guid": "github-sponsors",
+        "type": "payment-provider",
+        "address": "https://github.com/sponsors/Mattbusel",
+        "description": "GitHub Sponsors, for individual and recurring support."
+      }
+    ],
+    "plans": [
+      {
+        "guid": "maintainer-year",
+        "status": "active",
+        "name": "One year of maintenance and security work",
+        "description": "Funds focused maintainer time for one year across the three projects: a threat model, per-tenant cache isolation, secret redaction and fuzzing for tokio-prompt-orchestrator; Linux and macOS support and more agent-harness adapters for CoreScout; and AI-assisted, test-verified breaking upgrades in Cargo Check so Rust projects can reach security fixes that only ship in a new major version.",
+        "amount": 25000,
+        "currency": "USD",
+        "frequency": "yearly",
+        "channels": ["bank"]
+      },
+      {
+        "guid": "minimum",
+        "status": "active",
+        "name": "Minimum: security hardening only",
+        "description": "Threat model, cache isolation, secret redaction and fuzzing for tokio-prompt-orchestrator, plus signed releases with SBOMs for all three projects.",
+        "amount": 10000,
+        "currency": "USD",
+        "frequency": "one-time",
+        "channels": ["bank"]
+      },
+      {
+        "guid": "sponsor",
+        "status": "active",
+        "name": "Sponsor",
+        "description": "Any amount through GitHub Sponsors.",
+        "amount": 0,
+        "currency": "USD",
+        "frequency": "monthly",
+        "channels": ["github-sponsors"]
+      }
+    ],
+    "history": [
+      {
+        "year": 2026,
+        "income": 0,
+        "currency": "USD",
+        "description": "No grants or donations received for these projects to date; work is self-funded."
+      }
+    ]
+  }
+}
