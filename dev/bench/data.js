@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794692890061,
+  "lastUpdate": 1794693329784,
   "repoUrl": "https://github.com/Mattbusel/tokio-prompt-orchestrator",
   "entries": {
     "Pipeline Benchmarks": [
@@ -2182,6 +2182,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "session_id_creation",
             "value": 13,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "committer": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "distinct": true,
+          "id": "f23456a632061418f4788ba1c5c5b0f5b58912b4",
+          "message": "2.0.6: crates.io release of the 2.0.5 tag (2.0.5 was already taken on crates.io)",
+          "timestamp": "2026-11-14T16:51:52-05:00",
+          "tree_id": "2308237446255ba7bf2f965d065f7e13bf7ee0d0",
+          "url": "https://github.com/Mattbusel/tokio-prompt-orchestrator/commit/f23456a632061418f4788ba1c5c5b0f5b58912b4"
+        },
+        "date": 1794693328258,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "full_pipeline_echo_worker",
+            "value": 11273144,
+            "range": "± 132101",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/10",
+            "value": 51226183,
+            "range": "± 89335",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/50",
+            "value": 51331836,
+            "range": "± 132097",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/100",
+            "value": 51056001,
+            "range": "± 322636",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/512",
+            "value": 21559,
+            "range": "± 4359",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/1024",
+            "value": 21534,
+            "range": "± 792",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/2048",
+            "value": 21451,
+            "range": "± 639",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "send_with_shed_normal",
+            "value": 121,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "shard_session",
+            "value": 9,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "session_id_creation",
+            "value": 11,
             "range": "± 0",
             "unit": "ns/iter"
           }
