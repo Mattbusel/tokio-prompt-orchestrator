@@ -1,0 +1,12 @@
+tokio-prompt-orchestrator is running with provider "{{ .Values.provider }}".
+
+Try it:
+  kubectl port-forward svc/{{ include "tpo.fullname" . }} 8080:{{ .Values.service.port }}
+  curl -s http://127.0.0.1:8080/v1/chat/completions -H "content-type: application/json" {{- if .Values.secret.apiKey }} -H "authorization: Bearer <your apiKey>"{{ end }} -d '{"model":"any","messages":[{"role":"user","content":"hello"}]}'
+
+In-cluster clients: OPENAI_BASE_URL=http://{{ include "tpo.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}/v1
+The x-orchestrator-dedup response header says whether a call was new (miss) or shared (joined / cached).
+{{- if and (ne .Values.provider "echo") (not .Values.secret.apiKey) (not .Values.existingSecret) }}
+
+WARNING: no apiKey is set, so anyone who can reach the Service can spend your provider credit.
+{{- end }}

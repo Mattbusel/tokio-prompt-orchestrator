@@ -33,7 +33,7 @@ scrape_configs:
   - job_name: 'orchestrator'
     scrape_interval: 5s # More frequent for demo
     static_configs:
-      - targets: ['localhost:9090']
+      - targets: ['orchestrator:8080']
         labels:
           service: 'llm-orchestrator'
           component: 'pipeline'
@@ -41,7 +41,7 @@ scrape_configs:
   # Prometheus self-monitoring
   - job_name: 'prometheus'
     static_configs:
-      - targets: ['localhost:9091']
+      - targets: ['localhost:9090']
 
 # Storage configuration (optional)
 # storage:

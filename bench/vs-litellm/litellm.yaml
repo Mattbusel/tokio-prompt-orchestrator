@@ -1,0 +1,6 @@
+model_list:
+  - model_name: gpt-4o-mini
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_base: http://127.0.0.1:9500/v1
+      api_key: sk-mock

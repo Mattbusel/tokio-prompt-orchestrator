@@ -1,0 +1,71 @@
+# Identical prompts are shared inside one pod. One replica shares the most calls; more
+# replicas add availability, but the same prompt on two pods is two upstream calls.
+replicaCount: 1
+
+image:
+  repository: ghcr.io/mattbusel/tokio-prompt-orchestrator
+  tag: ""            # defaults to the chart's appVersion
+  pullPolicy: IfNotPresent
+
+# echo (no key, offline test), openai, anthropic or llama
+provider: echo
+model: ""            # empty = the provider's default (gpt-4o, claude-sonnet-4-6, ...)
+
+# Any OpenAI-compatible server for provider=openai: OpenRouter, Groq, vLLM, LM Studio.
+upstreamUrl: ""      # e.g. https://openrouter.ai/api/v1 or http://vllm.default.svc:8000/v1
+llamaCppUrl: ""      # provider=llama, e.g. http://llama-cpp:8080
+
+maxSpendUsd: ""      # e.g. "25": the OpenAI endpoint answers 429 once estimated spend reaches it
+retries: 0           # retry 429 / 5xx / network errors up to N times with backoff (max 10)
+concurrency: 16      # upstream calls in flight at once (max 1024)
+timeoutSeconds: ""   # per upstream call; empty = 30 (60 for anthropic)
+dedupSeconds: 300    # reuse an identical completed answer this long (0 = only in-flight sharing)
+extraArgs: []
+logLevel: info
+
+# Provider keys and the proxy's own bearer key. Either let the chart create a Secret...
+secret:
+  create: true
+  openaiApiKey: ""
+  anthropicApiKey: ""
+  # Clients must then send "Authorization: Bearer <apiKey>". Set it for anything off localhost.
+  apiKey: ""
+# ...or name an existing Secret with keys OPENAI_API_KEY / ANTHROPIC_API_KEY / ORCHESTRATOR_API_KEY.
+existingSecret: ""
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: llm-proxy.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 32Mi
+  limits:
+    memory: 256Mi
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  fsGroup: 65532
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

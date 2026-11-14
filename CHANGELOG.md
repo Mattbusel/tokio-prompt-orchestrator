@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.5] - 2026-11-14
+
+### Added
+
+- Docker image `ghcr.io/mattbusel/tokio-prompt-orchestrator` (linux/amd64 and linux/arm64,
+  distroless, non-root, 16 MB compressed), built by `.github/workflows/docker.yml` on each tag.
+- Helm chart at `oci://ghcr.io/mattbusel/charts/tokio-prompt-orchestrator`: Secret for provider
+  keys and the proxy's bearer key, `/health` probes, read-only root filesystem, optional Ingress.
+- `ORCHESTRATOR_UPSTREAM_URL` sends `--provider openai` traffic to any OpenAI-compatible server
+  (OpenRouter, Groq, Together, vLLM, LM Studio). It is not `OPENAI_BASE_URL` on purpose: clients
+  in the same shell point that at the proxy, and reading it would make the proxy call itself.
+- `bench/vs-litellm`: a reproducible benchmark against the LiteLLM proxy on a shared mock upstream.
+
+### Fixed
+
+- `Dockerfile` copied a binary that does not exist (`orchestrator-demo`), pinned Rust 1.79 under an
+  MSRV of 1.88 and exposed the wrong port. It now builds `orchestrator` with `web-api` and serves 8080.
+- `docker-compose.yml` mapped port 9090, health-checked with curl, and mounted a missing alerts file;
+  `prometheus.yml` scraped Prometheus itself instead of the orchestrator's `/metrics`.
+
 ## [2.0.4] - 2026-10-19
 
 ### Changed

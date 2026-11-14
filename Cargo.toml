@@ -1,6 +1,6 @@
 [package]
 name = "tokio-prompt-orchestrator"
-version = "2.0.4"
+version = "2.0.5"
 edition = "2021"
 rust-version = "1.88"
 default-run = "orchestrator"
@@ -12,7 +12,7 @@ license = "MIT"
 readme = "README.md"
 keywords = ["llm", "openai", "anthropic", "proxy", "circuit-breaker"]
 categories = ["asynchronous", "network-programming", "web-programming::http-server", "command-line-utilities"]
-exclude = [".github", "scripts", "assets", "site", "docs", "benches", "releases", ".idea", ".githooks", ".cargo", ".bench_baseline.txt", "claude_desktop_config.json"]
+exclude = [".github", "scripts", "assets", "site", "docs", "benches", "releases", ".idea", ".githooks", ".cargo", ".bench_baseline.txt", "claude_desktop_config.json", "bench", "charts", "Dockerfile", ".dockerignore"]
 
 [lints.clippy]
 unwrap_used = "deny"

@@ -228,6 +228,9 @@ ENVIRONMENT:
     ORCHESTRATOR_DEDUP_SECS  reuse an identical chat completion for this many
                            seconds (default 300; 0 = only share in-flight calls)
     ORCHESTRATOR_RETRIES   same as --retries (the flag wins when both are set)
+    ORCHESTRATOR_UPSTREAM_URL  send --provider openai traffic to any OpenAI-compatible
+                           server instead of api.openai.com, e.g.
+                           https://openrouter.ai/api/v1 or http://vllm:8000/v1
 
 SETTINGS FILE:
     orchestrator.env  (same folder as the binary)
@@ -835,8 +838,23 @@ fn build_worker(cfg: &ResolvedConfig) -> Result<Arc<dyn ModelWorker>, String> {
                     "https://platform.openai.com/api-keys",
                 ));
             }
+            // ORCHESTRATOR_UPSTREAM_URL points the worker at any OpenAI-compatible
+            // server: OpenRouter, Groq, Together, vLLM, LM Studio, or a local mock.
+            // Not OPENAI_BASE_URL: clients in the same shell set that to this proxy,
+            // and reading it here would make the proxy call itself.
+            let base_url = env::var("ORCHESTRATOR_UPSTREAM_URL")
+                .ok()
+                .map(|u| u.trim().trim_end_matches('/').to_string())
+                .filter(|u| !u.is_empty());
             OpenAiWorker::new(cfg.model.clone())
-                .map(|w| Arc::new(w.with_timeout(http_timeout)) as Arc<dyn ModelWorker>)
+                .map(|w| {
+                    let w = w.with_timeout(http_timeout);
+                    let w = match base_url {
+                        Some(u) => w.with_base_url(u),
+                        None => w,
+                    };
+                    Arc::new(w) as Arc<dyn ModelWorker>
+                })
                 .map_err(|e| {
                     format!(
                         "Could not connect to OpenAI: {e}\n\n\

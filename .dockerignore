@@ -1,0 +1,14 @@
+target/
+**/target/
+.git/
+site/
+static/
+assets/
+docs/
+benches/results/
+bench/
+charts/
+*.md
+!README.md
+orchestrator.env
+claude_desktop_config.json

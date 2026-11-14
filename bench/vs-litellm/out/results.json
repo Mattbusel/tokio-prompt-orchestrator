@@ -1,0 +1,100 @@
+{
+  "meta": {
+    "date": "2026-11-14",
+    "os": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.36",
+    "host_cpus": 24,
+    "cpu_quota": "4",
+    "python": "3.12.16",
+    "litellm": "1.109.1",
+    "mock_delay_ms": "50",
+    "requests": {
+      "seq": 300,
+      "par": 4000,
+      "rep": 2000
+    }
+  },
+  "results": [
+    {
+      "name": "direct to mock (no proxy)",
+      "seq_p50_ms": 50.79,
+      "seq_p99_ms": 50.95,
+      "seq_err": 0,
+      "rps_c64": 1235.4,
+      "c64_p50_ms": 51.22,
+      "c64_p99_ms": 56.85,
+      "c64_err": 0,
+      "rep_requests": 2000,
+      "rep_upstream_calls": 2000,
+      "rep_err": 0,
+      "rep_wall_s": 3.23
+    },
+    {
+      "name": "tokio-prompt-orchestrator",
+      "startup_s": 0.17,
+      "idle_rss_mb": 55.0,
+      "seq_p50_ms": 51.26,
+      "seq_p99_ms": 51.55,
+      "seq_err": 0,
+      "rps_c64": 1216.6,
+      "c64_p50_ms": 51.69,
+      "c64_p99_ms": 74.03,
+      "c64_err": 0,
+      "rep_requests": 2000,
+      "rep_upstream_calls": 50,
+      "rep_err": 0,
+      "rep_wall_s": 0.25,
+      "peak_rss_mb": 69.6
+    },
+    {
+      "name": "LiteLLM proxy",
+      "startup_s": 4.33,
+      "idle_rss_mb": 347.3,
+      "seq_p50_ms": 58.57,
+      "seq_p99_ms": 59.69,
+      "seq_err": 0,
+      "rps_c64": 161.5,
+      "c64_p50_ms": 393.17,
+      "c64_p99_ms": 437.34,
+      "c64_err": 0,
+      "rep_requests": 2000,
+      "rep_upstream_calls": 2000,
+      "rep_err": 0,
+      "rep_wall_s": 12.62,
+      "peak_rss_mb": 362.9
+    },
+    {
+      "name": "LiteLLM proxy, 4 workers",
+      "startup_s": 7.96,
+      "idle_rss_mb": 1725.2,
+      "seq_p50_ms": 58.49,
+      "seq_p99_ms": 61.26,
+      "seq_err": 0,
+      "rps_c64": 375.7,
+      "c64_p50_ms": 107.33,
+      "c64_p99_ms": 323.04,
+      "c64_err": 0,
+      "rep_requests": 2000,
+      "rep_upstream_calls": 2000,
+      "rep_err": 0,
+      "rep_wall_s": 6.44,
+      "peak_rss_mb": 1784.3
+    },
+    {
+      "name": "LiteLLM proxy + local cache",
+      "startup_s": 4.3,
+      "idle_rss_mb": 347.4,
+      "seq_p50_ms": 58.99,
+      "seq_p99_ms": 60.52,
+      "seq_err": 0,
+      "rps_c64": 154.4,
+      "c64_p50_ms": 412.25,
+      "c64_p99_ms": 461.15,
+      "c64_err": 0,
+      "rep_requests": 2000,
+      "rep_upstream_calls": 50,
+      "rep_err": 0,
+      "rep_wall_s": 11.19,
+      "peak_rss_mb": 362.9
+    }
+  ]
+}

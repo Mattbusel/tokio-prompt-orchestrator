@@ -1,0 +1,108 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tpo.fullname" . }}
+  labels:
+    {{- include "tpo.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "tpo.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "tpo.selectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: orchestrator
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          args:
+            - --provider
+            - {{ .Values.provider | quote }}
+            {{- with .Values.model }}
+            - --model
+            - {{ . | quote }}
+            {{- end }}
+            - --port
+            - "8080"
+            - --concurrency
+            - {{ .Values.concurrency | quote }}
+            - --retries
+            - {{ .Values.retries | quote }}
+            - --log-level
+            - {{ .Values.logLevel | quote }}
+            {{- with .Values.maxSpendUsd }}
+            - --max-spend
+            - {{ . | quote }}
+            {{- end }}
+            {{- with .Values.timeoutSeconds }}
+            - --timeout
+            - {{ . | quote }}
+            {{- end }}
+            {{- range .Values.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          env:
+            - name: ORCHESTRATOR_DEDUP_SECS
+              value: {{ .Values.dedupSeconds | quote }}
+            - name: NO_COLOR
+              value: "1"
+            {{- with .Values.upstreamUrl }}
+            - name: ORCHESTRATOR_UPSTREAM_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.llamaCppUrl }}
+            - name: LLAMA_CPP_URL
+              value: {{ . | quote }}
+            {{- end }}
+          {{- if include "tpo.useSecret" . }}
+          envFrom:
+            - secretRef:
+                name: {{ include "tpo.secretName" . }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

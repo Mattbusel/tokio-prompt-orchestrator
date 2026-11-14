@@ -1,25 +1,25 @@
-version: '3.8'
-
 services:
   # LLM Orchestrator
   orchestrator:
     build:
       context: .
       dockerfile: Dockerfile
+    # or: image: ghcr.io/mattbusel/tokio-prompt-orchestrator:latest
+    # PROVIDER=openai OPENAI_API_KEY=sk-... docker compose up
+    command: ["--provider", "${PROVIDER:-echo}"]
     ports:
-      - "9090:9090"  # Metrics endpoint
+      - "8080:8080"  # OpenAI-compatible API, /health and /metrics
     environment:
       - RUST_LOG=info
+      - NO_COLOR=1
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - ORCHESTRATOR_API_KEY=${ORCHESTRATOR_API_KEY:-}
+      - ORCHESTRATOR_UPSTREAM_URL=${ORCHESTRATOR_UPSTREAM_URL:-}
     networks:
       - monitoring
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9090/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+    # The image is distroless (no shell or curl); /health is checked by Prometheus and clients.
 
   # Prometheus
   prometheus:
@@ -28,7 +28,6 @@ services:
       - "9091:9090"  # Prometheus UI
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./orchestrator_alerts.yml:/etc/prometheus/orchestrator_alerts.yml:ro
       - prometheus-data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
