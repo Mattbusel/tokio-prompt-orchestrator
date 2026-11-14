@@ -222,7 +222,9 @@ impl ModelWorker for EchoWorker {
 struct OpenAiRequest {
     model: String,
     messages: Vec<OpenAiMessage>,
-    max_tokens: u32,
+    /// Omitted unless set, so the provider's own limit applies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
     temperature: f32,
 }
 
@@ -250,7 +252,14 @@ struct OpenAiResponseMessage {
 
 /// OpenAI API worker (GPT-4, GPT-3.5-turbo-instruct, etc.)
 ///
-/// Requires OPENAI_API_KEY environment variable.
+/// Build it with [`OpenAiWorker::with_key`] when the key comes from your own
+/// config or secret store, or [`OpenAiWorker::from_env`] to read
+/// `OPENAI_API_KEY`. [`OpenAiWorker::with_http_client`] shares your
+/// `reqwest::Client` (and its connection pool, proxy and TLS settings).
+///
+/// No `max_tokens` is sent unless you set one with
+/// [`OpenAiWorker::with_max_tokens`], so replies are not cut short by a
+/// default of ours.
 ///
 /// ## Example
 ///
@@ -275,7 +284,7 @@ pub struct OpenAiWorker {
     client: reqwest::Client,
     api_key: String,
     model: String,
-    max_tokens: u32,
+    max_tokens: Option<u32>,
     temperature: f32,
     timeout: Duration,
     /// API base URL — override for OpenAI-compatible endpoints or testing.
@@ -283,12 +292,12 @@ pub struct OpenAiWorker {
 }
 
 impl OpenAiWorker {
-    /// Create a new `OpenAiWorker` for the given model.
+    /// Create a new `OpenAiWorker` for the given model, reading the API key
+    /// from `OPENAI_API_KEY`. Same as [`from_env`](Self::from_env).
     ///
-    /// Reads the API key from the `OPENAI_API_KEY` environment variable and
-    /// constructs an HTTP client configured for the OpenAI chat/completions
-    /// endpoint. Default settings: 256 max tokens, temperature 0.7, 30 s
-    /// timeout. All defaults are overridable via the builder methods.
+    /// Default settings: no `max_tokens` (the provider's limit applies),
+    /// temperature 0.7, 30 s timeout. All defaults are overridable via the
+    /// builder methods.
     ///
     /// # Environment Variables
     ///
@@ -316,24 +325,60 @@ impl OpenAiWorker {
     /// );
     /// ```
     pub fn new(model: impl Into<String>) -> Result<Self, OrchestratorError> {
+        Self::from_env(model)
+    }
+
+    /// Create a worker for `model` that reads its API key from the
+    /// `OPENAI_API_KEY` environment variable.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OrchestratorError::ConfigError`] if `OPENAI_API_KEY` is not
+    /// set.
+    pub fn from_env(model: impl Into<String>) -> Result<Self, OrchestratorError> {
         let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| {
             OrchestratorError::ConfigError("OPENAI_API_KEY environment variable not set".into())
         })?;
+        Ok(Self::with_key(model, api_key))
+    }
 
-        Ok(Self {
+    /// Create a worker for `model` with an API key you supply, from a vault,
+    /// a config file or per tenant. Touches no environment variable.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tokio_prompt_orchestrator::OpenAiWorker;
+    ///
+    /// let http = reqwest::Client::new(); // your existing client
+    /// let worker = OpenAiWorker::with_key("gpt-4o-mini", "sk-from-your-vault")
+    ///     .with_http_client(http)
+    ///     .with_base_url("http://localhost:8080/v1");
+    /// ```
+    pub fn with_key(model: impl Into<String>, api_key: impl Into<String>) -> Self {
+        Self {
             client: reqwest::Client::new(),
-            api_key,
+            api_key: api_key.into(),
             model: model.into(),
-            max_tokens: 256,
+            max_tokens: None,
             temperature: 0.7,
             timeout: Duration::from_secs(30),
             base_url: "https://api.openai.com/v1".to_string(),
-        })
+        }
     }
 
-    /// Set maximum tokens to generate
+    /// Send requests through `client` instead of a client of our own, to
+    /// share its connection pool, proxy and TLS settings. The per-request
+    /// timeout set by [`with_timeout`](Self::with_timeout) still applies.
+    pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
+        self.client = client;
+        self
+    }
+
+    /// Cap the reply at `max_tokens`. Unset by default: the request then
+    /// carries no `max_tokens` and the model's own limit applies.
     pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
-        self.max_tokens = max_tokens;
+        self.max_tokens = Some(max_tokens);
         self
     }
 
@@ -476,13 +521,15 @@ impl ModelWorker for OpenAiWorker {
             content: Option<String>,
         }
 
-        let request = serde_json::json!({
+        let mut request = serde_json::json!({
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": self.max_tokens,
             "temperature": self.temperature,
             "stream": true
         });
+        if let Some(max_tokens) = self.max_tokens {
+            request["max_tokens"] = max_tokens.into();
+        }
 
         let response = self
             .client
@@ -606,12 +653,12 @@ pub struct AnthropicWorker {
 }
 
 impl AnthropicWorker {
-    /// Create a new `AnthropicWorker` for the given model.
+    /// Create a new `AnthropicWorker` for the given model, reading the API
+    /// key from `ANTHROPIC_API_KEY`. Same as [`from_env`](Self::from_env).
     ///
-    /// Reads the API key from the `ANTHROPIC_API_KEY` environment variable and
-    /// constructs an HTTP client configured for the Anthropic Messages API.
-    /// Default settings: 1024 max tokens, temperature 1.0, 60 s timeout. All
-    /// defaults are overridable via the builder methods.
+    /// Default settings: 1024 max tokens (the Messages API requires a
+    /// value), temperature 1.0, 60 s timeout. All defaults are overridable
+    /// via the builder methods.
     ///
     /// # Environment Variables
     ///
@@ -639,19 +686,53 @@ impl AnthropicWorker {
     /// );
     /// ```
     pub fn new(model: impl Into<String>) -> Result<Self, OrchestratorError> {
+        Self::from_env(model)
+    }
+
+    /// Create a worker for `model` that reads its API key from the
+    /// `ANTHROPIC_API_KEY` environment variable.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OrchestratorError::ConfigError`] if `ANTHROPIC_API_KEY` is
+    /// not set.
+    pub fn from_env(model: impl Into<String>) -> Result<Self, OrchestratorError> {
         let api_key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| {
             OrchestratorError::ConfigError("ANTHROPIC_API_KEY environment variable not set".into())
         })?;
+        Ok(Self::with_key(model, api_key))
+    }
 
-        Ok(Self {
+    /// Create a worker for `model` with an API key you supply, from a vault,
+    /// a config file or per tenant. Touches no environment variable.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tokio_prompt_orchestrator::AnthropicWorker;
+    ///
+    /// let worker = AnthropicWorker::with_key("claude-sonnet-4-5", "key-from-your-vault")
+    ///     .with_http_client(reqwest::Client::new())
+    ///     .with_max_tokens(4096);
+    /// ```
+    pub fn with_key(model: impl Into<String>, api_key: impl Into<String>) -> Self {
+        Self {
             client: reqwest::Client::new(),
-            api_key,
+            api_key: api_key.into(),
             model: model.into(),
             max_tokens: 1024,
             temperature: 1.0,
             timeout: Duration::from_secs(60),
             base_url: "https://api.anthropic.com/v1".to_string(),
-        })
+        }
+    }
+
+    /// Send requests through `client` instead of a client of our own, to
+    /// share its connection pool, proxy and TLS settings. The per-request
+    /// timeout set by [`with_timeout`](Self::with_timeout) still applies.
+    pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
+        self.client = client;
+        self
     }
 
     /// Set maximum tokens to generate
@@ -903,7 +984,9 @@ impl ModelWorker for AnthropicWorker {
 #[derive(Debug, Serialize)]
 struct LlamaCppRequest {
     prompt: String,
-    n_predict: i32,
+    /// Omitted unless set, so the server's own limit applies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    n_predict: Option<i32>,
     temperature: f32,
     stop: Vec<String>,
 }
@@ -935,7 +1018,7 @@ struct LlamaCppResponse {
 pub struct LlamaCppWorker {
     client: reqwest::Client,
     url: String,
-    max_tokens: i32,
+    max_tokens: Option<i32>,
     temperature: f32,
     timeout: Duration,
 }
@@ -945,8 +1028,8 @@ impl LlamaCppWorker {
     ///
     /// Reads the server URL from the `LLAMA_CPP_URL` environment variable. If
     /// the variable is not set the worker falls back to
-    /// `http://localhost:8080`. Default settings: 256 max tokens, temperature
-    /// 0.8, 30 s timeout.
+    /// `http://localhost:8080`. Default settings: no `n_predict` (the
+    /// server's limit applies), temperature 0.8, 30 s timeout.
     ///
     /// # Environment Variables
     ///
@@ -979,7 +1062,7 @@ impl LlamaCppWorker {
         Self {
             client: reqwest::Client::new(),
             url,
-            max_tokens: 256,
+            max_tokens: None,
             temperature: 0.8,
             timeout: Duration::from_secs(30),
         }
@@ -991,9 +1074,18 @@ impl LlamaCppWorker {
         self
     }
 
-    /// Set maximum tokens to generate
+    /// Cap the reply at `max_tokens` (llama.cpp's `n_predict`). Unset by
+    /// default: the request then carries no `n_predict` and the server's own
+    /// limit applies.
     pub fn with_max_tokens(mut self, max_tokens: i32) -> Self {
-        self.max_tokens = max_tokens;
+        self.max_tokens = Some(max_tokens);
+        self
+    }
+
+    /// Send requests through `client` instead of a client of our own, to
+    /// share its connection pool, proxy and TLS settings.
+    pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
+        self.client = client;
         self
     }
 
@@ -2083,6 +2175,79 @@ mod tests {
         let reqs = server.received_requests().await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
         assert_eq!(body["n_predict"], 512);
+    }
+
+    #[tokio::test]
+    async fn test_llamacpp_default_omits_n_predict() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/completion"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(llamacpp_success_body()))
+            .mount(&server)
+            .await;
+
+        let worker = LlamaCppWorker::new()
+            .with_url(server.uri())
+            .with_http_client(reqwest::Client::new());
+        worker.infer("test").await.unwrap();
+
+        let reqs = server.received_requests().await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert!(
+            body.get("n_predict").is_none(),
+            "no n_predict unless set, so replies are not truncated: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_openai_default_omits_max_tokens_in_both_modes() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(openai_success_body()))
+            .mount(&server)
+            .await;
+
+        // with_key needs no environment variable.
+        let worker = OpenAiWorker::with_key("gpt-4o-mini", "sk-explicit")
+            .with_http_client(reqwest::Client::new())
+            .with_base_url(server.uri());
+        worker.infer("test").await.unwrap();
+        let _ = worker.infer_stream("test").await;
+
+        let reqs = server.received_requests().await.unwrap();
+        assert_eq!(reqs.len(), 2);
+        for req in &reqs {
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+            assert!(
+                body.get("max_tokens").is_none(),
+                "no max_tokens unless set: {body}"
+            );
+            assert_eq!(
+                req.headers.get("authorization").unwrap(),
+                "Bearer sk-explicit"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_with_key_uses_the_given_key() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_success_body()))
+            .mount(&server)
+            .await;
+
+        let worker = AnthropicWorker::with_key("claude-sonnet-4-5", "sk-ant-explicit")
+            .with_http_client(reqwest::Client::new())
+            .with_base_url(server.uri());
+        let _ = worker.infer("test").await;
+
+        let reqs = server.received_requests().await.unwrap();
+        assert_eq!(reqs[0].headers.get("x-api-key").unwrap(), "sk-ant-explicit");
+        let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(body["max_tokens"], 1024, "the Messages API requires one");
     }
 
     #[tokio::test]

@@ -10,6 +10,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check
 
+  msrv:
+    # The rust-version declared in Cargo.toml. The library with default
+    # features must build on it. Some optional features need newer Rust
+    # (rig: 1.97.1, tantivy: 1.90), so this job checks the lib only.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --lib
+
   clippy:
     runs-on: ubuntu-latest
     steps:
@@ -90,6 +101,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Integration tests
         run: cargo test --tests
+      - name: rig integration tests (RigWorker, OrchestratedTransport)
+        run: cargo test --features rig --test integrations_tests
       - name: Doctests
         run: cargo test --doc
       - name: Examples build
@@ -118,7 +131,8 @@ jobs:
         # - RUSTSEC-2024-0437: prometheus 0.13 protobuf; /metrics is behind METRICS_API_KEY (see Cargo.toml).
         # - RUSTSEC-2026-0189: rmcp Streamable HTTP transport; this crate only enables transport-io (stdio).
         # - RUSTSEC-2026-0049/0098/0099/0104: rustls-webpki 0.102 via async-nats 0.35, only with the
-        #   optional `distributed` feature. The fix needs async-nats >= 0.47, which needs Rust 1.88 (MSRV is 1.85).
+        #   optional `distributed` feature. The fix needs async-nats >= 0.47 (Rust 1.88, which is now
+        #   the MSRV, so the upgrade is no longer blocked on the toolchain).
         run: >-
           cargo audit
           --ignore RUSTSEC-2024-0437

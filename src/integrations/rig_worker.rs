@@ -32,7 +32,7 @@ use crate::OrchestratorError;
 /// # }
 /// ```
 ///
-/// Requires the `rig` feature, which needs Rust 1.95 or newer (rig-core's
+/// Requires the `rig` feature, which needs Rust 1.97.1 or newer (rig-core's
 /// minimum).
 #[derive(Clone, Debug)]
 pub struct RigWorker {

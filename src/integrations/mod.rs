@@ -9,7 +9,8 @@
 //! |---|---|---|
 //! | `async-openai` | [`AsyncOpenAiWorker`] | an [`async_openai::Client`] you configured: OpenAI, Azure OpenAI, or any OpenAI-compatible server |
 //! | `genai` | [`GenaiWorker`] | a [`genai::Client`]: OpenAI, Anthropic, Gemini, Ollama, Groq, DeepSeek, xAI, Cohere and more, picked by model name |
-//! | `rig` | [`RigWorker`] | any [rig](https://docs.rs/rig-core) agent or model that implements `rig::completion::Prompt` (needs Rust 1.95) |
+//! | `rig` | [`RigWorker`] | any [rig](https://docs.rs/rig-core) agent or model that implements `rig::completion::Prompt` (needs Rust 1.97.1) |
+//! | `rig` | [`OrchestratedTransport`] | the transport under any rig 0.46 model: dedup, circuit breaker and retry, with the full rig request (messages, tools, params) passed through unchanged |
 //! | `tower` | [`ServiceWorker`], [`WorkerService`] | any `tower::Service<String>`, in both directions |
 //!
 //! A [`Retriever`](crate::Retriever) that grounds prompts in your documents:
@@ -45,6 +46,12 @@ mod rig_worker;
 #[cfg(feature = "rig")]
 #[cfg_attr(docsrs, doc(cfg(feature = "rig")))]
 pub use rig_worker::RigWorker;
+
+#[cfg(feature = "rig")]
+mod rig_transport;
+#[cfg(feature = "rig")]
+#[cfg_attr(docsrs, doc(cfg(feature = "rig")))]
+pub use rig_transport::{OrchestratedTransport, OrchestratedTransportBuilder};
 
 mod embedders;
 #[cfg(feature = "fastembed")]

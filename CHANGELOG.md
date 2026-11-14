@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-11-14
+
+### Added
+
+- `integrations::OrchestratedTransport` (feature `rig`): a rig-core 0.46 `Transport` that wraps the
+  transport of any rig model with the orchestrator's deduplication, circuit breaker and retry.
+  Swap it in with `Model::new(model.wire, OrchestratedTransport::new(model.transport))`. The rig
+  request is forwarded exactly as rig encoded it, so messages, tools, `temperature`, `max_tokens`
+  and structured output all reach the provider (unlike `RigWorker`, which only passes the prompt).
+  Identical unary requests in flight share one upstream call (keyed on a SHA-256 of method, URI,
+  credential headers and body); streams are never deduplicated. Retryable failures (connection
+  errors, 5xx, 429, truncated replies) are retried and counted by the breaker; a 400 or 401 is
+  neither. Defaults: in-flight dedup only, breaker opens after 5 failures and probes after 30 s,
+  3 attempts with exponential backoff from 200 ms; `OrchestratedTransport::builder` changes them.
+  Tested in `tests/integrations_tests.rs` against a counting mock transport (8 concurrent
+  identical calls, 1 upstream send; breaker opens after K failures; retries stop at the maximum)
+  and against rig's real HTTP client on a wiremock server. Example: `examples/rig_transport.rs`.
+- `OpenAiWorker::with_key(model, key)` and `AnthropicWorker::with_key(model, key)` take the API key
+  from the caller, so a key from a vault or a per-tenant config no longer needs
+  `std::env::set_var` (unsafe in edition 2024 and racy in a multi-threaded runtime).
+  `from_env(model)` reads the environment variable as before; `new` is now an alias of it.
+- `with_http_client(reqwest::Client)` on `OpenAiWorker`, `AnthropicWorker` and `LlamaCppWorker`,
+  to share the caller's connection pool, proxy and TLS settings.
+- CI: an `msrv` job runs `cargo check --lib` on Rust 1.88 (the declared `rust-version`), and the
+  test job runs the rig integration tests.
+
+### Changed
+
+- The `rig` feature now targets rig-core 0.46 (`>=0.46, <0.47`), the current release. rig 0.43
+  and 0.44 are no longer accepted. rig-core 0.46 needs Rust 1.97.1, so the `rig` feature does too;
+  the rest of the crate keeps the 1.88 MSRV.
+
+### Fixed
+
+- `OpenAiWorker` sent `max_tokens: 256` on every request unless told otherwise, so answers were
+  silently cut off at 256 tokens. It now sends no `max_tokens` unless `with_max_tokens` is called,
+  and the model's own limit applies. `LlamaCppWorker` had the same problem with `n_predict: 256`;
+  it now omits `n_predict` unless set. The setters keep their signatures. `AnthropicWorker` still
+  sends 1024 by default because the Messages API requires a value.
+
 ## [2.0.6] - 2026-11-14
 
 First crates.io release of the changes below. A 2.0.5 was already on crates.io (published
