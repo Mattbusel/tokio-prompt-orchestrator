@@ -67,7 +67,7 @@ jobs:
         run: |
           args=""
           for b in $BINS; do args="$args --bin $b"; done
-          cargo build --release --locked --features web-api --target ${{ matrix.target }} $args
+          cargo build --release --locked --features web-api,cli --target ${{ matrix.target }} $args
 
       - name: Smoke test
         if: matrix.target != 'x86_64-apple-darwin'
