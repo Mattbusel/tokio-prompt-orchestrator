@@ -7,7 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [2.0.5] - 2026-11-14
+## [2.0.6] - 2026-11-14
+
+First crates.io release of the changes below. A 2.0.5 was already on crates.io (published
+2026-10-21), so the GitHub tag v2.0.5 and image 2.0.5 carry this code but crates.io has it as 2.0.6.
 
 ### Added
 

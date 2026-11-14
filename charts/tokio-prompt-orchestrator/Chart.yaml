@@ -2,8 +2,8 @@ apiVersion: v2
 name: tokio-prompt-orchestrator
 description: OpenAI-compatible LLM proxy that shares identical prompts, caps spend and fails fast when the provider is down.
 type: application
-version: 2.0.5
-appVersion: "2.0.5"
+version: 2.0.6
+appVersion: "2.0.6"
 home: https://github.com/Mattbusel/tokio-prompt-orchestrator
 sources:
   - https://github.com/Mattbusel/tokio-prompt-orchestrator
