@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794693329784,
+  "lastUpdate": 1794698145452,
   "repoUrl": "https://github.com/Mattbusel/tokio-prompt-orchestrator",
   "entries": {
     "Pipeline Benchmarks": [
@@ -2266,6 +2266,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "session_id_creation",
             "value": 11,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "committer": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "distinct": true,
+          "id": "6222d71a0330ca00a4b7b1f32cd7ce24b391a92a",
+          "message": "rig 0.46 OrchestratedTransport + stop truncating answers\n\nAdd integrations::OrchestratedTransport (feature `rig`), a rig-core 0.46\nTransport that wraps any rig model's transport with the orchestrator's\ndeduplication, circuit breaker and retry. The rig request is forwarded\nexactly as rig encoded it, so messages, tools, temperature and max_tokens\nreach the provider; RigWorker drops all of that. Identical unary requests\nin flight share one upstream call (SHA-256 of method, URI, credential\nheaders and body); streams are never deduplicated. Only retryable errors\n(transport, 5xx, 429, truncated) are retried and counted by the breaker.\nCovered by mock-transport and wiremock tests, a doctest and\nexamples/rig_transport.rs. rig-core range moves to >=0.46, <0.47.\n\nFix silent truncation: OpenAiWorker sent max_tokens 256 and LlamaCppWorker\nn_predict 256 on every request. Both now omit the field unless\nwith_max_tokens is called (setter signatures unchanged).\n\nAdd with_key, from_env (new is now its alias) and with_http_client on the\nOpenAI and Anthropic workers, and with_http_client on LlamaCppWorker, so\nkeys from a vault need no std::env::set_var and callers can share a\nreqwest::Client.\n\nCI: msrv job (Rust 1.88, cargo check --lib), rig integration tests in the\ntest job, stale MSRV audit comment fixed. Version 2.1.0 (crates.io has\n2.0.6), CHANGELOG and Helm chart updated.",
+          "timestamp": "2026-11-14T18:11:37-05:00",
+          "tree_id": "2a5f3c5f66ff191f8de1053bdf43e8257e1e1f9e",
+          "url": "https://github.com/Mattbusel/tokio-prompt-orchestrator/commit/6222d71a0330ca00a4b7b1f32cd7ce24b391a92a"
+        },
+        "date": 1794698143326,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "full_pipeline_echo_worker",
+            "value": 11217322,
+            "range": "± 119779",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/10",
+            "value": 51252763,
+            "range": "± 186832",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/50",
+            "value": 51398996,
+            "range": "± 150240",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/100",
+            "value": 51191792,
+            "range": "± 115122",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/512",
+            "value": 28231,
+            "range": "± 649",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/1024",
+            "value": 27819,
+            "range": "± 752",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/2048",
+            "value": 27703,
+            "range": "± 1027",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "send_with_shed_normal",
+            "value": 156,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "shard_session",
+            "value": 12,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "session_id_creation",
+            "value": 12,
             "range": "± 0",
             "unit": "ns/iter"
           }
