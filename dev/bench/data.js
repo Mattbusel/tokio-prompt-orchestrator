@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794109513956,
+  "lastUpdate": 1794692551248,
   "repoUrl": "https://github.com/Mattbusel/tokio-prompt-orchestrator",
   "entries": {
     "Pipeline Benchmarks": [
@@ -2014,6 +2014,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "session_id_creation",
             "value": 12,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "committer": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "distinct": true,
+          "id": "a829def3979439abbff95a4fb50631ec0926cbd9",
+          "message": "2.0.5: Docker image, Helm chart, upstream URL, benchmark vs LiteLLM\n\n- Dockerfile rebuilt: it copied a binary that does not exist (orchestrator-demo),\n  pinned Rust 1.79 under an MSRV of 1.88 and exposed the wrong port. Now a\n  distroless, non-root image (16 MB compressed) serving the OpenAI-compatible\n  API on 8080; defaults to --provider echo.\n- .github/workflows/docker.yml: linux/amd64 + linux/arm64 on native runners,\n  pushed to ghcr.io/mattbusel/tokio-prompt-orchestrator on each tag; the Helm\n  chart is pushed to oci://ghcr.io/mattbusel/charts.\n- charts/tokio-prompt-orchestrator: Secret for provider keys and the bearer key,\n  /health probes, read-only root filesystem, optional Ingress (asked for in an\n  issue in March).\n- ORCHESTRATOR_UPSTREAM_URL points --provider openai at any OpenAI-compatible\n  server (OpenRouter, Groq, vLLM). Deliberately not OPENAI_BASE_URL, which\n  clients in the same shell set to the proxy itself.\n- bench/vs-litellm: reproducible benchmark on a shared 50 ms mock upstream,\n  4 CPUs. 55 MB vs 347 MB idle, +0.5 ms vs +7.8 ms added latency, 1,217 vs\n  162 req/s (376 with 4 LiteLLM workers), 50 vs 2,000 upstream calls for\n  2,000 requests over 50 prompts. The write-up lists what LiteLLM does that\n  this does not.\n- docker-compose.yml / prometheus.yml: right port, no curl healthcheck on a\n  distroless image, no missing alerts mount, scrape the orchestrator's /metrics.",
+          "timestamp": "2026-11-14T16:38:48-05:00",
+          "tree_id": "1fb01eb36fb049d7693d18a1f43846a187c3d5bc",
+          "url": "https://github.com/Mattbusel/tokio-prompt-orchestrator/commit/a829def3979439abbff95a4fb50631ec0926cbd9"
+        },
+        "date": 1794692549906,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "full_pipeline_echo_worker",
+            "value": 11087822,
+            "range": "± 106975",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/10",
+            "value": 51226986,
+            "range": "± 112649",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/50",
+            "value": 51345439,
+            "range": "± 140055",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/100",
+            "value": 51282842,
+            "range": "± 192818",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/512",
+            "value": 21925,
+            "range": "± 369",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/1024",
+            "value": 21904,
+            "range": "± 481",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/2048",
+            "value": 22082,
+            "range": "± 444",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "send_with_shed_normal",
+            "value": 136,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "shard_session",
+            "value": 9,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "session_id_creation",
+            "value": 10,
             "range": "± 0",
             "unit": "ns/iter"
           }
