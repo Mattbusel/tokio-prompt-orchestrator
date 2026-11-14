@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794692551248,
+  "lastUpdate": 1794692890061,
   "repoUrl": "https://github.com/Mattbusel/tokio-prompt-orchestrator",
   "entries": {
     "Pipeline Benchmarks": [
@@ -2098,6 +2098,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "session_id_creation",
             "value": 10,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "committer": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "distinct": true,
+          "id": "3caaab5627456d16b0bbc867d2e6bfd6e659f450",
+          "message": "Release workflow: build with the cli feature\n\nreplay, coordinator and validate have required the cli feature since 2.0.1,\nso every tagged release build since then stopped at 'target replay requires\nthe features: cli' and no GitHub release was published after v1.4.2.",
+          "timestamp": "2026-11-14T16:44:15-05:00",
+          "tree_id": "c513d190771609bd3ce93cab809ddfe79a1f7767",
+          "url": "https://github.com/Mattbusel/tokio-prompt-orchestrator/commit/3caaab5627456d16b0bbc867d2e6bfd6e659f450"
+        },
+        "date": 1794692888147,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "full_pipeline_echo_worker",
+            "value": 11156366,
+            "range": "± 120293",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/10",
+            "value": 51213741,
+            "range": "± 75328",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/50",
+            "value": 51198950,
+            "range": "± 149698",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/100",
+            "value": 51274618,
+            "range": "± 95609",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/512",
+            "value": 27327,
+            "range": "± 578",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/1024",
+            "value": 27506,
+            "range": "± 672",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/2048",
+            "value": 27229,
+            "range": "± 748",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "send_with_shed_normal",
+            "value": 161,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "shard_session",
+            "value": 12,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "session_id_creation",
+            "value": 13,
             "range": "± 0",
             "unit": "ns/iter"
           }
