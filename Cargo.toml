@@ -1,6 +1,6 @@
 [package]
 name = "tokio-prompt-orchestrator"
-version = "2.2.0"
+version = "2.3.0"
 edition = "2021"
 rust-version = "1.88"
 default-run = "orchestrator"
@@ -38,7 +38,7 @@ pkg-fmt = "zip"
 bin-dir = "orchestrator-v{ version }-x86_64-pc-windows-msvc/{ bin }{ binary-ext }"
 
 [package.metadata.docs.rs]
-features = ["full", "tui", "mcp", "self-improving", "distributed", "schema", "core-pinning", "tower", "async-openai", "genai", "rig", "rig-transport", "tantivy"]
+features = ["full", "tui", "mcp", "self-improving", "distributed", "schema", "core-pinning", "tower", "reqwest-middleware", "async-openai", "genai", "rig", "rig-transport", "tantivy"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
@@ -82,6 +82,10 @@ tower = { version = "0.5", optional = true, default-features = false, features =
 tower-http = { version = "0.6", optional = true, features = ["trace", "cors"] }
 tokio-stream = { version = "0.1", optional = true }
 futures = "0.3"
+# reqwest-middleware: ResilienceMiddleware for reqwest_middleware::ClientWithMiddleware
+# (0.4 is the line built on reqwest 0.12, the reqwest this crate uses).
+reqwest-middleware = { version = "0.4", features = ["json"], optional = true }
+http = { version = "1", optional = true }
 bytes = "1"
 subtle = "2"
 
@@ -174,7 +178,12 @@ rig = ["dep:rig-core"]
 # rig-core 0.45 or 0.46 (`cargo update -p rig-core` if your lockfile holds an
 # older one) and Rust 1.97.1 or newer (their minimum).
 rig-transport = ["dep:rig-core"]
+# tower: ServiceWorker/WorkerService adapters, and ResilienceLayer (single-flight
+# dedup + circuit breaker for any tower Service, no pipeline needed).
 tower = ["dep:tower"]
+# reqwest-middleware: ResilienceMiddleware, the same dedup + per-host circuit
+# breaker as a reqwest-middleware 0.4 middleware (reqwest 0.12).
+reqwest-middleware = ["dep:reqwest-middleware", "dep:http"]
 # fastembed: local embedding models (BGE, MiniLM, ...) via ONNX Runtime, for
 # semantic dedup without an API. Downloads the model once on first use.
 # Needs Rust 1.88 or newer (fastembed's minimum).
@@ -296,6 +305,14 @@ required-features = ["web-api"]
 [[example]]
 name = "rig_transport"
 required-features = ["rig-transport"]
+
+[[example]]
+name = "tower_resilience"
+required-features = ["tower"]
+
+[[example]]
+name = "reqwest_middleware"
+required-features = ["reqwest-middleware"]
 
 [[bin]]
 name = "orchestrator"

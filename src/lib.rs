@@ -54,6 +54,10 @@
 //! - [`PromptRequest`] goes in through [`PipelineHandles::input_tx`]; [`PostOutput`] comes out of [`PipelineHandles::take_output_rx`].
 //! - [`ModelWorker`] is the trait for a backend: [`AnthropicWorker`], [`OpenAiWorker`], [`LlamaCppWorker`], [`VllmWorker`], [`EchoWorker`].
 //! - [`enhanced::Deduplicator`] and [`enhanced::CircuitBreaker`] are the resilience building blocks to wrap around a worker.
+//! - [`Dedup`] is a standalone single-flight primitive for any key and value, LLM or not.
+//! - Without the pipeline: `integrations::ResilienceLayer` (feature `tower`) puts dedup and a
+//!   circuit breaker in any tower stack, and `integrations::ResilienceMiddleware` (feature
+//!   `reqwest-middleware`) does the same for a `reqwest_middleware::ClientWithMiddleware`.
 //! - [`DeadLetterQueue`] holds every request that was dropped, with the reason.
 //! - [`PipelineConfig`] loads the same pipeline from TOML.
 //!
@@ -87,6 +91,7 @@
 //! |--------|-------------|
 //! | [`stages`] | Five pipeline stage implementations and channel wiring |
 //! | [`worker`] | [`ModelWorker`] trait and the provider implementations |
+//! | [`single_flight`] | [`Dedup`]: generic single-flight request coalescing for any key and value |
 //! | [`enhanced`] | Resilience primitives: circuit breaker, dedup, semantic dedup (SimHash), retry, cache, rate limiter, smart batching |
 //! | [`config`] | TOML-deserialisable [`PipelineConfig`] with hot-reload support |
 //! | [`metrics`] | Prometheus metrics initialisation and helper functions |
@@ -157,6 +162,8 @@ pub mod stages;
 pub mod token_budget;
 pub mod worker;
 pub mod integrations;
+pub mod single_flight;
+pub use single_flight::{Dedup, DedupStats};
 pub mod embedding;
 pub use embedding::Embedder;
 pub mod retrieval;

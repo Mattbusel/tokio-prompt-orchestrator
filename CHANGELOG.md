@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-11-15
+
+The deduplication and circuit breaker now work without the pipeline or the proxy: drop them into
+the client stack an app already has.
+
+### Added
+
+- **`Dedup<K, V>`** (module `single_flight`, re-exported at the crate root with `DedupStats`): a
+  standalone single-flight primitive for any `K: Hash + Eq + Clone` and `V: Clone`, LLM or not.
+  Concurrent `run(key, work)` calls for the same key run `work` once and all get its result.
+  If the leader is cancelled or panics, a waiter takes over and runs its own `work`, so nobody
+  waits forever and no panic spreads. The work needs no `'static` or `Send` bound.
+  `run_with_status` also reports whether the result was shared, `claim` is the low-level form
+  (`Claim::Leader` / `Claim::Joined`) for sharing something other than what the leader returns,
+  and `stats` counts leaders, coalesced calls and keys in flight. Example: `examples/single_flight.rs`.
+- **`integrations::ResilienceLayer`** (feature `tower`): a tower `Layer` that adds single-flight
+  dedup (`dedup_by(|req| Some(key))`, `None` to skip a request) and a circuit breaker (on by
+  default: 5 consecutive failures, 30 s probe; `with_circuit_breaker`, `without_circuit_breaker`)
+  to any `tower::Service`. `failure_if(|resp| ...)` counts responses such as HTTP 5xx against the
+  breaker while still returning them. Errors come back as `ResilienceError` (`CircuitOpen` with a
+  `retry_after`, or `Upstream(Arc<E>)`, shared with every deduplicated caller). Without dedup the
+  response need not be `Clone`, so a breaker-only layer wraps HTTP services directly
+  (`NoDedup`). `ResilienceService::dedup_stats` exposes the counters. Example:
+  `examples/tower_resilience.rs`.
+- **`integrations::ResilienceMiddleware`** (new feature `reqwest-middleware`, reqwest-middleware 0.4
+  on reqwest 0.12): the same for a `reqwest_middleware::ClientWithMiddleware`. Identical in-flight
+  `GET`, `HEAD` and `POST` requests (method, URL, body and headers, credentials included; tracing
+  and request-id headers ignored, more with `ignore_header`) share one upstream call; each caller
+  gets its own copy of the buffered response. Streaming requests (`"stream": true` or
+  `Accept: text/event-stream`) and requests carrying the `SkipDedup` extension always go out on
+  their own. A circuit breaker per host (or one shared breaker) counts transport errors and 5xx
+  (`failure_if_status` to change) and fails fast with `CircuitOpenError`; callers that joined a
+  failed request get `JoinedRequestFailed`. Example: `examples/reqwest_middleware.rs`.
+
 ## [2.2.0] - 2026-11-14
 
 The OpenAI-compatible endpoint now honours each request instead of one model and one set of

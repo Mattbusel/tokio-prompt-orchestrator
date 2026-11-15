@@ -13,6 +13,14 @@
 //! | `rig-transport` | [`OrchestratedTransport`] | the transport under any rig 0.45 or 0.46 model: dedup, circuit breaker and retry, with the full rig request (messages, tools, params) passed through unchanged (needs Rust 1.97.1) |
 //! | `tower` | [`ServiceWorker`], [`WorkerService`] | any `tower::Service<String>`, in both directions |
 //!
+//! Or skip the pipeline and put the dedup and circuit breaker straight into
+//! the client stack you already have:
+//!
+//! | Feature | Type | Wraps |
+//! |---|---|---|
+//! | `tower` | [`ResilienceLayer`] | any `tower::Service` (HTTP client, LLM client, gRPC channel): single-flight dedup by a key you choose, plus a circuit breaker |
+//! | `reqwest-middleware` | [`ResilienceMiddleware`] | a `reqwest_middleware::ClientWithMiddleware` (reqwest 0.12, reqwest-middleware 0.4): identical in-flight requests share one upstream call, and a circuit breaker per host |
+//!
 //! A [`Retriever`](crate::Retriever) that grounds prompts in your documents:
 //!
 //! | Feature | Type | Searches |
@@ -75,6 +83,20 @@ mod tower_adapters;
 #[cfg(feature = "tower")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tower")))]
 pub use tower_adapters::{ServiceWorker, WorkerService};
+
+#[cfg(feature = "tower")]
+mod tower_resilience;
+#[cfg(feature = "tower")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tower")))]
+pub use tower_resilience::{NoDedup, ResilienceError, ResilienceLayer, ResilienceService};
+
+#[cfg(feature = "reqwest-middleware")]
+mod reqwest_resilience;
+#[cfg(feature = "reqwest-middleware")]
+#[cfg_attr(docsrs, doc(cfg(feature = "reqwest-middleware")))]
+pub use reqwest_resilience::{
+    CircuitOpenError, JoinedRequestFailed, ResilienceMiddleware, SkipDedup,
+};
 
 /// Map an HTTP status and message from a provider client to the error the
 /// pipeline understands: 401/403 are never retried, 429 backs off, and
