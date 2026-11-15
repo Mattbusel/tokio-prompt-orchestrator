@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794701874091,
+  "lastUpdate": 1794706104954,
   "repoUrl": "https://github.com/Mattbusel/tokio-prompt-orchestrator",
   "entries": {
     "Pipeline Benchmarks": [
@@ -2434,6 +2434,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "session_id_creation",
             "value": 12,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "committer": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "distinct": true,
+          "id": "859bf014c6d9d439bc9b5424de3ce86e870c7fcd",
+          "message": "2.2.0: honour each OpenAI request, route by model name\n\nThe OpenAI-compatible endpoint used one model and one set of settings per\nprocess. It now carries every request's settings to the provider and can\nroute by model name.\n\n- Per-request parameters: messages as written (tool calls and tool results\n  included), model, temperature, top_p, max_tokens, max_completion_tokens,\n  stop, seed, response_format, tools, tool_choice, parallel_tool_calls.\n  Tool calls come back as tool_calls (also when streaming); the provider's\n  usage is reported. Nothing is capped by the orchestrator.\n- ChatRequest / ChatResponse and ModelWorker::chat (default impl keeps\n  existing workers compiling). OpenAI, Anthropic (Messages API translation\n  incl. tools) and llama.cpp (/v1/chat/completions) implement it; the\n  pipeline's inference stage calls it inside the same breaker, timeout and\n  retries.\n- Model routing: static [[models]] table (names or globs) to openai-compatible\n  base URL + key env var, anthropic, llama_cpp or echo; one pipeline and\n  breaker per route. --models <file> on the CLI, accepted by the pipeline\n  TOML loader, ServerConfig::model_routes in Rust. --provider/--model stays\n  the default route; with default_route = false unknown models get a 400\n  model_not_found listing configured models. GET /v1/models lists routes.\n- Dedup key is a canonical SHA-256 over route, model, messages, tools,\n  tool_choice, sampling params and response_format. temperature > 0 without\n  a seed is shared in flight only, never cached. Semantic dedup is scoped to\n  identical settings.\n- OrchestratorError::UpstreamRejected: provider 4xx returned with its status\n  and message, not retried, not counted against the circuit breaker.\n- Route timeouts: timeout_secs, else --timeout, else 60 s for Anthropic\n  routes (ANTHROPIC_DEFAULT_TIMEOUT_SECS) and 30 s otherwise\n  (ModelRoute::effective_timeout). The HTTP wait covers the slowest route\n  on every retry (ModelRoutesConfig::longest_timeout), so a long\n  timeout_secs is not cut off with a 504.\n- tool_choice and parallel_tool_calls are dropped without tools (also for\n  tools: []), on the endpoint, in to_openai_body and in the Anthropic\n  translation; providers answer 400 for them otherwise.\n- No temperature is sent when the client sends none (was 0.7 on\n  --provider openai); documented in CHANGELOG and DETAILS, as is the\n  ServerConfig::model_routes struct-literal note.\n- Example table uses o1*/o3*/o4* instead of o*.\n- Tests: mock upstream (axum) checks every parameter on the wire, routing,\n  Anthropic tool translation, dedup separation, in-flight-only sampling,\n  unknown model 400, /v1/models, provider 400 handling.\n- Docs: docs/DETAILS.md, docs/REFERENCE.md, CHANGELOG, examples/models.example.toml.",
+          "timestamp": "2026-11-14T20:21:40-05:00",
+          "tree_id": "e06513cdf65a122a90140753f24b8265e3bdd6fd",
+          "url": "https://github.com/Mattbusel/tokio-prompt-orchestrator/commit/859bf014c6d9d439bc9b5424de3ce86e870c7fcd"
+        },
+        "date": 1794706103503,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "full_pipeline_echo_worker",
+            "value": 11272110,
+            "range": "± 146629",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/10",
+            "value": 51367143,
+            "range": "± 135496",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/50",
+            "value": 51391518,
+            "range": "± 334834",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/100",
+            "value": 51270475,
+            "range": "± 91496",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/512",
+            "value": 16089,
+            "range": "± 277",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/1024",
+            "value": 15691,
+            "range": "± 526",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/2048",
+            "value": 15714,
+            "range": "± 308",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "send_with_shed_normal",
+            "value": 207,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "shard_session",
+            "value": 7,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "session_id_creation",
+            "value": 7,
             "range": "± 0",
             "unit": "ns/iter"
           }
