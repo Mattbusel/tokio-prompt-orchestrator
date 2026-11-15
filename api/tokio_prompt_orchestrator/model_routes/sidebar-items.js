@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ANTHROPIC_DEFAULT_MAX_TOKENS","ANTHROPIC_DEFAULT_TIMEOUT_SECS"],"enum":["RouteProvider"],"fn":["glob_match"],"struct":["ModelRoute","ModelRoutes","ModelRoutesConfig"]};
