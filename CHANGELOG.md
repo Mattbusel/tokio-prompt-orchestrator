@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.4.1] - 2026-11-15
+
+### Changed
+
+- **rmcp 0.16 to 3.10** for the optional `mcp` feature (the `mcp` stdio server binary). This takes
+  the old rmcp 0.16 tree, and the RUSTSEC-2026-0189 advisory that came with it, out of the
+  dependency graph, so the audit job no longer has to ignore it. `get_info` now uses rmcp 3's
+  `ServerConfig` builder, and `initialize` reports `serverInfo` as `tokio-prompt-orchestrator`
+  with the crate version (rmcp 0.16 filled in its own name). The nine tools, their parameters and
+  their output are unchanged.
+- Lockfile refresh for the security audit: quinn-proto 0.11.19, quinn-udp 0.5.16,
+  rustls-webpki 0.103.17, webpki-roots and webpki-root-certs 1.0.12, tokio 1.54.1, rustix 1.1.6.
+  RUSTSEC-2026-0382 in rustls-webpki 0.102 joins the existing `distributed`-only async-nats ignores.
+
 ## [2.4.0] - 2026-11-15
 
 The proxy speaks more client protocols: Anthropic clients with tool use (Claude SDKs, Claude Code

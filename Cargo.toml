@@ -1,6 +1,6 @@
 [package]
 name = "tokio-prompt-orchestrator"
-version = "2.4.0"
+version = "2.4.1"
 edition = "2021"
 rust-version = "1.88"
 default-run = "orchestrator"
@@ -141,7 +141,7 @@ fastembed = { version = "7.1", default-features = false, features = ["ort-downlo
 rig-core = { version = ">=0.43, <0.47", default-features = false, features = ["reqwest", "rustls"], optional = true }
 
 # MCP server
-rmcp = { version = "0.16", optional = true, features = ["server", "macros", "transport-io"] }
+rmcp = { version = "3.10", optional = true, features = ["server", "macros", "transport-io"] }
 async-stream = "0.3"
 
 [features]

@@ -13,7 +13,7 @@
 use rmcp::schemars;
 
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
-use rmcp::model::{ServerCapabilities, ServerInfo};
+use rmcp::model::{Implementation, ServerCapabilities, ServerConfig};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler, ServiceExt};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -755,18 +755,17 @@ pub fn new_mcp_server(pipeline: PipelineHandles) -> OrchestratorMcp {
     }
 }
 
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for OrchestratorMcp {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            instructions: Some(
-                "tokio-prompt-orchestrator MCP server. Exposes a 5-stage LLM pipeline \
-                 (RAG → Assemble → Inference → Post-Process → Stream) as callable tools."
-                    .into(),
-            ),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            ..Default::default()
-        }
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new(
+                "tokio-prompt-orchestrator",
+                env!("CARGO_PKG_VERSION"),
+            ))
+            .with_instructions(
+                "tokio-prompt-orchestrator MCP server. Exposes a 5-stage LLM pipeline                  (RAG → Assemble → Inference → Post-Process → Stream) as callable tools.",
+            )
     }
 }
 
