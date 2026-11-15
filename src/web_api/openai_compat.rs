@@ -1,4 +1,8 @@
-//! OpenAI-compatible endpoints: `POST /v1/chat/completions` and `GET /v1/models`.
+//! OpenAI-compatible endpoints: `POST /v1/chat/completions` and `GET /v1/models`,
+//! plus the other client protocols built on the same machinery: the
+//! Anthropic Messages API (`POST /v1/messages`, module `anthropic`), the
+//! OpenAI Responses API (`POST /v1/responses`, module `responses`) and
+//! OpenAI embeddings (`POST /v1/embeddings`, module `embeddings`).
 //!
 //! Point any OpenAI client at `http://<host>:<port>/v1` and its chat requests
 //! go through the orchestrator pipeline (inference behind the circuit
@@ -66,6 +70,15 @@ use crate::enhanced::{DeduplicationResult, Deduplicator};
 use serde_json::Value;
 use tokio::sync::oneshot;
 
+mod anthropic;
+pub(super) mod embeddings;
+mod responses;
+
+pub(super) use anthropic::{anthropic_unauthorized, count_tokens_handler, is_anthropic_path, messages_handler};
+pub(super) use embeddings::embeddings_handler;
+pub use embeddings::EmbeddingsBackend;
+pub(super) use responses::responses_handler;
+
 /// How long a failure is kept so requests that joined the failed call get
 /// the same error.
 const FAILURE_MEMORY: Duration = Duration::from_secs(30);
@@ -106,6 +119,8 @@ pub(super) struct OpenAiState {
     spent_usd: parking_lot::Mutex<f64>,
     /// Unix time the server started; reported as `created` by `/v1/models`.
     started_unix: u64,
+    /// Cache, in-flight table and per-route backends for `/v1/embeddings`.
+    embeddings: embeddings::EmbeddingsState,
 }
 
 impl OpenAiState {
@@ -125,6 +140,7 @@ impl OpenAiState {
             failures: DashMap::new(),
             spent_usd: parking_lot::Mutex::new(0.0),
             started_unix: unix_now(),
+            embeddings: embeddings::EmbeddingsState::new(window),
         }
     }
 
@@ -339,7 +355,7 @@ impl IntoResponse for ApiError {
 
 /// `true` for the paths served by this module (auth errors use OpenAI's shape).
 pub(super) fn is_openai_path(path: &str) -> bool {
-    path == "/v1/chat/completions" || path == "/v1/models"
+    matches!(path, "/v1/chat/completions" | "/v1/models" | "/v1/responses" | "/v1/embeddings")
 }
 
 /// The 401 an OpenAI client expects for a missing or wrong key.
@@ -1116,229 +1132,6 @@ async fn chat_completions(state: Arc<AppState>, body: axum::body::Bytes) -> Resu
                 "finish_reason": finish_reason,
             }],
             "usage": usage,
-        }))
-        .into_response()
-    };
-    add_dedup_headers(&mut resp, outcome);
-    Ok(resp)
-}
-
-// ============================================================================
-// Anthropic Messages API: POST /v1/messages
-// ============================================================================
-
-/// `true` for the Anthropic-compatible path (auth errors use Anthropic's shape).
-pub(super) fn is_anthropic_path(path: &str) -> bool {
-    path == "/v1/messages"
-}
-
-/// The 401 an Anthropic client expects for a missing or wrong key.
-pub(super) fn anthropic_unauthorized() -> Response {
-    anthropic_error(&ApiError::new(
-        StatusCode::UNAUTHORIZED,
-        "authentication_error",
-        "invalid_api_key",
-        "Missing or incorrect API key. Send the orchestrator's key (ORCHESTRATOR_API_KEY) \
-         as 'x-api-key: <key>' or 'Authorization: Bearer <key>'.",
-    ))
-}
-
-/// Render an error in Anthropic's shape:
-/// `{"type": "error", "error": {"type", "message"}}`.
-fn anthropic_error(err: &ApiError) -> Response {
-    let kind = match err.status.as_u16() {
-        400 | 413 | 422 => "invalid_request_error",
-        401 => "authentication_error",
-        403 => "permission_error",
-        404 => "not_found_error",
-        429 => "rate_limit_error",
-        503 | 529 => "overloaded_error",
-        _ => "api_error",
-    };
-    let body = serde_json::json!({
-        "type": "error",
-        "error": {"type": kind, "message": err.message},
-    });
-    let mut resp = (err.status, Json(body)).into_response();
-    err.add_headers(&mut resp);
-    resp
-}
-
-#[derive(Debug, Deserialize)]
-struct MessagesRequest {
-    #[serde(default)]
-    model: Option<String>,
-    messages: Vec<Value>,
-    /// A string or an array of text blocks.
-    #[serde(default)]
-    system: Option<Value>,
-    #[serde(default)]
-    stream: Option<bool>,
-    #[serde(default)]
-    metadata: Option<MessagesMetadata>,
-    #[serde(default)]
-    max_tokens: Option<u32>,
-    #[serde(default)]
-    temperature: Option<f64>,
-    #[serde(default)]
-    top_p: Option<f64>,
-    #[serde(default)]
-    stop_sequences: Option<Vec<String>>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct MessagesMetadata {
-    #[serde(default)]
-    user_id: Option<String>,
-}
-
-/// `POST /v1/messages`: the Anthropic Messages API, answered by the pipeline
-/// with the same routing, dedup, circuit breaker and spend cap as the OpenAI
-/// endpoint. `max_tokens`, `temperature`, `top_p` and `stop_sequences` are
-/// passed through; content is text only.
-pub(super) async fn messages_handler(
-    State(state): State<Arc<AppState>>,
-    body: axum::body::Bytes,
-) -> Response {
-    match messages(state, body).await {
-        Ok(resp) => resp,
-        Err(err) => anthropic_error(&err),
-    }
-}
-
-async fn messages(state: Arc<AppState>, body: axum::body::Bytes) -> Result<Response, ApiError> {
-    if state.shutting_down.load(AtomicOrdering::Relaxed) {
-        return Err(ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "overloaded_error",
-            "shutting_down",
-            "The orchestrator is shutting down.",
-        ));
-    }
-    let req: MessagesRequest = serde_json::from_slice(&body).map_err(|e| {
-        ApiError::invalid(None, format!("Could not parse the request body as a Messages API request: {e}"))
-    })?;
-    let mut views = Vec::with_capacity(req.messages.len() + 1);
-    let mut wire = Vec::with_capacity(req.messages.len() + 1);
-    // The system prompt goes first, as a system turn.
-    if let Some(system) = req.system.clone().filter(|s| !s.is_null()) {
-        views.push(ChatMessage {
-            role: "system".to_string(),
-            content: Some(system.clone()),
-        });
-        wire.push(serde_json::json!({"role": "system", "content": system}));
-    }
-    for m in &req.messages {
-        let view = ChatMessage::from_value(m)?;
-        if view.role != "user" && view.role != "assistant" {
-            return Err(ApiError::invalid(
-                Some("messages"),
-                format!("Message role must be 'user' or 'assistant', got '{}'.", view.role),
-            ));
-        }
-        wire.push(serde_json::json!({"role": view.role, "content": view.content}));
-        views.push(view);
-    }
-    let prompt = render_prompt(&views)?;
-    let target = resolve_target(&state, req.model.as_deref())?;
-    let mut chat = ChatRequest::new(target.upstream_model.clone(), wire);
-    chat.max_tokens = req.max_tokens;
-    chat.temperature = req.temperature;
-    chat.top_p = req.top_p;
-    chat.stop = req
-        .stop_sequences
-        .clone()
-        .filter(|s| !s.is_empty())
-        .map(|s| Value::from(s.into_iter().map(Value::from).collect::<Vec<_>>()));
-    check_spend_cap(&state, "rate_limit_error")?;
-
-    let id = format!("msg_{}", Uuid::new_v4().simple());
-    let session = req
-        .metadata
-        .and_then(|m| m.user_id)
-        .filter(|u| !u.is_empty())
-        .unwrap_or_else(|| format!("anthropic-{id}"));
-    debug!(
-        request_id = %id,
-        requested_model = req.model.as_deref().unwrap_or(""),
-        route = %target.label,
-        "POST /v1/messages"
-    );
-
-    let (answer, outcome) = complete(&state, &target, &id, session, prompt.clone(), chat).await?;
-    let (input_tokens, output_tokens) = usage_for(&target.reported_model, &prompt, &answer);
-    let model = target.reported_model.clone();
-    let text = answer.text().to_string();
-    let stop_reason = match answer.finish_reason.as_deref() {
-        Some("length") => "max_tokens",
-        _ => "end_turn",
-    };
-
-    let mut resp = if req.stream.unwrap_or(false) {
-        let mut events: Vec<(&'static str, Value)> = vec![
-            (
-                "message_start",
-                serde_json::json!({
-                    "type": "message_start",
-                    "message": {
-                        "id": id,
-                        "type": "message",
-                        "role": "assistant",
-                        "model": model,
-                        "content": [],
-                        "stop_reason": null,
-                        "stop_sequence": null,
-                        "usage": {"input_tokens": input_tokens, "output_tokens": 0},
-                    },
-                }),
-            ),
-            (
-                "content_block_start",
-                serde_json::json!({
-                    "type": "content_block_start",
-                    "index": 0,
-                    "content_block": {"type": "text", "text": ""},
-                }),
-            ),
-            ("ping", serde_json::json!({"type": "ping"})),
-        ];
-        for piece in text.split_inclusive(' ') {
-            events.push((
-                "content_block_delta",
-                serde_json::json!({
-                    "type": "content_block_delta",
-                    "index": 0,
-                    "delta": {"type": "text_delta", "text": piece},
-                }),
-            ));
-        }
-        events.push((
-            "content_block_stop",
-            serde_json::json!({"type": "content_block_stop", "index": 0}),
-        ));
-        events.push((
-            "message_delta",
-            serde_json::json!({
-                "type": "message_delta",
-                "delta": {"stop_reason": stop_reason, "stop_sequence": null},
-                "usage": {"output_tokens": output_tokens},
-            }),
-        ));
-        events.push(("message_stop", serde_json::json!({"type": "message_stop"})));
-        let frames = events
-            .into_iter()
-            .map(|(name, data)| Ok::<_, std::convert::Infallible>(Event::default().event(name).data(data.to_string())));
-        Sse::new(stream::iter(frames)).into_response()
-    } else {
-        Json(serde_json::json!({
-            "id": id,
-            "type": "message",
-            "role": "assistant",
-            "model": model,
-            "content": [{"type": "text", "text": text}],
-            "stop_reason": stop_reason,
-            "stop_sequence": null,
-            "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
         }))
         .into_response()
     };

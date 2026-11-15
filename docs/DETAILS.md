@@ -178,7 +178,13 @@ Summarize this ticket end_turn
 Now stream it
 ```
 
-Supports text, system prompts and streaming, and passes `max_tokens`, `temperature`, `top_p` and `stop_sequences` through. Image and tool blocks get an `invalid_request_error`. The key goes in `x-api-key` or `Authorization: Bearer`.
+Supports text, system prompts (a string or text blocks), streaming and tool use, and passes `max_tokens`, `temperature`, `top_p` and `stop_sequences` through. `tools` (`name`, `description`, `input_schema`), `tool_choice` (`auto`, `any`, `tool`, `none`, `disable_parallel_tool_use`), assistant `tool_use` blocks and user `tool_result` blocks are translated for whichever upstream the model routes to, so a Claude Code session can run against an OpenAI-compatible model too (`ANTHROPIC_BASE_URL=http://127.0.0.1:8080`). The model's tool calls come back as `tool_use` blocks with `stop_reason: "tool_use"` (streamed as `input_json_delta` events). `thinking`, `top_k` and `cache_control` are accepted and ignored. `POST /v1/messages/count_tokens` answers `{"input_tokens": n}` without calling the model. Image and document blocks, and Anthropic server tools (`web_search`, `bash`, ...), get an `invalid_request_error`. The key goes in `x-api-key` or `Authorization: Bearer`.
+
+## Responses API and embeddings
+
+`POST /v1/responses` serves the OpenAI Responses API (JSON, or the `response.*` event stream with `"stream": true`) through the same pipeline, routing, dedup, breaker and spend cap. `instructions`, string or item `input` (messages, `function_call`, `function_call_output`), function `tools`, `tool_choice`, `parallel_tool_calls`, `temperature`, `top_p`, `max_output_tokens` and `text.format` (`text`, `json_object`, `json_schema`) are honoured; tool calls come back as `function_call` output items. The orchestrator stores nothing, so `previous_response_id` and `conversation` get a 400 (send the earlier turns in `input`), and built-in tools and image inputs get a 400 too.
+
+`POST /v1/embeddings` serves OpenAI embeddings (`float` or `base64`, string or token-array inputs). With `--provider openai` the vectors come from the same upstream (`ORCHESTRATOR_UPSTREAM_URL` or api.openai.com); with `--provider llama` from the llama.cpp server (start it with `--embeddings`); a model that matches an `openai` or `llama_cpp` `--models` route goes to that route's server; otherwise the `--semantic-dedup` model answers, when loaded. Every input is cached on its own for the dedup window, so a batch that repeats recent inputs sends only the new ones upstream, and identical inputs in concurrent requests share one call. `x-orchestrator-dedup` says `miss`, `cached`, `joined` or `partial`, and `x-orchestrator-cached-inputs` counts the inputs that needed no new call. Embedding calls count against `--max-spend` and have their own circuit breaker. In the library, set `ServerConfig::embeddings` to an `EmbeddingsBackend`.
 
 ## Server flags
 
@@ -351,7 +357,7 @@ No features: the pipeline, workers and resilience parts. 167 crates in the tree.
 
 | Feature | Adds |
 |---|---|
-| `web-api` | HTTP server: REST, SSE, WebSocket and the OpenAI-compatible `/v1/chat/completions` |
+| `web-api` | HTTP server: REST, SSE, WebSocket, the OpenAI-compatible `/v1/chat/completions`, `/v1/responses` and `/v1/embeddings`, and the Anthropic `/v1/messages` |
 | `otel` | OpenTelemetry span export over OTLP/HTTP when `OTEL_EXPORTER_OTLP_ENDPOINT` is set |
 | `tiktoken` | Exact OpenAI token counts (on with `web-api`) |
 | `metrics-server`, `caching`, `rate-limiting` | `/metrics` endpoint, Redis result cache, token-bucket limiter |

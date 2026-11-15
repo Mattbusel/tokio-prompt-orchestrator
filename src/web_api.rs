@@ -17,7 +17,12 @@
 //! ### OpenAI-compatible
 //! - `POST /v1/chat/completions`  -  Chat completions (JSON or SSE with `"stream": true`)
 //! - `GET  /v1/models`  -  The configured model and model routes
-//! - `POST /v1/messages`  -  Anthropic Messages API
+//! - `POST /v1/responses`  -  OpenAI Responses API (JSON or SSE with `"stream": true`)
+//! - `POST /v1/embeddings`  -  Embeddings, each input cached (see [`EmbeddingsBackend`])
+//!
+//! ### Anthropic-compatible
+//! - `POST /v1/messages`  -  Anthropic Messages API (JSON or SSE), tool use included
+//! - `POST /v1/messages/count_tokens`  -  Input token count of a Messages request
 //!
 //! ### WebSocket
 //! - `WS /api/v1/ws`  -  Real-time streaming inference
@@ -171,15 +176,19 @@ pub struct ServerConfig {
     /// OpenAI-compatible endpoints and listed by `GET /v1/models`.
     #[serde(default = "default_provider")]
     pub model: String,
-    /// Spend cap in USD for the OpenAI-compatible endpoint. Once the estimated
-    /// spend reaches it, `POST /v1/chat/completions` answers 429
-    /// `insufficient_quota`. `None` means no cap.
+    /// Spend cap in USD for the OpenAI- and Anthropic-compatible endpoints.
+    /// Once the estimated spend reaches it, `POST /v1/chat/completions`,
+    /// `/v1/responses`, `/v1/embeddings` and `/v1/messages` answer 429
+    /// (`insufficient_quota`, or `rate_limit_error` for `/v1/messages`).
+    /// `None` means no cap.
     #[serde(default)]
     pub max_spend_usd: Option<f64>,
     /// How long (seconds) a completed answer is reused for an identical
-    /// request on `POST /v1/chat/completions`. Identical requests that arrive
-    /// while one is in flight always share that one upstream call; `0` turns
-    /// off reuse after completion. Default: 300.
+    /// request on `POST /v1/chat/completions` (and `/v1/responses` and
+    /// `/v1/messages`), and how long each `/v1/embeddings` input's vector is
+    /// cached. Identical requests that arrive while one is in flight always
+    /// share that one upstream call; `0` turns off reuse after completion.
+    /// Default: 300.
     #[serde(default = "default_dedup_window_secs")]
     pub dedup_window_secs: u64,
     /// Embedder for semantic dedup on `/v1/chat/completions`: with one set,
@@ -210,6 +219,14 @@ pub struct ServerConfig {
     /// `model_not_found`. Not part of the serialized config.
     #[serde(skip)]
     pub model_routes: Option<Arc<crate::model_routes::ModelRoutes>>,
+    /// Backend for `POST /v1/embeddings`: an OpenAI-compatible embeddings
+    /// server or a local [`Embedder`](crate::embedding::Embedder). A request
+    /// whose `model` matches an `openai` or `llama_cpp` route in
+    /// [`model_routes`](Self::model_routes) goes to that route's server
+    /// instead. `None` (the default) with no matching route answers 404
+    /// `embeddings_not_configured`. Not part of the serialized config.
+    #[serde(skip)]
+    pub embeddings: Option<EmbeddingsBackend>,
 }
 
 #[cfg(feature = "web-api")]
@@ -246,6 +263,7 @@ impl Default for ServerConfig {
             semantic_threshold: default_semantic_threshold(),
             api_key: None,
             model_routes: None,
+            embeddings: None,
         }
     }
 }
@@ -659,6 +677,9 @@ struct AppState {
 #[cfg(feature = "web-api")]
 mod openai_compat;
 
+#[cfg(feature = "web-api")]
+pub use openai_compat::EmbeddingsBackend;
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -865,6 +886,9 @@ pub async fn start_server(
         .route("/v1/chat/completions", post(openai_compat::chat_completions_handler))
         .route("/v1/models", get(openai_compat::models_handler))
         .route("/v1/messages", post(openai_compat::messages_handler))
+        .route("/v1/messages/count_tokens", post(openai_compat::count_tokens_handler))
+        .route("/v1/responses", post(openai_compat::responses_handler))
+        .route("/v1/embeddings", post(openai_compat::embeddings_handler))
         .route("/health", get(health_handler))
         .route("/v1/health", get(health_handler))
         .route("/live", get(live_handler))

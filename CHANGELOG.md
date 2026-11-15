@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-11-15
+
+The proxy speaks more client protocols: Anthropic clients with tool use (Claude SDKs, Claude Code
+via `ANTHROPIC_BASE_URL`), the OpenAI Responses API, and embeddings, all through the same routing,
+dedup, circuit breaker and spend cap.
+
+### Added
+
+- **Tool use on `POST /v1/messages`.** `tools` (`name`, `description`, `input_schema`),
+  `tool_choice` (`auto`, `any`, `tool`, `none`, `disable_parallel_tool_use`), assistant `tool_use`
+  blocks and user `tool_result` blocks (`is_error` included) are translated for whichever upstream
+  the model routes to, so an Anthropic client can drive an OpenAI-compatible model and the other way
+  round. The model's tool calls come back as `tool_use` blocks with `stop_reason: "tool_use"`, and
+  when streaming as `content_block_start` / `input_json_delta` / `content_block_stop` events. A
+  `system` given as text blocks, `thinking` and `redacted_thinking` blocks in the history,
+  `cache_control`, `thinking`, `top_k` and the `?beta=true` query are accepted (the extras are
+  ignored). `usage` now also carries `cache_creation_input_tokens` and `cache_read_input_tokens`
+  (0). Anthropic server tools (`web_search`, `bash`, `text_editor`, ...) get a 400 naming the tool.
+- **`POST /v1/messages/count_tokens`**: `{"input_tokens": n}` for a Messages request (tool
+  definitions included), counted without calling the model. Auth errors use Anthropic's shape.
+- **`POST /v1/responses`**: the OpenAI Responses API, JSON or the `response.*` SSE event sequence
+  (`response.created`, `response.output_item.added`, `response.output_text.delta`,
+  `response.function_call_arguments.delta`, ..., `response.completed` or `response.incomplete`,
+  each with a `sequence_number`). `instructions`, string or item `input` (messages with
+  `input_text` / `output_text` parts, `function_call`, `function_call_output`; `reasoning` items
+  skipped), function `tools`, `tool_choice`, `parallel_tool_calls`, `temperature`, `top_p`,
+  `max_output_tokens` and `text.format` (`text`, `json_object`, `json_schema`) are honoured; tool
+  calls come back as `function_call` output items, a cut-off reply as `status: "incomplete"`. The
+  orchestrator stores nothing: `previous_response_id`, `conversation` and `background` get a 400,
+  `store` is reported as `false`.
+- **`POST /v1/embeddings`** with per-input caching: each input's vector is cached for
+  `dedup_window_secs`, so a batch that repeats recent inputs sends only the new ones upstream, the
+  same input twice in one batch is embedded once, and identical inputs in concurrent requests share
+  one upstream call. `x-orchestrator-dedup` is `miss`, `cached`, `joined` or `partial`, and
+  `x-orchestrator-cached-inputs` counts the inputs that needed no new call. `float` and `base64`
+  encodings (the OpenAI Python SDK's default), string and token-array inputs, `dimensions` and
+  `user` are supported. Calls count against the spend cap at OpenAI's embedding prices, and each
+  backend has its own circuit breaker (5 upstream failures in a row, 4xx excluded, open it for
+  30 s).
+- **`web_api::EmbeddingsBackend`** and **`ServerConfig::embeddings`**: where the vectors come from,
+  either `EmbeddingsBackend::openai_compatible(base_url, key)` (OpenAI, OpenRouter, vLLM, llama.cpp,
+  Ollama, LM Studio) or `EmbeddingsBackend::from_embedder(embedder, model)` (any `Embedder`, such as
+  `FastEmbedder`), with `with_default_model`, `with_billing` and `with_timeout`. A request whose
+  `model` matches an `openai` or `llama_cpp` `[[models]]` route goes to that route's server
+  instead. The `orchestrator` binary sets it from `--provider openai` (`ORCHESTRATOR_UPSTREAM_URL`
+  or api.openai.com), `--provider llama` (`LLAMA_CPP_URL`), or the `--semantic-dedup` model.
+- Integration tests against mock OpenAI, Anthropic and embeddings upstreams for all of the above:
+  `tests/client_protocols_tests.rs`.
+
+### Changed
+
+- `ServerConfig` has a new public field, `embeddings`. Code that builds `ServerConfig` with
+  `..ServerConfig::default()` (as the docs and examples do) is unaffected.
+- The Anthropic endpoint's code moved from `web_api/openai_compat.rs` to its own module; behaviour
+  for text requests is unchanged, apart from the extra `usage` fields above and the `ping` event
+  now coming right after `message_start`.
+
 ## [2.3.0] - 2026-11-15
 
 The deduplication and circuit breaker now work without the pipeline or the proxy: drop them into

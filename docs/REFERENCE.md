@@ -201,6 +201,10 @@ All features are opt-in. The default build has no optional dependencies.
 |---|---|
 | `POST /v1/chat/completions` | Standard request body. Returns a `chat.completion` object with `usage`, or with `"stream": true` Server-Sent Events in `chat.completion.chunk` format ending with `data: [DONE]`. `stream_options.include_usage` adds the final usage chunk. |
 | `GET /v1/models` | The model the orchestrator was started with (when the default route is on), `owned_by` set to the provider, then one entry per `--models` route (globs listed by their pattern, e.g. `gpt-*`). |
+| `POST /v1/responses` | OpenAI Responses API. Returns a `response` object (`message` and `function_call` output items, `usage`), or with `"stream": true` the `response.created` ... `response.completed` event sequence. Stateless: `previous_response_id` and `conversation` are answered 400. |
+| `POST /v1/embeddings` | OpenAI embeddings, `float` or `base64`. Each input is cached for the dedup window and shared while in flight; `x-orchestrator-dedup` is `miss`, `cached`, `joined` or `partial`. 404 `embeddings_not_configured` when there is no embeddings backend. |
+| `POST /v1/messages` | Anthropic Messages API (JSON or SSE), tool use included. Errors in Anthropic's shape. |
+| `POST /v1/messages/count_tokens` | `{"input_tokens": n}` for a Messages request, without calling the model. |
 
 **What happens to a request.** It goes into the same five-stage pipeline as `POST /api/v1/infer`: bounded queues, up to `--concurrency` upstream calls at once (default 16), the circuit breaker (5 failures open it, one probe after 60 s), the upstream timeout (`--timeout`, default 30 s, 60 s for Anthropic, also for an Anthropic `--models` route; a route's `timeout_secs` wins; a call past it counts as a breaker failure), and the dead-letter queue. A dropped request is answered at once with an error that says why, instead of hanging until the client times out.
 

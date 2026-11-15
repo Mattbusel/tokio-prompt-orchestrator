@@ -209,13 +209,19 @@ CONNECTING AGENTS / IDEs:
     (needs a build with the web-api feature; the release binaries have it)
     Any OpenAI client: set its base URL to http://127.0.0.1:8080/v1
       POST /v1/chat/completions   (JSON, or SSE with "stream": true)
+      POST /v1/responses          (Responses API, JSON or SSE)
+      POST /v1/embeddings         (--provider openai or llama, or --semantic-dedup's
+                                   local model; repeated inputs are cached)
       GET  /v1/models
+    Any Anthropic client (Claude SDKs, Claude Code): ANTHROPIC_BASE_URL=http://127.0.0.1:8080
+      POST /v1/messages           (JSON or SSE, tool use included)
+      POST /v1/messages/count_tokens
     POST http://127.0.0.1:8080/api/v1/infer         {{"prompt": "..."}} returns a request_id
     GET  http://127.0.0.1:8080/api/v1/result/<id>   waits for and returns the answer
     WS   ws://127.0.0.1:8080/v1/stream              streaming responses
     GET  http://127.0.0.1:8080/health               pipeline, breaker and queue health
 
-    Claude Desktop and Claude Code use the separate `mcp` binary (stdio):
+    As an MCP tool server for Claude Desktop or Claude Code, use the `mcp` binary (stdio):
       cargo build --release --features mcp --bin mcp
       see examples/mcp_claude_desktop.md
 
@@ -1091,6 +1097,42 @@ fn load_docs(
     Err("This build has no --docs support. Install with: cargo install tokio-prompt-orchestrator --features web-api,tantivy".to_string())
 }
 
+/// The backend for `POST /v1/embeddings`: the OpenAI-compatible upstream
+/// for `--provider openai` (`ORCHESTRATOR_UPSTREAM_URL` or api.openai.com),
+/// the llama.cpp server for `--provider llama`, else the `--semantic-dedup`
+/// model when one is loaded.
+#[cfg(feature = "web-api")]
+fn embeddings_backend(
+    cfg: &ResolvedConfig,
+    embedder: Option<&std::sync::Arc<dyn tokio_prompt_orchestrator::Embedder>>,
+) -> Option<tokio_prompt_orchestrator::web_api::EmbeddingsBackend> {
+    use tokio_prompt_orchestrator::web_api::EmbeddingsBackend;
+    match cfg.provider.as_str() {
+        "openai" => {
+            let base = env::var("ORCHESTRATOR_UPSTREAM_URL")
+                .ok()
+                .map(|u| u.trim().trim_end_matches('/').to_string())
+                .filter(|u| !u.is_empty())
+                .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+            let key = env::var("OPENAI_API_KEY").ok();
+            Some(EmbeddingsBackend::openai_compatible(base, key))
+        }
+        "llama" => {
+            let base = env::var("LLAMA_CPP_URL")
+                .unwrap_or_else(|_| "http://localhost:8080".to_string())
+                .trim_end_matches('/')
+                .to_string();
+            let base = if base.ends_with("/v1") { base } else { format!("{base}/v1") };
+            Some(
+                EmbeddingsBackend::openai_compatible(base, None)
+                    .with_default_model(cfg.model.clone())
+                    .with_billing(false),
+            )
+        }
+        _ => embedder.map(|e| EmbeddingsBackend::from_embedder(std::sync::Arc::clone(e), "bge-small-en-v1.5")),
+    }
+}
+
 /// Load the local embedding model for `--semantic-dedup`.
 #[cfg(feature = "fastembed")]
 #[cfg_attr(not(feature = "web-api"), allow(dead_code))]
@@ -1398,8 +1440,10 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
                 }
                 _ => None,
             };
+            let embeddings = embeddings_backend(&cfg, embedder.as_ref());
             let config = ServerConfig {
                 model_routes,
+                embeddings,
                 host: cfg.host.clone(),
                 port: cfg.port,
                 debug_mode,
