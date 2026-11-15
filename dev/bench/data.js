@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794706104954,
+  "lastUpdate": 1794719904467,
   "repoUrl": "https://github.com/Mattbusel/tokio-prompt-orchestrator",
   "entries": {
     "Pipeline Benchmarks": [
@@ -2518,6 +2518,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "session_id_creation",
             "value": 7,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "committer": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "distinct": true,
+          "id": "1b0d45a068062148216e2ad7b74c2e592eec00b1",
+          "message": "2.3.0: Dedup<K,V>, tower ResilienceLayer, reqwest-middleware ResilienceMiddleware\n\nUse the single-flight dedup and circuit breaker without the pipeline or proxy:\n- Dedup<K, V>: standalone single-flight primitive for any key and value,\n  cancellation and panic safe, with claim/run/run_with_status and stats.\n- integrations::ResilienceLayer (feature tower): dedup by a key function plus\n  a circuit breaker for any tower Service; breaker-only works with non-Clone\n  responses.\n- integrations::ResilienceMiddleware (new feature reqwest-middleware, 0.4 on\n  reqwest 0.12): identical in-flight requests share one upstream call, per-host\n  circuit breaker, streaming and SkipDedup requests bypass dedup.\nExamples, unit and integration tests, CHANGELOG.",
+          "timestamp": "2026-11-15T00:12:23-05:00",
+          "tree_id": "6bf4fc2653be467253db623c99b4e266dc80d9bb",
+          "url": "https://github.com/Mattbusel/tokio-prompt-orchestrator/commit/1b0d45a068062148216e2ad7b74c2e592eec00b1"
+        },
+        "date": 1794719901841,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "full_pipeline_echo_worker",
+            "value": 11221216,
+            "range": "± 116966",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/10",
+            "value": 51209412,
+            "range": "± 111072",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/50",
+            "value": 51230092,
+            "range": "± 147600",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/100",
+            "value": 51222671,
+            "range": "± 139354",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/512",
+            "value": 27875,
+            "range": "± 775",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/1024",
+            "value": 28155,
+            "range": "± 903",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/2048",
+            "value": 28087,
+            "range": "± 835",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "send_with_shed_normal",
+            "value": 155,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "shard_session",
+            "value": 12,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "session_id_creation",
+            "value": 12,
             "range": "± 0",
             "unit": "ns/iter"
           }
