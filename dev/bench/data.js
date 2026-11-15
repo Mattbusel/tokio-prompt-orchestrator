@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794698145452,
+  "lastUpdate": 1794701874091,
   "repoUrl": "https://github.com/Mattbusel/tokio-prompt-orchestrator",
   "entries": {
     "Pipeline Benchmarks": [
@@ -2339,6 +2339,90 @@ window.BENCHMARK_DATA = {
             "name": "send_with_shed_normal",
             "value": 156,
             "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "shard_session",
+            "value": 12,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "session_id_creation",
+            "value": 12,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "committer": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "distinct": true,
+          "id": "b6bcd121507e9bb79223db14232c6e6258ea58d5",
+          "message": "Review fixes for the Nov 14 release\n\nFollow-up to the previous commit: the changes an independent review asked for\n(see CHANGELOG), shipped as a patch release.",
+          "timestamp": "2026-11-14T19:13:49-05:00",
+          "tree_id": "fb07ce3184c1aa08c5d3f00da96738c067082af2",
+          "url": "https://github.com/Mattbusel/tokio-prompt-orchestrator/commit/b6bcd121507e9bb79223db14232c6e6258ea58d5"
+        },
+        "date": 1794701870231,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "full_pipeline_echo_worker",
+            "value": 11238607,
+            "range": "± 116888",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/10",
+            "value": 51232111,
+            "range": "± 111416",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/50",
+            "value": 51230304,
+            "range": "± 155282",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/100",
+            "value": 51360318,
+            "range": "± 104179",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/512",
+            "value": 28441,
+            "range": "± 961",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/1024",
+            "value": 28888,
+            "range": "± 1263",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/2048",
+            "value": 28358,
+            "range": "± 823",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "send_with_shed_normal",
+            "value": 151,
+            "range": "± 0",
             "unit": "ns/iter"
           },
           {
