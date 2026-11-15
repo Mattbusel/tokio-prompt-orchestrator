@@ -884,30 +884,70 @@ fn spawn_inference_pool(
     })
 }
 
+/// One model call: `chat` for a request that carries a chat request (see
+/// [`crate::chat`]), else `infer`. A chat answer is left on the job for the
+/// caller; its text becomes the stage's tokens.
+async fn invoke_worker(
+    worker: &dyn ModelWorker,
+    job: Option<&crate::chat::ChatJob>,
+    prompt: &str,
+) -> Result<Vec<String>, crate::OrchestratorError> {
+    match job {
+        Some(job) => {
+            let response = worker.chat(&job.request).await?;
+            let text = response.text().to_string();
+            job.set_response(response);
+            Ok(if text.is_empty() { Vec::new() } else { vec![text] })
+        }
+        None => worker.infer(prompt).await,
+    }
+}
+
 /// One model call through the breaker, with the timeout inside it so a
 /// timeout counts as a breaker failure. A timeout comes back as
 /// `Failed(OrchestratorError::InferenceTimeout)`.
+///
+/// The inner `Err` is [`OrchestratorError::UpstreamRejected`]: the
+/// provider answered and refused this particular request, so the breaker
+/// records a success (the provider is up) and the request is not retried.
+///
+/// [`OrchestratorError::UpstreamRejected`]: crate::OrchestratorError::UpstreamRejected
 async fn call_worker(
     breaker: &CircuitBreaker,
     worker: Arc<dyn ModelWorker>,
     retry: InferenceRetry,
+    request_id: &str,
     prompt: String,
     timeout: std::time::Duration,
-) -> Result<Vec<String>, crate::enhanced::circuit_breaker::CircuitBreakerError<crate::OrchestratorError>> {
+) -> Result<
+    Result<Vec<String>, crate::OrchestratorError>,
+    crate::enhanced::circuit_breaker::CircuitBreakerError<crate::OrchestratorError>,
+> {
+    let job = crate::chat::job(request_id);
     // Retries (if enabled) happen inside one breaker call, so a request
     // that recovers on a retry counts as one success, not N failures.
     breaker
         .call(|| async move {
-            retry
+            let result = retry
                 .run(|| async {
-                    match tokio::time::timeout(timeout, worker.infer(&prompt)).await {
+                    match tokio::time::timeout(
+                        timeout,
+                        invoke_worker(worker.as_ref(), job.as_deref(), &prompt),
+                    )
+                    .await
+                    {
                         Ok(result) => result,
                         Err(_elapsed) => Err(crate::OrchestratorError::InferenceTimeout {
                             timeout_secs: timeout.as_secs(),
                         }),
                     }
                 })
-                .await
+                .await;
+            match result {
+                Ok(tokens) => Ok(Ok(tokens)),
+                Err(e @ crate::OrchestratorError::UpstreamRejected { .. }) => Ok(Err(e)),
+                Err(e) => Err(e),
+            }
         })
         .await
 }
@@ -1006,11 +1046,44 @@ async fn inference_stage_pool_worker(
             &breaker,
             Arc::clone(&worker),
             retry,
+            &request_id,
             assemble_output.prompt.clone(),
             effective_timeout,
         )
         .instrument(span.clone())
         .await;
+        let cb_result = match cb_result {
+            Ok(Err(rejected)) => {
+                let elapsed = start.elapsed();
+                metrics::record_stage_latency("inference", elapsed);
+                span.record("duration_ms", elapsed.as_millis() as u64);
+                span.record("outcome", "err");
+                span.record("error_kind", "upstream_rejected");
+                metrics::inc_error("inference", "upstream_rejected");
+                warn!(
+                    target: "orchestrator::pipeline",
+                    session_id = %session_id,
+                    request_id = %request_id,
+                    error = %rejected,
+                    "Inference pool worker: provider rejected the request"
+                );
+                let reason = match &rejected {
+                    crate::OrchestratorError::UpstreamRejected { status, message } => {
+                        format!("upstream_rejected:{status}:{message}")
+                    }
+                    other => format!("upstream_rejected:400:{other}"),
+                };
+                dlq.push(DroppedRequest {
+                    request_id: request_id.clone(),
+                    session_id: session_id.clone(),
+                    reason,
+                    dropped_at: std::time::SystemTime::now(),
+                });
+                continue;
+            }
+            Ok(Ok(tokens)) => Ok(tokens),
+            Err(e) => Err(e),
+        };
         if let Err(crate::enhanced::circuit_breaker::CircuitBreakerError::Failed(
             crate::OrchestratorError::InferenceTimeout { .. },
         )) = &cb_result

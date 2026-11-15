@@ -30,6 +30,7 @@
 //! verify a pipeline context is present when calling workers directly, to
 //! catch accidental direct use in integration tests.
 
+use crate::chat::{ChatRequest, ChatResponse, ChatUsage};
 use crate::{metrics, OrchestratorError};
 use async_trait::async_trait;
 use futures::Stream;
@@ -99,6 +100,103 @@ pub trait ModelWorker: Send + Sync {
         let stream = futures::stream::iter(tokens.into_iter().map(Ok));
         Ok(Box::pin(stream))
     }
+
+    /// Answer a structured chat request: the client's messages, model and
+    /// settings (`temperature`, `top_p`, `max_tokens`, `stop`, `seed`,
+    /// `response_format`, `tools`, `tool_choice`, ...).
+    ///
+    /// `OpenAiWorker`, `AnthropicWorker` and `LlamaCppWorker` send all of it
+    /// to the provider and return the provider's text, tool calls, finish
+    /// reason and usage. An empty `request.model` means the worker's own
+    /// model. Settings the request leaves unset fall back to the worker's
+    /// configured defaults (and are left out when there is none).
+    ///
+    /// The default implementation, used by workers that do not override it,
+    /// flattens the messages with [`ChatRequest::transcript`] and calls
+    /// [`infer`](Self::infer); the settings are ignored there.
+    ///
+    /// The pipeline calls this instead of `infer` for requests that carry a
+    /// chat request (every `POST /v1/chat/completions` call), inside the same
+    /// circuit breaker, timeout and retries.
+    ///
+    /// [`ChatRequest::transcript`]: crate::ChatRequest::transcript
+    async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, OrchestratorError> {
+        let tokens = self.infer(&request.transcript()).await?;
+        Ok(ChatResponse::from_text(tokens.join(" ")))
+    }
+}
+
+// ============================================================================
+// Chat helpers shared by the HTTP workers
+// ============================================================================
+
+/// Longest provider error message carried into an error value.
+const MAX_ERROR_MESSAGE: usize = 2000;
+
+/// Turn a non-success provider response into the right error: 429 is
+/// rate limiting, 401/403 an auth failure, other client errors (except 408
+/// and 409, which are transient) an [`OrchestratorError::UpstreamRejected`]
+/// carrying the provider's own message, and everything else a retryable
+/// [`OrchestratorError::Inference`].
+async fn chat_http_error(response: reqwest::Response, provider: &str) -> OrchestratorError {
+    let status = response.status();
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let retry_after = parse_retry_after(response.headers()).unwrap_or(Duration::from_secs(60));
+        return OrchestratorError::RateLimited {
+            retry_after_secs: retry_after.as_secs(),
+        };
+    }
+    let body = response.text().await.unwrap_or_default();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return OrchestratorError::AuthFailed(format!("HTTP {status}"));
+    }
+    let message = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| {
+            v.get("error")
+                .and_then(|e| e.get("message").or(Some(e)))
+                .and_then(|m| m.as_str().map(str::to_string))
+        })
+        .unwrap_or(body);
+    let message: String = message.chars().take(MAX_ERROR_MESSAGE).collect();
+    let transient = matches!(status.as_u16(), 408 | 409);
+    if status.is_client_error() && !transient {
+        OrchestratorError::UpstreamRejected {
+            status: status.as_u16(),
+            message,
+        }
+    } else {
+        OrchestratorError::Inference(format!("{provider} API error {status}: {message}"))
+    }
+}
+
+/// POST an OpenAI Chat Completions body and parse the first choice.
+async fn post_openai_chat(
+    client: &reqwest::Client,
+    url: &str,
+    bearer: Option<&str>,
+    timeout: Duration,
+    body: &serde_json::Value,
+    provider: &str,
+) -> Result<ChatResponse, OrchestratorError> {
+    let mut req = client.post(url).timeout(timeout).json(body);
+    if let Some(key) = bearer.filter(|k| !k.is_empty()) {
+        req = req.header("Authorization", format!("Bearer {key}"));
+    }
+    let response = req
+        .send()
+        .await
+        .map_err(|e| OrchestratorError::Inference(format!("{provider} request failed: {e}")))?;
+    warn_if_low_remaining(response.headers(), provider);
+    if !response.status().is_success() {
+        return Err(chat_http_error(response, provider).await);
+    }
+    let value: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| OrchestratorError::Inference(format!("Failed to parse {provider} response: {e}")))?;
+    ChatResponse::from_openai(&value)
+        .map_err(|e| OrchestratorError::Inference(format!("{provider} response: {e}")))
 }
 
 /// Stream tokens from any [`ModelWorker`].
@@ -286,6 +384,9 @@ pub struct OpenAiWorker {
     model: String,
     max_tokens: Option<u32>,
     temperature: f32,
+    /// `true` once `with_temperature` was called; only then does
+    /// [`ModelWorker::chat`] send a temperature the client left unset.
+    temperature_set: bool,
     timeout: Duration,
     /// API base URL — override for OpenAI-compatible endpoints or testing.
     base_url: String,
@@ -362,6 +463,7 @@ impl OpenAiWorker {
             model: model.into(),
             max_tokens: None,
             temperature: 0.7,
+            temperature_set: false,
             timeout: Duration::from_secs(30),
             base_url: "https://api.openai.com/v1".to_string(),
         }
@@ -396,6 +498,7 @@ impl OpenAiWorker {
         } else {
             self.temperature = temperature;
         }
+        self.temperature_set = true;
         self
     }
 
@@ -499,6 +602,30 @@ impl ModelWorker for OpenAiWorker {
             model = %self.model,
             latency_ms = %_infer_start.elapsed().as_millis(),
             "inference completed"
+        );
+        result
+    }
+
+    /// Sends the request to `{base_url}/chat/completions` as the client
+    /// wrote it: messages (with tool calls and tool results), `model` (the
+    /// worker's own when empty), `temperature`, `top_p`, `max_tokens`,
+    /// `max_completion_tokens`, `stop`, `seed`, `response_format`, `tools`,
+    /// `tool_choice` and `parallel_tool_calls`. A temperature or reply cap
+    /// set on the worker applies only when the client sent none.
+    async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, OrchestratorError> {
+        let start = Instant::now();
+        let temperature = self.temperature_set.then_some(f64::from(self.temperature));
+        let body = request.to_openai_body(&self.model, temperature, self.max_tokens);
+        let url = format!("{}/chat/completions", self.base_url);
+        let result =
+            post_openai_chat(&self.client, &url, Some(&self.api_key), self.timeout, &body, "openai")
+                .await;
+        tracing::debug!(
+            worker = "openai",
+            model = %body["model"].as_str().unwrap_or(""),
+            latency_ms = %start.elapsed().as_millis(),
+            ok = result.is_ok(),
+            "chat completed"
         );
         result
     }
@@ -647,6 +774,9 @@ pub struct AnthropicWorker {
     model: String,
     max_tokens: u32,
     temperature: f32,
+    /// `true` once `with_temperature` was called; only then does
+    /// [`ModelWorker::chat`] send a temperature the client left unset.
+    temperature_set: bool,
     timeout: Duration,
     /// API base URL — override for Anthropic-compatible endpoints or testing.
     base_url: String,
@@ -722,6 +852,7 @@ impl AnthropicWorker {
             model: model.into(),
             max_tokens: 1024,
             temperature: 1.0,
+            temperature_set: false,
             timeout: Duration::from_secs(60),
             base_url: "https://api.anthropic.com/v1".to_string(),
         }
@@ -755,6 +886,7 @@ impl AnthropicWorker {
         } else {
             self.temperature = temperature;
         }
+        self.temperature_set = true;
         self
     }
 
@@ -864,6 +996,52 @@ impl ModelWorker for AnthropicWorker {
             "inference completed"
         );
         result
+    }
+
+    /// Translates the OpenAI-style request to the Messages API and back:
+    /// system and developer messages become `system`; assistant
+    /// `tool_calls` become `tool_use` blocks and `tool` messages
+    /// `tool_result` blocks; `tools`, `tool_choice` (`auto`, `none`,
+    /// `required` -> `any`, a named function -> `tool`),
+    /// `parallel_tool_calls: false`, `temperature`, `top_p` and `stop`
+    /// (`stop_sequences`) are sent. `max_tokens` /
+    /// `max_completion_tokens` set the reply cap; without either the
+    /// worker's own `max_tokens` is sent, because the Messages API requires
+    /// one. The Messages API has no `seed` or `response_format`; `seed` is
+    /// not sent (the OpenAI-compatible endpoint answers 400 for a
+    /// `response_format` other than `text` on an Anthropic route).
+    ///
+    /// The reply's `tool_use` blocks come back as OpenAI `tool_calls`, and
+    /// `stop_reason` as `finish_reason` (`end_turn` -> `stop`, `max_tokens`
+    /// -> `length`, `tool_use` -> `tool_calls`).
+    async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, OrchestratorError> {
+        let start = Instant::now();
+        let body = anthropic_chat_body(request, self);
+        let response = self
+            .client
+            .post(format!("{}/messages", self.base_url))
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .timeout(self.timeout)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| OrchestratorError::Inference(format!("Anthropic request failed: {e}")))?;
+        warn_if_low_remaining(response.headers(), "anthropic");
+        if !response.status().is_success() {
+            return Err(chat_http_error(response, "anthropic").await);
+        }
+        let value: serde_json::Value = response.json().await.map_err(|e| {
+            OrchestratorError::Inference(format!("Failed to parse anthropic response: {e}"))
+        })?;
+        let result = anthropic_chat_response(&value);
+        tracing::debug!(
+            worker = "anthropic",
+            model = %body["model"].as_str().unwrap_or(""),
+            latency_ms = %start.elapsed().as_millis(),
+            "chat completed"
+        );
+        Ok(result)
     }
 
     async fn infer_stream(&self, prompt: &str) -> Result<TokenStream, OrchestratorError> {
@@ -976,6 +1154,204 @@ impl ModelWorker for AnthropicWorker {
     }
 }
 
+/// Content blocks for one OpenAI message's `content` (text parts only).
+fn anthropic_text_blocks(content: Option<&serde_json::Value>) -> Vec<serde_json::Value> {
+    use serde_json::{json, Value};
+    match content {
+        Some(Value::String(s)) if !s.is_empty() => vec![json!({"type": "text", "text": s})],
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .filter(|p| p.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|p| p.get("text").and_then(Value::as_str))
+            .filter(|t| !t.is_empty())
+            .map(|t| json!({"type": "text", "text": t}))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The Messages API body for an OpenAI-style chat request.
+fn anthropic_chat_body(request: &ChatRequest, worker: &AnthropicWorker) -> serde_json::Value {
+    use serde_json::{json, Value};
+
+    let mut system: Vec<String> = Vec::new();
+    let mut messages: Vec<Value> = Vec::new();
+    for m in &request.messages {
+        let role = m.get("role").and_then(Value::as_str).unwrap_or("user");
+        match role {
+            "system" | "developer" => {
+                let text = crate::chat::message_text(m);
+                if !text.is_empty() {
+                    system.push(text);
+                }
+            }
+            "assistant" => {
+                let mut blocks = anthropic_text_blocks(m.get("content"));
+                for call in m.get("tool_calls").and_then(Value::as_array).into_iter().flatten() {
+                    let function = call.get("function").cloned().unwrap_or(Value::Null);
+                    let input = function
+                        .get("arguments")
+                        .and_then(Value::as_str)
+                        .and_then(|a| serde_json::from_str::<Value>(a).ok())
+                        .filter(Value::is_object)
+                        .unwrap_or_else(|| json!({}));
+                    blocks.push(json!({
+                        "type": "tool_use",
+                        "id": call.get("id").cloned().unwrap_or(Value::Null),
+                        "name": function.get("name").cloned().unwrap_or(Value::Null),
+                        "input": input,
+                    }));
+                }
+                if !blocks.is_empty() {
+                    messages.push(json!({"role": "assistant", "content": blocks}));
+                }
+            }
+            "tool" | "function" => {
+                let block = json!({
+                    "type": "tool_result",
+                    "tool_use_id": m.get("tool_call_id").cloned().unwrap_or(Value::Null),
+                    "content": crate::chat::message_text(m),
+                });
+                // Results of one assistant turn go back in one user message.
+                let merged = match messages.last_mut() {
+                    Some(last) if last["role"] == "user" => match last.get_mut("content") {
+                        Some(Value::Array(blocks))
+                            if blocks.iter().all(|b| b["type"] == "tool_result") =>
+                        {
+                            blocks.push(block.clone());
+                            true
+                        }
+                        _ => false,
+                    },
+                    _ => false,
+                };
+                if !merged {
+                    messages.push(json!({"role": "user", "content": [block]}));
+                }
+            }
+            _ => {
+                let blocks = anthropic_text_blocks(m.get("content"));
+                if !blocks.is_empty() {
+                    messages.push(json!({"role": "user", "content": blocks}));
+                }
+            }
+        }
+    }
+
+    let model = if request.model.is_empty() {
+        worker.model.clone()
+    } else {
+        request.model.clone()
+    };
+    let mut body = json!({
+        "model": model,
+        "max_tokens": request.reply_limit().unwrap_or(worker.max_tokens),
+        "messages": messages,
+    });
+    if !system.is_empty() {
+        body["system"] = json!(system.join("\n\n"));
+    }
+    match request.temperature {
+        Some(t) => body["temperature"] = json!(t),
+        None if worker.temperature_set => body["temperature"] = json!(worker.temperature),
+        None => {}
+    }
+    if let Some(p) = request.top_p {
+        body["top_p"] = json!(p);
+    }
+    let stop = request.stop_sequences();
+    if !stop.is_empty() {
+        body["stop_sequences"] = json!(stop);
+    }
+    // Without tools, tool_choice and parallel_tool_calls are not sent: the
+    // Messages API has nothing for them to apply to.
+    let tools = request.tools.as_deref().filter(|t| !t.is_empty());
+    if let Some(tools) = tools {
+        let converted: Vec<Value> = tools
+            .iter()
+            .map(|t| {
+                let f = t.get("function").unwrap_or(t);
+                let mut tool = json!({
+                    "name": f.get("name").cloned().unwrap_or(Value::Null),
+                    "input_schema": f
+                        .get("parameters")
+                        .cloned()
+                        .unwrap_or_else(|| json!({"type": "object", "properties": {}})),
+                });
+                if let Some(d) = f.get("description") {
+                    tool["description"] = d.clone();
+                }
+                tool
+            })
+            .collect();
+        body["tools"] = json!(converted);
+    }
+    let tool_choice = request.tool_choice.as_ref().filter(|_| tools.is_some());
+    let mut choice = match tool_choice {
+        Some(Value::String(s)) => match s.as_str() {
+            "none" => Some(json!({"type": "none"})),
+            "required" => Some(json!({"type": "any"})),
+            _ => Some(json!({"type": "auto"})),
+        },
+        Some(v @ Value::Object(_)) => v
+            .get("function")
+            .and_then(|f| f.get("name"))
+            .map(|name| json!({"type": "tool", "name": name})),
+        _ => None,
+    };
+    if request.parallel_tool_calls == Some(false) && tools.is_some() {
+        let c = choice.get_or_insert_with(|| json!({"type": "auto"}));
+        if c["type"] != "none" {
+            c["disable_parallel_tool_use"] = json!(true);
+        }
+    }
+    if let Some(c) = choice {
+        body["tool_choice"] = c;
+    }
+    body
+}
+
+/// An OpenAI-style answer from a Messages API response.
+fn anthropic_chat_response(value: &serde_json::Value) -> ChatResponse {
+    use serde_json::{json, Value};
+    let mut text = String::new();
+    let mut tool_calls = Vec::new();
+    for block in value.get("content").and_then(Value::as_array).into_iter().flatten() {
+        match block.get("type").and_then(Value::as_str) {
+            Some("text") => text.push_str(block.get("text").and_then(Value::as_str).unwrap_or("")),
+            Some("tool_use") => tool_calls.push(json!({
+                "id": block.get("id").cloned().unwrap_or(Value::Null),
+                "type": "function",
+                "function": {
+                    "name": block.get("name").cloned().unwrap_or(Value::Null),
+                    "arguments": block.get("input").map(Value::to_string).unwrap_or_else(|| "{}".into()),
+                },
+            })),
+            _ => {}
+        }
+    }
+    let finish_reason = match value.get("stop_reason").and_then(Value::as_str) {
+        Some("max_tokens") => "length",
+        Some("tool_use") => "tool_calls",
+        Some("refusal") => "content_filter",
+        _ => "stop",
+    };
+    let usage = value.get("usage").and_then(|u| {
+        Some(ChatUsage {
+            prompt_tokens: u.get("input_tokens")?.as_u64()?,
+            completion_tokens: u.get("output_tokens")?.as_u64()?,
+        })
+    });
+    let mut response = ChatResponse::from_text(text);
+    if response.text().is_empty() && !tool_calls.is_empty() {
+        response.content = None;
+    }
+    response.tool_calls = tool_calls;
+    response.finish_reason = Some(finish_reason.to_string());
+    response.usage = usage;
+    response
+}
+
 // ============================================================================
 // llama.cpp Worker
 // ============================================================================
@@ -1020,6 +1396,9 @@ pub struct LlamaCppWorker {
     url: String,
     max_tokens: Option<i32>,
     temperature: f32,
+    /// `true` once `with_temperature` was called; only then does
+    /// [`ModelWorker::chat`] send a temperature the client left unset.
+    temperature_set: bool,
     timeout: Duration,
 }
 
@@ -1064,6 +1443,7 @@ impl LlamaCppWorker {
             url,
             max_tokens: None,
             temperature: 0.8,
+            temperature_set: false,
             timeout: Duration::from_secs(30),
         }
     }
@@ -1103,6 +1483,7 @@ impl LlamaCppWorker {
         } else {
             self.temperature = temperature;
         }
+        self.temperature_set = true;
         self
     }
 
@@ -1174,6 +1555,18 @@ impl ModelWorker for LlamaCppWorker {
             "inference completed"
         );
         result
+    }
+
+    /// Sends the request to llama.cpp's OpenAI-compatible
+    /// `{url}/v1/chat/completions` with every setting the client sent
+    /// (tools need a server started with `--jinja`). The worker's
+    /// `max_tokens` and temperature apply only when the client sent none.
+    async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, OrchestratorError> {
+        let temperature = self.temperature_set.then_some(f64::from(self.temperature));
+        let max_tokens = self.max_tokens.and_then(|n| u32::try_from(n).ok());
+        let body = request.to_openai_body("local", temperature, max_tokens);
+        let url = format!("{}/v1/chat/completions", self.url.trim_end_matches('/'));
+        post_openai_chat(&self.client, &url, None, self.timeout, &body, "llama.cpp").await
     }
 }
 
@@ -1527,6 +1920,13 @@ impl ModelWorker for LoadBalancedWorker {
             self.in_flight[idx].load(std::sync::atomic::Ordering::Relaxed) as i64,
         );
         self.workers[idx].infer(prompt).await
+    }
+
+    async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, OrchestratorError> {
+        let idx = self.pick();
+        self.in_flight[idx].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _guard = InFlightGuard(&self.in_flight[idx]);
+        self.workers[idx].chat(request).await
     }
 
     async fn infer_stream(&self, prompt: &str) -> Result<TokenStream, OrchestratorError> {
@@ -2197,6 +2597,159 @@ mod tests {
             body.get("n_predict").is_none(),
             "no n_predict unless set, so replies are not truncated: {body}"
         );
+    }
+
+    // ── chat(): structured requests ──────────────────────────────────────────
+
+    fn chat_req(model: &str) -> ChatRequest {
+        ChatRequest::new(model, vec![serde_json::json!({"role": "user", "content": "hi"})])
+    }
+
+    #[tokio::test]
+    async fn test_openai_chat_uses_worker_defaults_only_when_set_and_unasked() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(openai_success_body()))
+            .mount(&server)
+            .await;
+        let plain = OpenAiWorker::with_key("gpt-4o", "k").with_base_url(server.uri());
+        let r = plain.chat(&chat_req("")).await.unwrap();
+        assert_eq!(r.text(), "hello world response");
+        let tuned = OpenAiWorker::with_key("gpt-4o", "k")
+            .with_base_url(server.uri())
+            .with_temperature(0.4)
+            .with_max_tokens(99);
+        tuned.chat(&chat_req("")).await.unwrap();
+        let mut asked = chat_req("gpt-4o-mini");
+        asked.temperature = Some(1.2);
+        asked.max_completion_tokens = Some(5);
+        tuned.chat(&asked).await.unwrap();
+
+        let bodies: Vec<serde_json::Value> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| serde_json::from_slice(&r.body).unwrap())
+            .collect();
+        assert_eq!(bodies[0]["model"], "gpt-4o");
+        assert!(bodies[0].get("temperature").is_none() && bodies[0].get("max_tokens").is_none(), "{}", bodies[0]);
+        assert_eq!(bodies[1]["max_tokens"], 99);
+        assert!((bodies[1]["temperature"].as_f64().unwrap() - 0.4).abs() < 1e-6);
+        assert_eq!(bodies[2]["model"], "gpt-4o-mini");
+        assert_eq!(bodies[2]["temperature"], 1.2);
+        assert_eq!(bodies[2]["max_completion_tokens"], 5);
+        assert!(bodies[2].get("max_tokens").is_none(), "{}", bodies[2]);
+    }
+
+    #[tokio::test]
+    async fn test_chat_4xx_is_upstream_rejected_and_5xx_is_retryable() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(
+                serde_json::json!({"error": {"message": "The model `nope` does not exist"}}),
+            ))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("overloaded"))
+            .mount(&server)
+            .await;
+        let w = OpenAiWorker::with_key("m", "k").with_base_url(server.uri());
+        match w.chat(&chat_req("nope")).await {
+            Err(OrchestratorError::UpstreamRejected { status, message }) => {
+                assert_eq!(status, 404);
+                assert_eq!(message, "The model `nope` does not exist");
+            }
+            other => panic!("expected UpstreamRejected, got {other:?}"),
+        }
+        let e = w.chat(&chat_req("m")).await.unwrap_err();
+        assert!(matches!(e, OrchestratorError::Inference(_)) && e.is_retryable(), "{e:?}");
+    }
+
+    #[tokio::test]
+    async fn test_llamacpp_chat_uses_the_openai_compatible_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(openai_success_body()))
+            .mount(&server)
+            .await;
+        let w = LlamaCppWorker::new().with_url(server.uri());
+        let mut req = chat_req("llama-3");
+        req.seed = Some(3);
+        req.stop = Some(serde_json::json!("END"));
+        assert_eq!(w.chat(&req).await.unwrap().text(), "hello world response");
+        let reqs = server.received_requests().await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(body["model"], "llama-3");
+        assert_eq!(body["seed"], 3);
+        assert_eq!(body["stop"], "END");
+        assert!(body.get("n_predict").is_none() && body.get("max_tokens").is_none(), "{body}");
+    }
+
+    #[tokio::test]
+    async fn test_default_chat_flattens_and_calls_infer() {
+        let w = EchoWorker::new();
+        let req = ChatRequest::new(
+            "",
+            vec![
+                serde_json::json!({"role": "system", "content": "S"}),
+                serde_json::json!({"role": "user", "content": "U"}),
+            ],
+        );
+        let r = w.chat(&req).await.unwrap();
+        assert_eq!(r.text(), "System: S User: U");
+        assert_eq!(r.finish_reason.as_deref(), Some("stop"));
+    }
+
+    #[test]
+    fn test_anthropic_body_merges_tool_results_and_maps_tool_choice() {
+        let w = AnthropicWorker::with_key("claude-x", "k");
+        let mut req = ChatRequest::new(
+            "",
+            vec![
+                serde_json::json!({"role": "developer", "content": "Rules."}),
+                serde_json::json!({"role": "user", "content": "q"}),
+                serde_json::json!({"role": "assistant", "tool_calls": [
+                    {"id": "a", "type": "function", "function": {"name": "f", "arguments": "{\"x\":1}"}},
+                    {"id": "b", "type": "function", "function": {"name": "g", "arguments": "not json"}}
+                ]}),
+                serde_json::json!({"role": "tool", "tool_call_id": "a", "content": "1"}),
+                serde_json::json!({"role": "tool", "tool_call_id": "b", "content": "2"}),
+            ],
+        );
+        req.tool_choice = Some(serde_json::json!({"type": "function", "function": {"name": "f"}}));
+        req.tools = Some(vec![serde_json::json!({"type": "function", "function": {"name": "f"}})]);
+        let body = anthropic_chat_body(&req, &w);
+        assert_eq!(body["model"], "claude-x");
+        assert_eq!(body["max_tokens"], 1024, "the worker's cap when the client sends none");
+        assert_eq!(body["system"], "Rules.");
+        assert!(body.get("temperature").is_none(), "{body}");
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3, "both tool results share one user turn: {body}");
+        assert_eq!(msgs[1]["content"][1]["input"], serde_json::json!({}), "bad arguments become {{}}");
+        assert_eq!(msgs[2]["content"].as_array().unwrap().len(), 2);
+        assert_eq!(body["tool_choice"], serde_json::json!({"type": "tool", "name": "f"}));
+        assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
+    }
+
+    #[test]
+    fn test_anthropic_body_sends_no_tool_choice_without_tools() {
+        let w = AnthropicWorker::with_key("claude-x", "k");
+        let mut req = ChatRequest::new("", vec![serde_json::json!({"role": "user", "content": "q"})]);
+        req.tool_choice = Some(serde_json::json!("auto"));
+        req.parallel_tool_calls = Some(false);
+        for tools in [None, Some(Vec::new())] {
+            req.tools = tools;
+            let body = anthropic_chat_body(&req, &w);
+            assert!(body.get("tools").is_none(), "{body}");
+            assert!(body.get("tool_choice").is_none(), "{body}");
+        }
     }
 
     #[tokio::test]

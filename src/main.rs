@@ -12,6 +12,7 @@
 //! --port     <N>                   (default: 8080)
 //! --host     <addr>                (default: 127.0.0.1)
 //! --log-level <trace|debug|info|warn|error>
+//! --models   <file>                [[models]] routing table (TOML) for /v1/chat/completions
 //! --no-web                         disable HTTP/WS API
 //! --reset                          re-run setup wizard (change key / provider)
 //! --help / -h
@@ -134,6 +135,8 @@ struct CliArgs {
     concurrency: usize,
     /// Per-call upstream timeout in seconds (`--timeout`); `None` = provider default.
     timeout: Option<u64>,
+    /// `[[models]]` routing table from `--models <file>`.
+    models: Option<tokio_prompt_orchestrator::ModelRoutesConfig>,
     no_web: bool,
     reset: bool,
 }
@@ -182,6 +185,12 @@ OPTIONS:
     --timeout <seconds>                        Give up on one upstream call after this long and
                                                count it as a failure for the circuit breaker
                                                (default: 30; 60 for anthropic; max 3600)
+    --models <file>                            Route OpenAI-endpoint requests by their "model":
+                                               a TOML file (or a pipeline TOML) with [[models]]
+                                               entries mapping names or globs (gpt-*, claude-*,
+                                               llama-*) to providers. Unmatched models go to
+                                               --provider/--model unless the file sets
+                                               default_route = false (then they get a 400)
     --semantic-dedup [0.5-1.0]                 Also reuse answers to differently worded
                                                questions that mean the same thing (OpenAI
                                                endpoint; local embedding model, downloaded
@@ -252,6 +261,7 @@ fn parse_args() -> Result<CliArgs, String> {
     let mut semantic_dedup: Option<f32> = None;
     let mut concurrency: usize = DEFAULT_CONCURRENCY;
     let mut timeout: Option<u64> = None;
+    let mut models: Option<tokio_prompt_orchestrator::ModelRoutesConfig> = None;
     let mut no_web = false;
     let mut reset = false;
 
@@ -283,7 +293,8 @@ fn parse_args() -> Result<CliArgs, String> {
             }
             "--reset" => reset = true,
             flag @ ("--provider" | "--model" | "--port" | "--host" | "--log-level"
-            | "--max-spend" | "--retries" | "--docs" | "--concurrency" | "--timeout") => {
+            | "--max-spend" | "--retries" | "--docs" | "--concurrency" | "--timeout"
+            | "--models") => {
                 i += 1;
                 if i >= args.len() {
                     return Err(format!("{flag} requires a value"));
@@ -317,6 +328,13 @@ fn parse_args() -> Result<CliArgs, String> {
                     "--retries" => retries = Some(parse_retries(&val)?),
                     "--concurrency" => concurrency = parse_concurrency(&val)?,
                     "--timeout" => timeout = Some(parse_timeout(&val)?),
+                    "--models" => {
+                        let table = tokio_prompt_orchestrator::ModelRoutesConfig::from_file(
+                            std::path::Path::new(&val),
+                        )
+                        .map_err(|e| format!("--models: {e}"))?;
+                        models = Some(table);
+                    }
                     "--docs" => {
                         let path = std::path::PathBuf::from(&val);
                         if !path.is_dir() {
@@ -352,6 +370,7 @@ fn parse_args() -> Result<CliArgs, String> {
         semantic_dedup,
         concurrency,
         timeout,
+        models,
         no_web,
         reset,
     })
@@ -416,6 +435,9 @@ struct ResolvedConfig {
     concurrency: usize,
     /// Per-call upstream timeout in seconds; `None` = provider default.
     timeout: Option<u64>,
+    /// `[[models]]` routing table (`--models`). Read only by the web server.
+    #[cfg_attr(not(feature = "web-api"), allow(dead_code))]
+    models: Option<tokio_prompt_orchestrator::ModelRoutesConfig>,
     no_web: bool,
 }
 
@@ -526,6 +548,7 @@ fn run_wizard(args: CliArgs) -> ResolvedConfig {
                     semantic_dedup: args.semantic_dedup,
                     concurrency: args.concurrency,
                     timeout: args.timeout,
+                    models: args.models.clone(),
                     no_web: args.no_web,
                 };
             }
@@ -696,6 +719,7 @@ fn run_wizard(args: CliArgs) -> ResolvedConfig {
         semantic_dedup: args.semantic_dedup,
         concurrency: args.concurrency,
         timeout: args.timeout,
+        models: args.models.clone(),
         no_web,
     }
 }
@@ -816,8 +840,16 @@ fn build_worker(cfg: &ResolvedConfig) -> Result<Arc<dyn ModelWorker>, String> {
                     "https://console.anthropic.com/settings/keys",
                 ));
             }
+            // The Messages API requires a reply cap; use the same 4096 as an
+            // Anthropic model route instead of the worker's 1024.
             AnthropicWorker::new(cfg.model.clone())
-                .map(|w| Arc::new(w.with_timeout(http_timeout)) as Arc<dyn ModelWorker>)
+                .map(|w| {
+                    Arc::new(
+                        w.with_timeout(http_timeout).with_max_tokens(
+                            tokio_prompt_orchestrator::model_routes::ANTHROPIC_DEFAULT_MAX_TOKENS,
+                        ),
+                    ) as Arc<dyn ModelWorker>
+                })
                 .map_err(|e| {
                     format!(
                         "Could not connect to Anthropic: {e}\n\n\
@@ -1139,6 +1171,15 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
     options.retry = retry;
     options.concurrency = cfg.concurrency;
     options.inference_timeout = upstream_timeout(&cfg);
+    // Model routes get the same retries, concurrency and timeout, but no
+    // document retrieval: chat requests are sent as the client wrote them.
+    // A route's own timeout_secs wins, then --timeout; without either, each
+    // route uses its provider's default (60 s for Anthropic, 30 s otherwise).
+    #[cfg_attr(not(feature = "web-api"), allow(unused_variables))]
+    let route_options = options.clone();
+    if cfg.models.is_some() && cfg.no_web {
+        eprintln!("Warning: --models only routes the web API's OpenAI endpoint; with --no-web it is ignored.");
+    }
     if let Some(dir) = &cfg.docs {
         match load_docs(dir) {
             Ok(retriever) => options.retriever = Some(retriever),
@@ -1335,7 +1376,30 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
                 },
                 None => None,
             };
+            let route_table = model_route_table(&cfg);
+            let model_routes = match &route_table {
+                Some(table) if !table.models.is_empty() || !table.default_route => {
+                    match tokio_prompt_orchestrator::ModelRoutes::spawn(table, &route_options) {
+                        Ok(routes) => {
+                            tracing::info!(
+                                routes = routes.len(),
+                                default_route = routes.has_default_route(),
+                                "Model routes ready"
+                            );
+                            Some(Arc::new(routes))
+                        }
+                        Err(e) => {
+                            eprintln!("
+  ✗ --models: {e}
+");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                _ => None,
+            };
             let config = ServerConfig {
+                model_routes,
                 host: cfg.host.clone(),
                 port: cfg.port,
                 debug_mode,
@@ -1345,8 +1409,13 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
                 model: cfg.model.clone(),
                 max_spend_usd: cfg.max_spend,
                 dedup_window_secs,
-                timeout_seconds: http_wait_secs(upstream_timeout(&cfg).as_secs(), cfg.retries)
-                    .max(defaults.timeout_seconds),
+                // Long enough for the slowest route (or the default
+                // pipeline) to use every attempt.
+                timeout_seconds: http_wait_secs(
+                    longest_route_timeout(&cfg, route_table.as_ref()).as_secs(),
+                    cfg.retries,
+                )
+                .max(defaults.timeout_seconds),
                 ..defaults
             };
             tracing::info!(addr = %format!("{}:{}", cfg.host, cfg.port), "Starting web API");
@@ -1388,6 +1457,31 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
 
     drop(handles.input_tx);
     Ok(())
+}
+
+/// The `--models` table with `--timeout` applied to every route that sets no
+/// `timeout_secs` of its own, so the flag covers model routes too (without
+/// the flag, a route uses its provider's default).
+#[cfg_attr(not(feature = "web-api"), allow(dead_code))]
+fn model_route_table(cfg: &ResolvedConfig) -> Option<tokio_prompt_orchestrator::ModelRoutesConfig> {
+    let mut table = cfg.models.clone()?;
+    if let Some(secs) = cfg.timeout {
+        for route in &mut table.models {
+            route.timeout_secs.get_or_insert(secs);
+        }
+    }
+    Some(table)
+}
+
+/// The slowest per-call timeout across the default pipeline and every model
+/// route.
+#[cfg_attr(not(feature = "web-api"), allow(dead_code))]
+fn longest_route_timeout(
+    cfg: &ResolvedConfig,
+    table: Option<&tokio_prompt_orchestrator::ModelRoutesConfig>,
+) -> std::time::Duration {
+    let default = upstream_timeout(cfg);
+    table.map_or(default, |t| t.longest_timeout(default))
 }
 
 /// Longest an HTTP request can need from the pipeline: every attempt timing
@@ -1472,6 +1566,7 @@ mod tests {
             semantic_dedup: None,
             concurrency: DEFAULT_CONCURRENCY,
             timeout: None,
+            models: None,
             no_web: false,
         };
         assert!(build_worker(&cfg).is_ok());
@@ -1497,6 +1592,7 @@ mod tests {
             semantic_dedup: None,
             concurrency: DEFAULT_CONCURRENCY,
             timeout: None,
+            models: None,
             no_web: false,
         };
         let err = build_worker(&cfg).err().unwrap();
@@ -1521,6 +1617,7 @@ mod tests {
             semantic_dedup: None,
             concurrency: DEFAULT_CONCURRENCY,
             timeout: None,
+            models: None,
             no_web: false,
         };
         let err = build_worker(&cfg).err().unwrap();
@@ -1542,6 +1639,7 @@ mod tests {
             semantic_dedup: None,
             concurrency: DEFAULT_CONCURRENCY,
             timeout: None,
+            models: None,
             no_web: false,
         };
         let err = build_worker(&cfg).err().unwrap();
@@ -1563,6 +1661,7 @@ mod tests {
             semantic_dedup: None,
             concurrency: DEFAULT_CONCURRENCY,
             timeout: None,
+            models: None,
             no_web: false,
         };
         assert!(build_worker(&cfg).is_ok());
@@ -1622,6 +1721,7 @@ mod tests {
             semantic_dedup: None,
             concurrency: DEFAULT_CONCURRENCY,
             timeout,
+            models: None,
             no_web: false,
         }
     }
@@ -1634,6 +1734,55 @@ mod tests {
         assert_eq!(upstream_timeout(&cfg_for("anthropic", None)), Duration::from_secs(60));
         assert_eq!(upstream_timeout(&cfg_for("llama", Some(5))), Duration::from_secs(5));
         assert_eq!(upstream_timeout(&cfg_for("anthropic", Some(5))), Duration::from_secs(5));
+    }
+
+    fn routes(toml: &str) -> tokio_prompt_orchestrator::ModelRoutesConfig {
+        tokio_prompt_orchestrator::ModelRoutesConfig::from_toml_str(toml).unwrap()
+    }
+
+    #[test]
+    fn test_anthropic_route_gets_60s_under_openai_default() {
+        use std::time::Duration;
+        let mut cfg = cfg_for("openai", None);
+        cfg.models = Some(routes(
+            "[[models]]\nname = \"claude-*\"\nprovider = \"anthropic\"\n\
+             [[models]]\nname = \"gpt-*\"\nprovider = \"openai\"\n",
+        ));
+        let table = model_route_table(&cfg).unwrap();
+        let default = upstream_timeout(&cfg);
+        assert_eq!(table.models[0].effective_timeout(default), Duration::from_secs(60));
+        assert_eq!(table.models[1].effective_timeout(default), Duration::from_secs(30));
+        assert_eq!(longest_route_timeout(&cfg, Some(&table)), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_timeout_flag_applies_to_routes_without_their_own() {
+        use std::time::Duration;
+        let mut cfg = cfg_for("openai", Some(20));
+        cfg.models = Some(routes(
+            "[[models]]\nname = \"claude-*\"\nprovider = \"anthropic\"\n\
+             [[models]]\nname = \"slow\"\nprovider = \"openai\"\ntimeout_secs = 120\n",
+        ));
+        let table = model_route_table(&cfg).unwrap();
+        let default = upstream_timeout(&cfg);
+        assert_eq!(table.models[0].effective_timeout(default), Duration::from_secs(20));
+        assert_eq!(table.models[1].effective_timeout(default), Duration::from_secs(120));
+    }
+
+    #[test]
+    fn test_http_wait_covers_the_slowest_route() {
+        let mut cfg = cfg_for("openai", None);
+        cfg.retries = 2;
+        cfg.models = Some(routes(
+            "[[models]]\nname = \"slow\"\nprovider = \"openai\"\ntimeout_secs = 120\n",
+        ));
+        let table = model_route_table(&cfg).unwrap();
+        let longest = longest_route_timeout(&cfg, Some(&table)).as_secs();
+        assert_eq!(longest, 120);
+        // 3 attempts of 120 s plus two backoffs of up to 10 s, plus slack:
+        // more than the 300 s default the server would otherwise wait.
+        assert_eq!(http_wait_secs(longest, cfg.retries), 385);
+        assert_eq!(longest_route_timeout(&cfg, None).as_secs(), 30);
     }
 
     #[test]

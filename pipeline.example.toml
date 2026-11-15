@@ -58,3 +58,19 @@ max_entries = 10000
 log_format = "json"
 metrics_port = 9090
 # tracing_endpoint = "http://jaeger:14268"  # optional OTLP endpoint
+
+# ── Model routing (OpenAI-compatible endpoint) ───────────────────────────
+#
+# Optional. Read by `orchestrator --models pipeline.example.toml`; the
+# loader accepts these keys alongside the pipeline tables. See
+# examples/models.example.toml for every field.
+#
+# default_route = true        # put this line above [pipeline]: it is a top-level key
+#
+# [[models]]
+# name = "gpt-*"
+# provider = "openai"
+#
+# [[models]]
+# name = "claude-*"
+# provider = "anthropic"

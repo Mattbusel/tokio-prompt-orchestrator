@@ -1,0 +1,53 @@
+# Model routing table for the OpenAI-compatible endpoint.
+#
+#   orchestrator --provider openai --model gpt-4o-mini --models examples/models.example.toml
+#
+# Each request's "model" picks the route: exact names first, then globs
+# (* any run of characters, ? one character; case-insensitive) in file order.
+# Every route gets its own queue, circuit breaker, timeout and retries.
+# The HTTP server waits long enough for the slowest route's timeout_secs on
+# every retry, so a long timeout here is not cut off at 300 s.
+# The same tables also work inside a pipeline TOML (see pipeline.example.toml).
+
+# Models that match no route go to --provider/--model, as before routing
+# existed. Set this to false to answer them 400 model_not_found instead.
+default_route = true
+
+[[models]]
+name = "gpt-*"
+provider = "openai"            # any OpenAI-compatible server; key from OPENAI_API_KEY
+
+# OpenAI's reasoning models. Not "o*": that would also send olmo-*,
+# openchat-*, orca-* and the like to api.openai.com with your OpenAI key.
+[[models]]
+name = "o1*"
+provider = "openai"
+
+[[models]]
+name = "o3*"
+provider = "openai"
+
+[[models]]
+name = "o4*"
+provider = "openai"
+
+[[models]]
+name = "claude-*"
+provider = "anthropic"         # key from ANTHROPIC_API_KEY
+max_tokens = 8192              # sent when the client gives none (default 4096)
+# No timeout_secs: Anthropic routes default to 60 s per call (others to the
+# pipeline's 30 s, or --timeout when given).
+
+[[models]]
+name = "llama-*"
+provider = "llama_cpp"         # llama-server's /v1/chat/completions (start it with --jinja for tools)
+base_url = "http://127.0.0.1:8081"
+timeout_secs = 120
+
+# An alias: clients ask for "fast", OpenRouter gets the model named here.
+[[models]]
+name = "fast"
+provider = "openai"
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+model = "meta-llama/llama-3.1-8b-instruct"

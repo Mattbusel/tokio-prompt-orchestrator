@@ -113,7 +113,9 @@ fn chat_body(text: &str) -> Value {
     json!({
         "model": "gpt-4o-mini",
         "messages": [{"role": "user", "content": text}],
-        "temperature": 0.2,
+        // 0 keeps answers cacheable: a request with temperature > 0 and no
+        // seed is only shared while in flight (see the routing tests).
+        "temperature": 0.0,
         "max_tokens": 50,
         "some_future_field": {"ignored": true}
     })

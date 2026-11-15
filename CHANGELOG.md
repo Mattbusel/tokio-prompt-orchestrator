@@ -7,6 +7,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-11-14
+
+The OpenAI-compatible endpoint now honours each request instead of one model and one set of
+settings per process.
+
+### Added
+
+- **Per-request parameters.** `POST /v1/chat/completions` sends the request's messages as written
+  (assistant `tool_calls` and `tool` results included), `model`, `temperature`, `top_p`,
+  `max_tokens`, `max_completion_tokens`, `stop`, `seed`, `response_format`, `tools`, `tool_choice`
+  and `parallel_tool_calls` to the provider. The model's tool calls come back as
+  `message.tool_calls` (a `tool_calls` delta when streaming) with `finish_reason: "tool_calls"`,
+  and the provider's own `usage` is reported when it gives one. `n` must still be 1.
+  `POST /v1/messages` passes `max_tokens`, `temperature`, `top_p` and `stop_sequences` through.
+- `ChatRequest`, `ChatResponse`, `ChatUsage` (module `chat`) and `ModelWorker::chat`, a new trait
+  method with a default implementation (flatten the messages, call `infer`), so existing workers
+  keep compiling. `OpenAiWorker` sends the request to `/chat/completions` field for field,
+  `AnthropicWorker` translates it to the Messages API (system prompt, `tool_use` / `tool_result`
+  blocks, `tool_choice`, `stop_sequences`) and back, `LlamaCppWorker` uses llama.cpp's
+  OpenAI-compatible `/v1/chat/completions`, and `LoadBalancedWorker` forwards it. A setting the
+  client leaves unset falls back to the worker's own configured value, and is left out when the
+  worker has none (so no temperature or reply cap is invented). The pipeline's inference stage calls
+  `chat` for every request from the OpenAI and Anthropic endpoints, inside the same circuit
+  breaker, timeout and retries.
+- **Model routing.** A static `[[models]]` table maps model names or globs (`gpt-*`, `claude-*`,
+  `llama-*`) to providers: `openai` (any OpenAI-compatible base URL, key from an environment
+  variable), `anthropic`, `llama_cpp` and `echo`, with optional `model` (alias), `max_tokens` and
+  `timeout_secs`. Load it with `orchestrator --models <file>` (a file of its own or a pipeline TOML;
+  `config::loader` now accepts `[[models]]` and `default_route` alongside the pipeline tables) or
+  `ModelRoutesConfig::from_file`, start it with `ModelRoutes::spawn` (one pipeline, queue and
+  circuit breaker per route) and pass it as `web_api::ServerConfig::model_routes`. The single
+  `--provider` / `--model` stays the default route for unmatched models, so existing setups behave
+  as before; with `default_route = false` an unmatched model gets `400 model_not_found` in OpenAI's
+  error shape, listing the configured models. `GET /v1/models` lists the default model and every
+  route. Example: `examples/models.example.toml`.
+- **Route timeouts.** A route's per-call timeout is its `timeout_secs`, else `--timeout`, else its
+  provider's default: 60 s for an Anthropic route (`ANTHROPIC_DEFAULT_TIMEOUT_SECS`, the same as
+  `--provider anthropic`), the pipeline's 30 s for the others. `ModelRoute::effective_timeout`
+  gives the value and `ModelRoute::with_timeout_secs` sets it. The HTTP server waits long enough
+  for the slowest route (or the default pipeline) to use every retry
+  (`ModelRoutesConfig::longest_timeout` gives the slowest per-call timeout), so a route with a
+  long `timeout_secs` is not answered `504` while its upstream call is still running.
+- `ServerConfig` gains the public field `model_routes`. `ServerConfig` is not
+  `#[non_exhaustive]`, so code that builds it with a full struct literal and no
+  `..ServerConfig::default()` must add `model_routes: None` (as with fields added in earlier minor
+  releases). Building it from `ServerConfig::default()` or a config file is unaffected.
+- `OrchestratorError::UpstreamRejected { status, message }`: the provider refused the request with
+  a 4xx (other than 401, 403, 408, 409, 429). The endpoints return it with the provider's status
+  and message (`code: upstream_rejected`, `x-should-retry: false`); it is not retried and does not
+  count against the circuit breaker, so a client sending bad parameters cannot open it.
+
+### Changed
+
+- **Dedup key.** It is now a SHA-256 over a canonical (sorted-key) encoding of the route, model,
+  messages, tools, tool choice, every sampling setting and the response format, instead of the
+  flattened prompt alone, so requests with different settings never share an answer.
+- **Sampled requests are not cached.** A request with `temperature > 0` and no `seed` is shared
+  only with identical requests still in flight; its answer is no longer reused for the dedup
+  window. Requests with `temperature: 0`, no temperature, or a `seed` are cached as before.
+  Semantic dedup only compares requests whose settings are identical.
+- The `orchestrator` binary's Anthropic worker sends `max_tokens: 4096` when the client gives none
+  (was 1024), the same default as an Anthropic route. Clients that send `max_tokens` get exactly
+  that.
+- **No temperature is sent when the client sends none.** Before 2.2.0 every request to the
+  OpenAI-compatible endpoint was sampled at the worker's temperature: 0.7 for `--provider openai`
+  (0.8 for `llama`, 1.0 for `anthropic`), whatever the client asked. Now the client's
+  `temperature` is sent, and a request without one gets the provider's own default (1.0 for OpenAI
+  and Anthropic, 0.8 for llama.cpp). So on `--provider openai`, clients that leave `temperature`
+  out are sampled at 1.0 instead of 0.7 after upgrading; send `temperature: 0.7` to keep the old
+  sampling. (Sending 0.7 by default would make every request to reasoning models such as `o3` or
+  `gpt-5`, which accept only their default temperature, fail.) Those answers are still cached for
+  the dedup window, as every answer was before 2.2.0; only an explicit `temperature > 0` without a
+  `seed` turns caching off.
+- `tool_choice` and `parallel_tool_calls` are dropped when the request has no tools (no `tools`
+  field or `tools: []`, which many SDK wrappers send). OpenAI refuses either one without tools, and
+  Anthropic refuses `tool_choice` without tools, so these requests used to come back as an
+  `upstream_rejected` 400. `ChatRequest::to_openai_body` and the Anthropic translation leave them
+  out too (`ChatRequest::has_tools`).
 ## [2.1.1] - 2026-11-14
 
 ### Fixed

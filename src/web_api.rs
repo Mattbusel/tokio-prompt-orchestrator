@@ -16,7 +16,8 @@
 //!
 //! ### OpenAI-compatible
 //! - `POST /v1/chat/completions`  -  Chat completions (JSON or SSE with `"stream": true`)
-//! - `GET  /v1/models`  -  The configured model
+//! - `GET  /v1/models`  -  The configured model and model routes
+//! - `POST /v1/messages`  -  Anthropic Messages API
 //!
 //! ### WebSocket
 //! - `WS /api/v1/ws`  -  Real-time streaming inference
@@ -144,6 +145,13 @@ pub struct ServerConfig {
     /// Maximum allowed request body size in bytes.
     pub max_request_size: usize,
     /// How long (in seconds) to wait for a result before returning a timeout error.
+    ///
+    /// With [`model_routes`](Self::model_routes), this one wait covers every
+    /// route, so make it at least the slowest route's per-call timeout times
+    /// its attempts, plus the retry backoff
+    /// ([`ModelRoutesConfig::longest_timeout`](crate::ModelRoutesConfig::longest_timeout)
+    /// gives the slowest per-call timeout). The `orchestrator` binary sizes it
+    /// that way.
     pub timeout_seconds: u64,
     /// When `true`, the `/api/v1/debug/*` endpoints are enabled.
     /// Default: `false`. They show request and session IDs from the
@@ -192,6 +200,16 @@ pub struct ServerConfig {
     /// environment; when neither is set, auth is off.
     #[serde(default, skip_serializing)]
     pub api_key: Option<String>,
+    /// Model routing for `/v1/chat/completions` and `/v1/messages`: a
+    /// `[[models]]` table of names and globs, each with its own pipeline
+    /// (see [`crate::model_routes`]). `None` (the default) sends every
+    /// request to the server's own pipeline, whatever model it names. With
+    /// routes set, `GET /v1/models` lists them, and a model that matches no
+    /// route goes to the server's own pipeline unless the table turned the
+    /// default route off, in which case it is answered 400
+    /// `model_not_found`. Not part of the serialized config.
+    #[serde(skip)]
+    pub model_routes: Option<Arc<crate::model_routes::ModelRoutes>>,
 }
 
 #[cfg(feature = "web-api")]
@@ -227,6 +245,7 @@ impl Default for ServerConfig {
             embedder: None,
             semantic_threshold: default_semantic_threshold(),
             api_key: None,
+            model_routes: None,
         }
     }
 }
@@ -724,7 +743,7 @@ pub async fn serve_pipeline(
 pub async fn start_server(
     config: ServerConfig,
     pipeline_tx: mpsc::Sender<PromptRequest>,
-    mut output_rx: mpsc::Receiver<crate::PostOutput>,
+    output_rx: mpsc::Receiver<crate::PostOutput>,
     dlq: Arc<crate::DeadLetterQueue>,
     circuit_breaker: crate::enhanced::CircuitBreaker,
     shutdown_rx: Option<tokio::sync::oneshot::Receiver<()>>,
@@ -796,51 +815,21 @@ pub async fn start_server(
         RequestTracker::new(),
     ));
 
-    // Collector task: receives pipeline output and writes results into the
-    // tracker, then wakes an OpenAI-endpoint handler waiting on that request.
-    let collector_state = state.clone();
-    tokio::spawn(async move {
-        while let Some(output) = output_rx.recv().await {
-            if let Some(mut tracked) = collector_state.tracker.status.get_mut(&output.request_id) {
-                tracked.status = RequestStatus::Completed;
-                tracked.result = Some(output.text.clone());
-                tracked.completed_at = Some(Instant::now());
-            }
-            collector_state
-                .openai
-                .resolve(&output.request_id, Ok(output.text));
-        }
-    });
-
-    // Dead-letter listener: a request the pipeline drops (circuit open,
-    // timeout, provider error, backpressure) is marked failed with the reason
-    // instead of staying "processing" until the client gives up.
-    let mut dlq_events = state.dlq.subscribe();
-    let dlq_state = state.clone();
-    tokio::spawn(async move {
-        loop {
-            match dlq_events.recv().await {
-                Ok(dropped) => {
-                    if let Some(mut tracked) =
-                        dlq_state.tracker.status.get_mut(&dropped.request_id)
-                    {
-                        if !matches!(tracked.status, RequestStatus::Completed) {
-                            tracked.status = RequestStatus::Failed;
-                            tracked.error = Some(dropped.reason.clone());
-                            tracked.completed_at = Some(Instant::now());
-                        }
-                    }
-                    dlq_state
-                        .openai
-                        .resolve(&dropped.request_id, Err(dropped.reason));
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    warn!(skipped = n, "dead-letter listener lagged; some waiters will time out");
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+    // Results and dead-letter events from the server's own pipeline and from
+    // every model route's pipeline reach the tracker and waiting handlers.
+    spawn_result_listeners(Arc::clone(&state), output_rx, Arc::clone(&state.dlq));
+    if let Some(routes) = state.config.model_routes.clone() {
+        for (i, route) in routes.routes().enumerate() {
+            let Some(handles) = routes.pipeline(i) else { continue };
+            match handles.take_output_rx().await {
+                Some(rx) => spawn_result_listeners(Arc::clone(&state), rx, Arc::clone(&handles.dlq)),
+                None => warn!(
+                    route = %route.name,
+                    "model route's pipeline output was already taken; its requests will time out"
+                ),
             }
         }
-    });
+    }
 
     let app = Router::new()
         .route("/api/v1/infer", post(infer_handler))
@@ -954,6 +943,56 @@ pub async fn start_server(
     }
 
     Ok(())
+}
+
+/// Feed one pipeline's results and dead-letter events to the request
+/// tracker and to the OpenAI-endpoint handlers waiting on them.
+#[cfg(feature = "web-api")]
+fn spawn_result_listeners(
+    state: Arc<AppState>,
+    mut output_rx: mpsc::Receiver<crate::PostOutput>,
+    dlq: Arc<crate::DeadLetterQueue>,
+) {
+    // Collector task: receives pipeline output and writes results into the
+    // tracker, then wakes an OpenAI-endpoint handler waiting on that request.
+    let collector_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        while let Some(output) = output_rx.recv().await {
+            if let Some(mut tracked) = collector_state.tracker.status.get_mut(&output.request_id) {
+                tracked.status = RequestStatus::Completed;
+                tracked.result = Some(output.text.clone());
+                tracked.completed_at = Some(Instant::now());
+            }
+            collector_state
+                .openai
+                .resolve(&output.request_id, Ok(output.text));
+        }
+    });
+
+    // Dead-letter listener: a request the pipeline drops (circuit open,
+    // timeout, provider error, backpressure) is marked failed with the reason
+    // instead of staying "processing" until the client gives up.
+    let mut dlq_events = dlq.subscribe();
+    tokio::spawn(async move {
+        loop {
+            match dlq_events.recv().await {
+                Ok(dropped) => {
+                    if let Some(mut tracked) = state.tracker.status.get_mut(&dropped.request_id) {
+                        if !matches!(tracked.status, RequestStatus::Completed) {
+                            tracked.status = RequestStatus::Failed;
+                            tracked.error = Some(dropped.reason.clone());
+                            tracked.completed_at = Some(Instant::now());
+                        }
+                    }
+                    state.openai.resolve(&dropped.request_id, Err(dropped.reason));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    warn!(skipped = n, "dead-letter listener lagged; some waiters will time out");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
 }
 
 /// Assemble the shared [`AppState`]. Must be called inside a Tokio runtime.

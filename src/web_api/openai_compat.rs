@@ -1,30 +1,57 @@
 //! OpenAI-compatible endpoints: `POST /v1/chat/completions` and `GET /v1/models`.
 //!
 //! Point any OpenAI client at `http://<host>:<port>/v1` and its chat requests
-//! go through the orchestrator pipeline (RAG, assemble, inference behind the
-//! circuit breaker and timeout, post, stream) like `/api/v1/infer` requests
-//! do, with three additions at this layer:
+//! go through the orchestrator pipeline (inference behind the circuit
+//! breaker, timeout and retries, then post and stream) like `/api/v1/infer`
+//! requests do, with these additions at this layer:
 //!
-//! - **Deduplication.** Identical conversations share one upstream call while
-//!   it is in flight, and a completed answer is reused for
-//!   [`ServerConfig::dedup_window_secs`]. The `x-orchestrator-dedup` response
-//!   header says which happened: `miss`, `joined` or `cached`.
+//! - **Each request is honoured.** The request's messages (including
+//!   assistant `tool_calls` and `tool` results), `temperature`, `top_p`,
+//!   `max_tokens`, `max_completion_tokens`, `stop`, `seed`,
+//!   `response_format`, `tools`, `tool_choice` and `parallel_tool_calls`
+//!   are carried to the worker as a [`crate::ChatRequest`] and sent to the
+//!   provider; tool calls come back as `tool_calls` with
+//!   `finish_reason: "tool_calls"`. Only `n = 1` is supported. Nothing is
+//!   capped by the orchestrator: without `max_tokens` the model's own limit
+//!   applies (Anthropic, which requires a value, gets the route's
+//!   `max_tokens`, 4096 by default). A provider's 4xx for a bad parameter
+//!   comes back with the provider's status and message and does not count
+//!   against the circuit breaker.
+//! - **Model routing.** With [`ServerConfig::model_routes`] set, the
+//!   request's `model` picks the upstream from a static `[[models]]` table
+//!   of names and globs (`gpt-*`, `claude-*`, `llama-*`); each route has its
+//!   own pipeline and breaker, and a glob route sends the client's model
+//!   name upstream. A model that matches no route goes to the server's own
+//!   pipeline (the default route: the single `--provider` / `--model`, which
+//!   keeps using its configured model as before), or, with the default route
+//!   turned off, is answered 400 `model_not_found` listing the configured
+//!   models. See [`crate::model_routes`].
+//! - **Deduplication.** The key is a SHA-256 over a canonical encoding of
+//!   the route, model, messages, tools, tool choice, sampling settings and
+//!   response format ([`crate::ChatRequest::dedup_key`]), so requests with
+//!   different settings never share an answer. Identical requests share one
+//!   upstream call while it is in flight. A completed answer is reused for
+//!   [`ServerConfig::dedup_window_secs`], except when the request has
+//!   `temperature > 0` and no `seed`: the client asked for a fresh sample,
+//!   so such answers are shared only while in flight and never cached. The
+//!   `x-orchestrator-dedup` response header says which happened: `miss`,
+//!   `joined`, `cached` or `semantic`. Semantic dedup (with an embedder)
+//!   only compares requests whose settings are identical.
 //! - **Spend cap.** With [`ServerConfig::max_spend_usd`] set, estimated spend
 //!   is tracked per upstream call and the endpoint answers 429
 //!   `insufficient_quota` once the cap is reached.
-//! - **Token usage.** `usage` is counted with the model's own tokenizer for
-//!   OpenAI models (feature `tiktoken`, on with `web-api`), so it matches the
-//!   provider's bill; other models get an estimate of about 4 characters per
-//!   token. The spend cap uses the same counts.
+//! - **Token usage.** `usage` is the provider's own count when it reports
+//!   one; otherwise it is counted with the model's tokenizer for OpenAI
+//!   models (feature `tiktoken`, on with `web-api`) or estimated at about 4
+//!   characters per token. The spend cap uses the same counts.
 //! - **Errors in OpenAI's shape.** A request the pipeline drops into the
 //!   dead-letter queue is answered at once with a status that matches the
-//!   reason (503 circuit open, 504 timeout, 502 provider error, 429 busy).
+//!   reason (503 circuit open, 504 timeout, 502 provider error, 429 busy,
+//!   the provider's own 4xx for a request it rejected).
 //!
-//! The request's `model`, `temperature`, `max_tokens` and other sampling
-//! fields are accepted and ignored: the pipeline's worker uses the model and
-//! settings the orchestrator was started with, and that model is what the
-//! response reports. Messages are flattened into one prompt (a single user
-//! message is sent as is) and sent to the model verbatim.
+//! Workers without their own [`crate::ModelWorker::chat`] (the echo worker,
+//! custom workers) get the messages flattened into one prompt (a single user
+//! message is sent as is) and ignore the settings.
 //!
 //! Streaming (`"stream": true`) returns standard `chat.completion.chunk`
 //! Server-Sent Events ending with `data: [DONE]`. The pipeline produces the
@@ -33,9 +60,10 @@
 
 use super::*;
 
+use crate::chat::{ChatJobGuard, ChatRequest, ChatResponse};
 use crate::cost_estimator::CostEstimator;
 use crate::enhanced::{DeduplicationResult, Deduplicator};
-use sha2::{Digest, Sha256};
+use serde_json::Value;
 use tokio::sync::oneshot;
 
 /// How long a failure is kept so requests that joined the failed call get
@@ -46,12 +74,30 @@ const FAILURE_MEMORY: Duration = Duration::from_secs(30);
 /// joined was cancelled.
 const MAX_JOIN_ATTEMPTS: usize = 3;
 
+/// Most settings fingerprints that keep a semantic dedup index of their own.
+const MAX_SEMANTIC_SCOPES: u64 = 256;
+
 /// What the pipeline did with one request: its text, or the dead-letter reason.
 pub(super) type PipelineOutcome = Result<String, String>;
 
+/// Semantic dedup settings and one index per settings fingerprint, so a
+/// reworded prompt is only matched against requests with identical settings.
+struct SemanticScopes {
+    embedder: Arc<dyn crate::embedding::Embedder>,
+    threshold: f32,
+    scopes: moka::sync::Cache<String, Deduplicator>,
+}
+
 /// Per-server state for the OpenAI-compatible endpoints.
 pub(super) struct OpenAiState {
+    /// Answers reusable for the dedup window.
     dedup: Deduplicator,
+    /// Sampled requests (`temperature > 0`, no `seed`): shared while in
+    /// flight, never cached.
+    in_flight_only: Deduplicator,
+    /// Present when the server has an embedder.
+    semantic: Option<SemanticScopes>,
+    window: Duration,
     /// Pipeline request id -> handler waiting for its outcome.
     waiters: DashMap<String, oneshot::Sender<PipelineOutcome>>,
     /// Dedup key -> recent failure, for requests that joined a failed call.
@@ -65,16 +111,33 @@ pub(super) struct OpenAiState {
 impl OpenAiState {
     /// Builds the proxy state; the dedup window comes from `config.dedup_window_secs`.
     pub(super) fn new(config: &ServerConfig) -> Self {
+        let window = Duration::from_secs(config.dedup_window_secs);
         Self {
-            dedup: match &config.embedder {
-                Some(embedder) => Deduplicator::new(Duration::from_secs(config.dedup_window_secs))
-                    .with_embedder(std::sync::Arc::clone(embedder), config.semantic_threshold),
-                None => Deduplicator::new(Duration::from_secs(config.dedup_window_secs)),
-            },
+            dedup: Deduplicator::new(window),
+            in_flight_only: Deduplicator::new(Duration::ZERO),
+            semantic: config.embedder.as_ref().map(|embedder| SemanticScopes {
+                embedder: Arc::clone(embedder),
+                threshold: config.semantic_threshold,
+                scopes: moka::sync::Cache::new(MAX_SEMANTIC_SCOPES),
+            }),
+            window,
             waiters: DashMap::new(),
             failures: DashMap::new(),
             spent_usd: parking_lot::Mutex::new(0.0),
             started_unix: unix_now(),
+        }
+    }
+
+    /// The deduplicator for `chat` sent to the route labelled `label`.
+    fn dedup_for(&self, chat: &ChatRequest, label: &str) -> Deduplicator {
+        if !chat.is_cacheable() {
+            return self.in_flight_only.clone();
+        }
+        match &self.semantic {
+            Some(s) => s.scopes.get_with(chat.settings_fingerprint(label), || {
+                Deduplicator::new(self.window).with_embedder(Arc::clone(&s.embedder), s.threshold)
+            }),
+            None => self.dedup.clone(),
         }
     }
 
@@ -193,6 +256,22 @@ impl ApiError {
             // Retrying at once only hits the open breaker again, so tell
             // SDK clients not to (they would otherwise retry twice).
             .should_retry(false)
+        } else if let Some(rest) = reason.strip_prefix("upstream_rejected:") {
+            // `upstream_rejected:<status>:<provider message>`
+            let (status, message) = rest.split_once(':').unwrap_or(("400", rest));
+            let status = status
+                .parse::<u16>()
+                .ok()
+                .and_then(|s| StatusCode::from_u16(s).ok())
+                .filter(|s| s.is_client_error())
+                .unwrap_or(StatusCode::BAD_REQUEST);
+            Self::new(
+                status,
+                "invalid_request_error",
+                "upstream_rejected",
+                format!("The upstream provider rejected the request: {message}"),
+            )
+            .should_retry(false)
         } else if let Some(t) = reason.strip_prefix("inference_timeout:") {
             Self::new(
                 StatusCode::GATEWAY_TIMEOUT,
@@ -280,10 +359,10 @@ pub(super) fn unauthorized() -> Response {
 // ============================================================================
 
 #[derive(Debug, Deserialize)]
-struct ChatRequest {
+struct ChatBody {
     #[serde(default)]
     model: Option<String>,
-    messages: Vec<ChatMessage>,
+    messages: Vec<Value>,
     #[serde(default)]
     stream: Option<bool>,
     #[serde(default)]
@@ -292,13 +371,46 @@ struct ChatRequest {
     n: Option<u32>,
     #[serde(default)]
     user: Option<String>,
+    #[serde(default)]
+    temperature: Option<f64>,
+    #[serde(default)]
+    top_p: Option<f64>,
+    #[serde(default)]
+    max_tokens: Option<u32>,
+    #[serde(default)]
+    max_completion_tokens: Option<u32>,
+    #[serde(default)]
+    stop: Option<Value>,
+    #[serde(default)]
+    seed: Option<i64>,
+    #[serde(default)]
+    response_format: Option<Value>,
+    #[serde(default)]
+    tools: Option<Vec<Value>>,
+    #[serde(default)]
+    tool_choice: Option<Value>,
+    #[serde(default)]
+    parallel_tool_calls: Option<bool>,
 }
 
-#[derive(Debug, Deserialize)]
+/// A message as the prompt renderer sees it: role and content.
+#[derive(Debug)]
 struct ChatMessage {
     role: String,
-    #[serde(default)]
-    content: Option<serde_json::Value>,
+    content: Option<Value>,
+}
+
+impl ChatMessage {
+    fn from_value(v: &Value) -> Result<Self, ApiError> {
+        let role = v
+            .get("role")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ApiError::invalid(Some("messages"), "Every message needs a string 'role'."))?;
+        Ok(Self {
+            role: role.to_string(),
+            content: v.get("content").cloned(),
+        })
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -310,9 +422,9 @@ struct StreamOptions {
 /// Text of one message: a string, or the `text` parts of a content array.
 fn message_text(msg: &ChatMessage) -> Result<String, ApiError> {
     match &msg.content {
-        None | Some(serde_json::Value::Null) => Ok(String::new()),
-        Some(serde_json::Value::String(s)) => Ok(s.clone()),
-        Some(serde_json::Value::Array(parts)) => {
+        None | Some(Value::Null) => Ok(String::new()),
+        Some(Value::String(s)) => Ok(s.clone()),
+        Some(Value::Array(parts)) => {
             let mut out = Vec::new();
             for part in parts {
                 match part.get("type").and_then(|t| t.as_str()) {
@@ -341,7 +453,8 @@ fn message_text(msg: &ChatMessage) -> Result<String, ApiError> {
     }
 }
 
-/// Flatten the conversation into the single prompt the pipeline carries.
+/// Validate the conversation and flatten it into the single prompt the
+/// pipeline carries (and workers without `chat` receive).
 ///
 /// A lone user message is sent exactly as written; anything longer becomes a
 /// `Role: text` transcript separated by blank lines.
@@ -384,11 +497,138 @@ fn render_prompt(messages: &[ChatMessage]) -> Result<String, ApiError> {
     Ok(prompt)
 }
 
+/// Check the shape of the settings that are passed through untyped.
+fn validate_settings(body: &ChatBody) -> Result<(), ApiError> {
+    if let Some(stop) = &body.stop {
+        let ok = match stop {
+            Value::String(_) => true,
+            Value::Array(items) => items.iter().all(Value::is_string),
+            _ => false,
+        };
+        if !ok {
+            return Err(ApiError::invalid(Some("stop"), "'stop' must be a string or an array of strings."));
+        }
+    }
+    if body.response_format.as_ref().is_some_and(|f| !f.is_object()) {
+        return Err(ApiError::invalid(Some("response_format"), "'response_format' must be an object."));
+    }
+    if let Some(tools) = &body.tools {
+        if tools.iter().any(|t| !t.is_object()) {
+            return Err(ApiError::invalid(Some("tools"), "Every entry of 'tools' must be an object."));
+        }
+    }
+    if body
+        .tool_choice
+        .as_ref()
+        .is_some_and(|c| !(c.is_string() || c.is_object()))
+    {
+        return Err(ApiError::invalid(Some("tool_choice"), "'tool_choice' must be a string or an object."));
+    }
+    if body.temperature.is_some_and(|t| !t.is_finite() || t < 0.0) {
+        return Err(ApiError::invalid(Some("temperature"), "'temperature' must be a number of at least 0."));
+    }
+    if body.top_p.is_some_and(|p| !p.is_finite() || p < 0.0) {
+        return Err(ApiError::invalid(Some("top_p"), "'top_p' must be a number of at least 0."));
+    }
+    Ok(())
+}
+
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+// ============================================================================
+// Routing
+// ============================================================================
+
+/// Where one request goes.
+#[derive(Debug, Clone)]
+struct Target {
+    /// Route index in [`ServerConfig::model_routes`]; `None` is the server's
+    /// own pipeline (the default route).
+    route: Option<usize>,
+    /// Part of the dedup key, so routes never share answers.
+    label: String,
+    /// Model name sent upstream; empty means the worker's own model.
+    upstream_model: String,
+    /// Model name reported back to the client.
+    reported_model: String,
+    /// Provider kind, for cost and capability checks.
+    provider: String,
+}
+
+/// Pick the route for a request asking for `requested`.
+fn resolve_target(state: &AppState, requested: Option<&str>) -> Result<Target, ApiError> {
+    let requested = requested.map(str::trim).filter(|m| !m.is_empty());
+    let routes = state.config.model_routes.as_deref();
+    let default_on = routes.is_none_or(|r| r.has_default_route());
+    let default = || Target {
+        route: None,
+        label: "default".to_string(),
+        upstream_model: String::new(),
+        reported_model: state.config.model.clone(),
+        provider: state.config.provider.clone(),
+    };
+    let Some(routes) = routes else {
+        return Ok(default());
+    };
+    if let Some(model) = requested {
+        if default_on && model.eq_ignore_ascii_case(&state.config.model) {
+            return Ok(default());
+        }
+        if let Some(i) = routes.resolve(model) {
+            if let Some(route) = routes.route(i) {
+                let upstream = route.upstream_model(model);
+                return Ok(Target {
+                    route: Some(i),
+                    label: format!("route:{}", route.name.to_ascii_lowercase()),
+                    reported_model: upstream.clone(),
+                    upstream_model: upstream,
+                    provider: route.provider.as_str().to_string(),
+                });
+            }
+        }
+    }
+    if default_on {
+        return Ok(default());
+    }
+    let configured: Vec<String> = routes.routes().map(|r| r.name.clone()).collect();
+    let message = match requested {
+        Some(model) => format!(
+            "The model '{model}' is not served by this orchestrator. Configured models: {}.",
+            configured.join(", ")
+        ),
+        None => format!(
+            "'model' is required. Configured models: {}.",
+            configured.join(", ")
+        ),
+    };
+    Err(ApiError {
+        param: Some("model"),
+        ..ApiError::new(StatusCode::BAD_REQUEST, "invalid_request_error", "model_not_found", message)
+    })
+}
+
+/// Reject settings the target's provider cannot honour.
+fn check_capabilities(target: &Target, chat: &ChatRequest) -> Result<(), ApiError> {
+    if target.provider == "anthropic" {
+        let format = chat
+            .response_format
+            .as_ref()
+            .and_then(|f| f.get("type"))
+            .and_then(Value::as_str);
+        if format.is_some_and(|t| t != "text") {
+            return Err(ApiError::invalid(
+                Some("response_format"),
+                "This model is served by Anthropic's Messages API, which has no response_format. \
+                 Ask for JSON in the prompt or use a tool instead.",
+            ));
+        }
+    }
+    Ok(())
 }
 
 // ============================================================================
@@ -420,13 +660,24 @@ impl DedupOutcome {
     }
 }
 
-/// Submit one prompt to the pipeline and wait for its output or dead-letter reason.
+/// Submit one chat request to its pipeline and wait for the answer or the
+/// dead-letter reason.
 async fn run_pipeline(
     state: &Arc<AppState>,
+    target: &Target,
     request_id: &str,
     session: String,
     prompt: String,
-) -> Result<String, ApiError> {
+    chat: ChatRequest,
+) -> Result<ChatResponse, ApiError> {
+    let route_handles = target
+        .route
+        .and_then(|i| state.config.model_routes.as_ref().and_then(|r| r.pipeline(i)));
+    let (pipeline_tx, breaker) = match route_handles {
+        Some(h) => (&h.input_tx, &h.circuit_breaker),
+        None => (&state.pipeline_tx, &state.circuit_breaker),
+    };
+
     if !state.tracker.try_insert(
         request_id.to_string(),
         TrackedRequest {
@@ -446,6 +697,7 @@ async fn run_pipeline(
     }
 
     // Register before sending so a fast pipeline cannot answer before we listen.
+    let job = ChatJobGuard::register(request_id, chat);
     let (tx, rx) = oneshot::channel();
     state.openai.waiters.insert(request_id.to_string(), tx);
 
@@ -460,7 +712,7 @@ async fn run_pipeline(
         deadline: None,
     };
 
-    let send_err = match state.pipeline_tx.try_send(req) {
+    let send_err = match pipeline_tx.try_send(req) {
         Ok(()) => None,
         Err(mpsc::error::TrySendError::Full(_)) => Some(
             ApiError::new(
@@ -486,8 +738,10 @@ async fn run_pipeline(
 
     let timeout = Duration::from_secs(state.config.timeout_seconds);
     match tokio::time::timeout(timeout, rx).await {
-        Ok(Ok(Ok(text))) => Ok(text),
-        Ok(Ok(Err(reason))) => Err(ApiError::from_dlq(&reason, &state.circuit_breaker)),
+        // The worker's structured answer; a pipeline whose inference stage
+        // does not run chat requests leaves only the text.
+        Ok(Ok(Ok(text))) => Ok(job.take_response().unwrap_or_else(|| ChatResponse::from_text(text))),
+        Ok(Ok(Err(reason))) => Err(ApiError::from_dlq(&reason, breaker)),
         Ok(Err(_closed)) => Err(ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "server_error",
@@ -510,11 +764,12 @@ async fn run_pipeline(
     }
 }
 
-/// Estimated USD cost of one upstream call (`echo` and `llama` are free).
-fn estimate_cost(config: &ServerConfig, prompt_tokens: usize, completion_tokens: usize) -> f64 {
-    match config.provider.as_str() {
-        "echo" | "llama" => 0.0,
-        _ => CostEstimator::new().cost_for_tokens(prompt_tokens, completion_tokens, &config.model),
+/// Estimated USD cost of one upstream call (`echo`, `llama` and
+/// `llama_cpp` are free).
+fn estimate_cost(provider: &str, model: &str, prompt_tokens: usize, completion_tokens: usize) -> f64 {
+    match provider {
+        "echo" | "llama" | "llama_cpp" => 0.0,
+        _ => CostEstimator::new().cost_for_tokens(prompt_tokens, completion_tokens, model),
     }
 }
 
@@ -527,10 +782,9 @@ fn approx_tokens(text: &str) -> usize {
     }
 }
 
-/// Prompt tokens of the upstream call. The worker sends the flattened prompt
-/// as one user message, so for OpenAI models this is exactly what the
-/// provider bills (content plus message framing, counted with the model's
-/// own tokenizer); other models get the 4-characters-per-token estimate.
+/// Prompt tokens of the flattened prompt: exact for OpenAI models (content
+/// plus message framing, counted with the model's own tokenizer), else the
+/// 4-characters-per-token estimate. Used when the provider reports no usage.
 fn prompt_tokens(model: &str, prompt: &str) -> usize {
     if prompt.is_empty() {
         return 0;
@@ -544,28 +798,59 @@ fn completion_tokens(model: &str, text: &str) -> usize {
     crate::token_counter::exact_token_count(model, text).unwrap_or_else(|| approx_tokens(text))
 }
 
-/// Answer `prompt`, sharing identical in-flight or recent requests.
+/// Token counts for one answer: the provider's when it reported them,
+/// else counted or estimated.
+fn usage_for(model: &str, prompt: &str, response: &ChatResponse) -> (usize, usize) {
+    match response.usage {
+        Some(u) => (
+            usize::try_from(u.prompt_tokens).unwrap_or(usize::MAX),
+            usize::try_from(u.completion_tokens).unwrap_or(usize::MAX),
+        ),
+        None => {
+            let mut completion_text = response.text().to_string();
+            for call in &response.tool_calls {
+                completion_text.push_str(&call.to_string());
+            }
+            (prompt_tokens(model, prompt), completion_tokens(model, &completion_text))
+        }
+    }
+}
+
+/// Encode an answer for the dedup cache.
+fn encode_answer(response: &ChatResponse) -> String {
+    serde_json::to_string(response).unwrap_or_else(|_| response.text().to_string())
+}
+
+/// Decode an answer from the dedup cache.
+fn decode_answer(text: &str) -> ChatResponse {
+    serde_json::from_str(text).unwrap_or_else(|_| ChatResponse::from_text(text))
+}
+
+/// Answer `chat`, sharing identical in-flight or recent requests.
 async fn complete(
     state: &Arc<AppState>,
+    target: &Target,
     request_id: &str,
     session: String,
     prompt: String,
-) -> Result<(String, DedupOutcome), ApiError> {
-    let key = hex::encode(Sha256::digest(prompt.as_bytes()));
+    chat: ChatRequest,
+) -> Result<(ChatResponse, DedupOutcome), ApiError> {
+    let key = chat.dedup_key(&target.label);
+    let dedup = state.openai.dedup_for(&chat, &target.label);
 
     for _ in 0..MAX_JOIN_ATTEMPTS {
-        let (found, similar) = state.openai.dedup.check_and_register_semantic(&key, &prompt).await;
+        let (found, similar) = dedup.check_and_register_semantic(&key, &prompt).await;
         match found {
             DeduplicationResult::Cached(text) => {
                 let outcome = match similar {
                     Some(m) => DedupOutcome::Semantic(m.similarity),
                     None => DedupOutcome::Cached,
                 };
-                return Ok((text, outcome));
+                return Ok((decode_answer(&text), outcome));
             }
-            DeduplicationResult::InProgress => match state.openai.dedup.wait_for_result(&key).await {
+            DeduplicationResult::InProgress => match dedup.wait_for_result(&key).await {
                 Some(text) if !crate::enhanced::dedup::is_cancelled_result(&text) => {
-                    return Ok((text, DedupOutcome::Joined));
+                    return Ok((decode_answer(&text), DedupOutcome::Joined));
                 }
                 _ => {
                     if let Some(err) = state.openai.recent_failure(&key) {
@@ -579,23 +864,31 @@ async fn complete(
                 // Run the upstream call in its own task so a client that
                 // disconnects does not cancel it for everyone who joined.
                 let task_state = Arc::clone(state);
+                let task_target = target.clone();
+                let task_dedup = dedup.clone();
                 let rid = request_id.to_string();
+                let key = key.clone();
                 let task = tokio::spawn(async move {
-                    let prompt_tokens = prompt_tokens(&task_state.config.model, &prompt);
-                    let result = run_pipeline(&task_state, &rid, session, prompt).await;
+                    let result = run_pipeline(
+                        &task_state,
+                        &task_target,
+                        &rid,
+                        session,
+                        prompt.clone(),
+                        chat,
+                    )
+                    .await;
                     match &result {
-                        Ok(text) => {
-                            let cost = estimate_cost(
-                                &task_state.config,
-                                prompt_tokens,
-                                completion_tokens(&task_state.config.model, text),
-                            );
+                        Ok(response) => {
+                            let (p, c) = usage_for(&task_target.reported_model, &prompt, response);
+                            let cost =
+                                estimate_cost(&task_target.provider, &task_target.reported_model, p, c);
                             if cost > 0.0 {
                                 *task_state.openai.spent_usd.lock() += cost;
                                 crate::metrics::record_inference_cost(cost);
                             }
                             task_state.openai.failures.remove(&key);
-                            task_state.openai.dedup.complete(token, text.clone()).await;
+                            task_dedup.complete(token, encode_answer(response)).await;
                         }
                         Err(err) => {
                             task_state.openai.remember_failure(&key, err);
@@ -607,7 +900,7 @@ async fn complete(
                     result
                 });
                 return match task.await {
-                    Ok(r) => r.map(|text| (text, DedupOutcome::Miss)),
+                    Ok(r) => r.map(|response| (response, DedupOutcome::Miss)),
                     Err(e) => Err(ApiError::new(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "server_error",
@@ -625,6 +918,38 @@ async fn complete(
         "An identical request kept being cancelled. Retry.",
     )
     .retry_after(1))
+}
+
+/// 429 once the spend cap is reached.
+fn check_spend_cap(state: &AppState, kind: &'static str) -> Result<(), ApiError> {
+    if let Some(cap) = state.config.max_spend_usd {
+        let spent = *state.openai.spent_usd.lock();
+        if spent >= cap {
+            return Err(ApiError::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                kind,
+                "insufficient_quota",
+                format!(
+                    "The orchestrator's spend cap of ${cap:.2} is reached (estimated spend ${spent:.4}). \
+                     Restart it or raise --max-spend."
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Set the dedup headers on a response.
+fn add_dedup_headers(resp: &mut Response, outcome: DedupOutcome) {
+    resp.headers_mut().insert(
+        "x-orchestrator-dedup",
+        HeaderValue::from_static(outcome.as_str()),
+    );
+    if let DedupOutcome::Semantic(similarity) = outcome {
+        if let Ok(v) = HeaderValue::from_str(&format!("{similarity:.4}")) {
+            resp.headers_mut().insert("x-orchestrator-similarity", v);
+        }
+    }
 }
 
 // ============================================================================
@@ -652,28 +977,39 @@ async fn chat_completions(state: Arc<AppState>, body: axum::body::Bytes) -> Resu
         ));
     }
 
-    let req: ChatRequest = serde_json::from_slice(&body).map_err(|e| {
+    let req: ChatBody = serde_json::from_slice(&body).map_err(|e| {
         ApiError::invalid(None, format!("Could not parse the request body as a chat completion request: {e}"))
     })?;
     if req.n.is_some_and(|n| n != 1) {
         return Err(ApiError::invalid(Some("n"), "Only n=1 is supported."));
     }
-    let prompt = render_prompt(&req.messages)?;
+    let views = req
+        .messages
+        .iter()
+        .map(ChatMessage::from_value)
+        .collect::<Result<Vec<_>, _>>()?;
+    let prompt = render_prompt(&views)?;
+    validate_settings(&req)?;
+    let target = resolve_target(&state, req.model.as_deref())?;
 
-    if let Some(cap) = state.config.max_spend_usd {
-        let spent = *state.openai.spent_usd.lock();
-        if spent >= cap {
-            return Err(ApiError::new(
-                StatusCode::TOO_MANY_REQUESTS,
-                "insufficient_quota",
-                "insufficient_quota",
-                format!(
-                    "The orchestrator's spend cap of ${cap:.2} is reached (estimated spend ${spent:.4}). \
-                     Restart it or raise --max-spend."
-                ),
-            ));
-        }
+    let mut chat = ChatRequest::new(target.upstream_model.clone(), req.messages);
+    chat.temperature = req.temperature;
+    chat.top_p = req.top_p;
+    chat.max_tokens = req.max_tokens;
+    chat.max_completion_tokens = req.max_completion_tokens;
+    chat.stop = req.stop;
+    chat.seed = req.seed;
+    chat.response_format = req.response_format;
+    chat.tools = req.tools.filter(|t| !t.is_empty());
+    // tool_choice and parallel_tool_calls without tools are dropped: OpenAI
+    // answers 400 for either one alone, and SDK wrappers often send them
+    // with an empty tool list.
+    if chat.tools.is_some() {
+        chat.tool_choice = req.tool_choice;
+        chat.parallel_tool_calls = req.parallel_tool_calls;
     }
+    check_capabilities(&target, &chat)?;
+    check_spend_cap(&state, "insufficient_quota")?;
 
     let id = format!("chatcmpl-{}", Uuid::new_v4().simple());
     let session = req
@@ -684,23 +1020,27 @@ async fn chat_completions(state: Arc<AppState>, body: axum::body::Bytes) -> Resu
     debug!(
         request_id = %id,
         requested_model = req.model.as_deref().unwrap_or(""),
+        route = %target.label,
         "POST /v1/chat/completions"
     );
 
-    let prompt_tokens = prompt_tokens(&state.config.model, &prompt);
-    let (text, outcome) = complete(&state, &id, session, prompt).await?;
-    let completion_tokens = completion_tokens(&state.config.model, &text);
+    let (answer, outcome) = complete(&state, &target, &id, session, prompt.clone(), chat).await?;
+    let (prompt_tokens, completion_tokens) = usage_for(&target.reported_model, &prompt, &answer);
     let usage = serde_json::json!({
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": prompt_tokens + completion_tokens,
     });
     let created = unix_now();
-    let model = state.config.model.clone();
+    let model = target.reported_model.clone();
+    let finish_reason = answer.finish_reason.clone().unwrap_or_else(|| {
+        if answer.tool_calls.is_empty() { "stop".to_string() } else { "tool_calls".to_string() }
+    });
+    let text = answer.text().to_string();
 
     let mut resp = if req.stream.unwrap_or(false) {
         let include_usage = req.stream_options.unwrap_or_default().include_usage;
-        let chunk = |delta: serde_json::Value, finish: Option<&str>| {
+        let chunk = |delta: Value, finish: Option<&str>| {
             serde_json::json!({
                 "id": id,
                 "object": "chat.completion.chunk",
@@ -715,12 +1055,28 @@ async fn chat_completions(state: Arc<AppState>, body: axum::body::Bytes) -> Resu
                 }],
             })
         };
-        let mut events: Vec<serde_json::Value> =
-            vec![chunk(serde_json::json!({"role": "assistant", "content": ""}), None)];
+        let first_content = if answer.content.is_some() { Value::from("") } else { Value::Null };
+        let mut events: Vec<Value> =
+            vec![chunk(serde_json::json!({"role": "assistant", "content": first_content}), None)];
         for piece in text.split_inclusive(' ') {
             events.push(chunk(serde_json::json!({"content": piece}), None));
         }
-        events.push(chunk(serde_json::json!({}), Some("stop")));
+        if !answer.tool_calls.is_empty() {
+            let calls: Vec<Value> = answer
+                .tool_calls
+                .iter()
+                .enumerate()
+                .map(|(i, call)| {
+                    let mut c = call.clone();
+                    if let Value::Object(map) = &mut c {
+                        map.insert("index".into(), Value::from(i));
+                    }
+                    c
+                })
+                .collect();
+            events.push(chunk(serde_json::json!({"tool_calls": calls}), None));
+        }
+        events.push(chunk(serde_json::json!({}), Some(&finish_reason)));
         if include_usage {
             events.push(serde_json::json!({
                 "id": id,
@@ -739,6 +1095,14 @@ async fn chat_completions(state: Arc<AppState>, body: axum::body::Bytes) -> Resu
             .map(Ok::<_, std::convert::Infallible>);
         Sse::new(stream::iter(frames)).into_response()
     } else {
+        let mut message = serde_json::json!({
+            "role": "assistant",
+            "content": answer.content,
+            "refusal": null,
+        });
+        if !answer.tool_calls.is_empty() {
+            message["tool_calls"] = Value::Array(answer.tool_calls.clone());
+        }
         Json(serde_json::json!({
             "id": id,
             "object": "chat.completion",
@@ -747,23 +1111,15 @@ async fn chat_completions(state: Arc<AppState>, body: axum::body::Bytes) -> Resu
             "system_fingerprint": null,
             "choices": [{
                 "index": 0,
-                "message": {"role": "assistant", "content": text, "refusal": null},
+                "message": message,
                 "logprobs": null,
-                "finish_reason": "stop",
+                "finish_reason": finish_reason,
             }],
             "usage": usage,
         }))
         .into_response()
     };
-    resp.headers_mut().insert(
-        "x-orchestrator-dedup",
-        HeaderValue::from_static(outcome.as_str()),
-    );
-    if let DedupOutcome::Semantic(similarity) = outcome {
-        if let Ok(v) = HeaderValue::from_str(&format!("{similarity:.4}")) {
-            resp.headers_mut().insert("x-orchestrator-similarity", v);
-        }
-    }
+    add_dedup_headers(&mut resp, outcome);
     Ok(resp)
 }
 
@@ -812,14 +1168,22 @@ fn anthropic_error(err: &ApiError) -> Response {
 struct MessagesRequest {
     #[serde(default)]
     model: Option<String>,
-    messages: Vec<ChatMessage>,
+    messages: Vec<Value>,
     /// A string or an array of text blocks.
     #[serde(default)]
-    system: Option<serde_json::Value>,
+    system: Option<Value>,
     #[serde(default)]
     stream: Option<bool>,
     #[serde(default)]
     metadata: Option<MessagesMetadata>,
+    #[serde(default)]
+    max_tokens: Option<u32>,
+    #[serde(default)]
+    temperature: Option<f64>,
+    #[serde(default)]
+    top_p: Option<f64>,
+    #[serde(default)]
+    stop_sequences: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -829,7 +1193,9 @@ struct MessagesMetadata {
 }
 
 /// `POST /v1/messages`: the Anthropic Messages API, answered by the pipeline
-/// with the same dedup, circuit breaker and spend cap as the OpenAI endpoint.
+/// with the same routing, dedup, circuit breaker and spend cap as the OpenAI
+/// endpoint. `max_tokens`, `temperature`, `top_p` and `stop_sequences` are
+/// passed through; content is text only.
 pub(super) async fn messages_handler(
     State(state): State<Arc<AppState>>,
     body: axum::body::Bytes,
@@ -852,39 +1218,39 @@ async fn messages(state: Arc<AppState>, body: axum::body::Bytes) -> Result<Respo
     let req: MessagesRequest = serde_json::from_slice(&body).map_err(|e| {
         ApiError::invalid(None, format!("Could not parse the request body as a Messages API request: {e}"))
     })?;
+    let mut views = Vec::with_capacity(req.messages.len() + 1);
+    let mut wire = Vec::with_capacity(req.messages.len() + 1);
+    // The system prompt goes first, as a system turn.
+    if let Some(system) = req.system.clone().filter(|s| !s.is_null()) {
+        views.push(ChatMessage {
+            role: "system".to_string(),
+            content: Some(system.clone()),
+        });
+        wire.push(serde_json::json!({"role": "system", "content": system}));
+    }
     for m in &req.messages {
-        if m.role != "user" && m.role != "assistant" {
+        let view = ChatMessage::from_value(m)?;
+        if view.role != "user" && view.role != "assistant" {
             return Err(ApiError::invalid(
                 Some("messages"),
-                format!("Message role must be 'user' or 'assistant', got '{}'.", m.role),
+                format!("Message role must be 'user' or 'assistant', got '{}'.", view.role),
             ));
         }
+        wire.push(serde_json::json!({"role": view.role, "content": view.content}));
+        views.push(view);
     }
-    // The system prompt goes first, as a system turn.
-    let mut turns = Vec::with_capacity(req.messages.len() + 1);
-    if let Some(system) = req.system.clone().filter(|s| !s.is_null()) {
-        turns.push(ChatMessage {
-            role: "system".to_string(),
-            content: Some(system),
-        });
-    }
-    turns.extend(req.messages);
-    let prompt = render_prompt(&turns)?;
-
-    if let Some(cap) = state.config.max_spend_usd {
-        let spent = *state.openai.spent_usd.lock();
-        if spent >= cap {
-            return Err(ApiError::new(
-                StatusCode::TOO_MANY_REQUESTS,
-                "rate_limit_error",
-                "insufficient_quota",
-                format!(
-                    "The orchestrator's spend cap of ${cap:.2} is reached (estimated spend ${spent:.4}). \
-                     Restart it or raise --max-spend."
-                ),
-            ));
-        }
-    }
+    let prompt = render_prompt(&views)?;
+    let target = resolve_target(&state, req.model.as_deref())?;
+    let mut chat = ChatRequest::new(target.upstream_model.clone(), wire);
+    chat.max_tokens = req.max_tokens;
+    chat.temperature = req.temperature;
+    chat.top_p = req.top_p;
+    chat.stop = req
+        .stop_sequences
+        .clone()
+        .filter(|s| !s.is_empty())
+        .map(|s| Value::from(s.into_iter().map(Value::from).collect::<Vec<_>>()));
+    check_spend_cap(&state, "rate_limit_error")?;
 
     let id = format!("msg_{}", Uuid::new_v4().simple());
     let session = req
@@ -895,16 +1261,21 @@ async fn messages(state: Arc<AppState>, body: axum::body::Bytes) -> Result<Respo
     debug!(
         request_id = %id,
         requested_model = req.model.as_deref().unwrap_or(""),
+        route = %target.label,
         "POST /v1/messages"
     );
 
-    let input_tokens = prompt_tokens(&state.config.model, &prompt);
-    let (text, outcome) = complete(&state, &id, session, prompt).await?;
-    let output_tokens = completion_tokens(&state.config.model, &text);
-    let model = state.config.model.clone();
+    let (answer, outcome) = complete(&state, &target, &id, session, prompt.clone(), chat).await?;
+    let (input_tokens, output_tokens) = usage_for(&target.reported_model, &prompt, &answer);
+    let model = target.reported_model.clone();
+    let text = answer.text().to_string();
+    let stop_reason = match answer.finish_reason.as_deref() {
+        Some("length") => "max_tokens",
+        _ => "end_turn",
+    };
 
     let mut resp = if req.stream.unwrap_or(false) {
-        let mut events: Vec<(&'static str, serde_json::Value)> = vec![
+        let mut events: Vec<(&'static str, Value)> = vec![
             (
                 "message_start",
                 serde_json::json!({
@@ -949,7 +1320,7 @@ async fn messages(state: Arc<AppState>, body: axum::body::Bytes) -> Result<Respo
             "message_delta",
             serde_json::json!({
                 "type": "message_delta",
-                "delta": {"stop_reason": "end_turn", "stop_sequence": null},
+                "delta": {"stop_reason": stop_reason, "stop_sequence": null},
                 "usage": {"output_tokens": output_tokens},
             }),
         ));
@@ -965,43 +1336,48 @@ async fn messages(state: Arc<AppState>, body: axum::body::Bytes) -> Result<Respo
             "role": "assistant",
             "model": model,
             "content": [{"type": "text", "text": text}],
-            "stop_reason": "end_turn",
+            "stop_reason": stop_reason,
             "stop_sequence": null,
             "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
         }))
         .into_response()
     };
-    resp.headers_mut().insert(
-        "x-orchestrator-dedup",
-        HeaderValue::from_static(outcome.as_str()),
-    );
-    if let DedupOutcome::Semantic(similarity) = outcome {
-        if let Ok(v) = HeaderValue::from_str(&format!("{similarity:.4}")) {
-            resp.headers_mut().insert("x-orchestrator-similarity", v);
-        }
-    }
+    add_dedup_headers(&mut resp, outcome);
     Ok(resp)
 }
 
-/// `GET /v1/models`: the one model this orchestrator serves.
+/// `GET /v1/models`: the default route's model (when the default route is
+/// on) and every configured route. A glob route is listed by its pattern
+/// (e.g. `gpt-*`).
 pub(super) async fn models_handler(State(state): State<Arc<AppState>>) -> Response {
-    Json(serde_json::json!({
-        "object": "list",
-        "data": [{
+    let created = state.openai.started_unix;
+    let routes = state.config.model_routes.as_deref();
+    let mut data = Vec::new();
+    if routes.is_none_or(|r| r.has_default_route()) {
+        data.push(serde_json::json!({
             "id": state.config.model,
             "object": "model",
-            "created": state.openai.started_unix,
+            "created": created,
             "owned_by": state.config.provider,
-        }],
-    }))
-    .into_response()
+        }));
+    }
+    for route in routes.into_iter().flat_map(|r| r.routes()) {
+        let id = route.model.clone().filter(|_| !route.is_glob()).unwrap_or_else(|| route.name.clone());
+        data.push(serde_json::json!({
+            "id": id,
+            "object": "model",
+            "created": created,
+            "owned_by": route.provider.as_str(),
+        }));
+    }
+    Json(serde_json::json!({"object": "list", "data": data})).into_response()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn msg(role: &str, content: serde_json::Value) -> ChatMessage {
+    fn msg(role: &str, content: Value) -> ChatMessage {
         ChatMessage {
             role: role.to_string(),
             content: Some(content),
@@ -1024,6 +1400,19 @@ mod tests {
     }
 
     #[test]
+    fn rendered_prompt_matches_the_chat_transcript() {
+        let wire = vec![
+            serde_json::json!({"role": "system", "content": "Be brief."}),
+            serde_json::json!({"role": "user", "content": "Hi"}),
+            serde_json::json!({"role": "assistant", "content": null, "tool_calls": [{"id": "c1"}]}),
+            serde_json::json!({"role": "tool", "tool_call_id": "c1", "content": "42"}),
+        ];
+        let views: Vec<ChatMessage> = wire.iter().map(|v| ChatMessage::from_value(v).expect("view")).collect();
+        let rendered = render_prompt(&views).expect("renders");
+        assert_eq!(rendered, ChatRequest::new("m", wire).transcript());
+    }
+
+    #[test]
     fn image_parts_are_rejected() {
         let p = render_prompt(&[msg(
             "user",
@@ -1038,5 +1427,30 @@ mod tests {
         assert_eq!(ApiError::from_dlq_reason("inference_timeout:120s").status, StatusCode::GATEWAY_TIMEOUT);
         assert_eq!(ApiError::from_dlq_reason("backpressure:rag").status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(ApiError::from_dlq_reason("inference_failure:boom").status, StatusCode::BAD_GATEWAY);
+        let rejected = ApiError::from_dlq_reason("upstream_rejected:404:The model `x` does not exist");
+        assert_eq!(rejected.status, StatusCode::NOT_FOUND);
+        assert_eq!(rejected.code, "upstream_rejected");
+        assert!(rejected.message.contains("does not exist"));
+        assert_eq!(
+            ApiError::from_dlq_reason("upstream_rejected:500:odd").status,
+            StatusCode::BAD_REQUEST,
+            "only client errors keep their status"
+        );
+    }
+
+    #[test]
+    fn settings_are_validated() {
+        let body = |v: Value| -> ChatBody { serde_json::from_value(v).expect("parses") };
+        let base = serde_json::json!({"messages": [{"role": "user", "content": "x"}]});
+        assert!(validate_settings(&body(base.clone())).is_ok());
+        let mut bad = base.clone();
+        bad["stop"] = serde_json::json!([1, 2]);
+        assert!(validate_settings(&body(bad)).is_err());
+        let mut bad = base.clone();
+        bad["response_format"] = serde_json::json!("json");
+        assert!(validate_settings(&body(bad)).is_err());
+        let mut bad = base;
+        bad["temperature"] = serde_json::json!(-1.0);
+        assert!(validate_settings(&body(bad)).is_err());
     }
 }

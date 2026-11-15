@@ -121,6 +121,8 @@ pub mod cost_estimator;
 pub mod admission_control;
 pub mod circuit_breaker;
 pub mod cache;
+pub mod chat;
+pub mod model_routes;
 pub mod cascade;
 pub mod compression;
 pub mod config;
@@ -247,6 +249,8 @@ pub use templates::{
     AbExperiment, ExperimentReport, ExperimentVariant, PromptTemplate, TemplateError,
     TemplateRegistry,
 };
+pub use chat::{ChatRequest, ChatResponse, ChatUsage};
+pub use model_routes::{ModelRoute, ModelRoutes, ModelRoutesConfig, RouteProvider};
 pub use worker::{
     stream_worker, AnthropicWorker, EchoWorker, LlamaCppWorker, LoadBalancedWorker, ModelWorker,
     OpenAiWorker, VllmWorker,
@@ -328,6 +332,21 @@ pub enum OrchestratorError {
     /// A catch-all error variant for errors that do not fit the other categories.
     #[error("{0}")]
     Other(String),
+
+    /// The provider answered with a client error (a 4xx other than 401,
+    /// 403, 408, 409 and 429): a bad parameter, an unknown model, a
+    /// malformed tool definition. Returned by
+    /// [`ModelWorker::chat`] implementations. The
+    /// provider is healthy, so the pipeline does not count this against the
+    /// circuit breaker, and the same request would fail the same way, so it
+    /// is not retried.
+    #[error("upstream rejected the request (HTTP {status}): {message}")]
+    UpstreamRejected {
+        /// HTTP status the provider returned.
+        status: u16,
+        /// The provider's error message.
+        message: String,
+    },
 }
 
 impl OrchestratorError {
@@ -347,6 +366,7 @@ impl OrchestratorError {
             Self::AuthFailed(_)         => "auth_failed",
             Self::InferenceTimeout { .. } => "inference_timeout",
             Self::Other(_)              => "other",
+            Self::UpstreamRejected { .. } => "upstream_rejected",
         }
     }
 

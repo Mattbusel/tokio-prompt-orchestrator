@@ -74,11 +74,28 @@ pub fn load_from_file(path: &Path) -> Result<PipelineConfig, ConfigError> {
 /// # Panics
 ///
 /// This function never panics.
+///
+/// A pipeline TOML may also hold the OpenAI-compatible endpoint's model
+/// routing table (`[[models]]` entries and `default_route`, see
+/// [`crate::model_routes`]). Those keys are checked here and then left out
+/// of the [`PipelineConfig`]; read them with
+/// [`ModelRoutesConfig::from_file`](crate::ModelRoutesConfig::from_file).
 pub fn load_from_str(content: &str, source_name: &str) -> Result<PipelineConfig, ConfigError> {
-    let config: PipelineConfig = toml::from_str(content).map_err(|e| ConfigError::Parse {
+    let parse_err = |e| ConfigError::Parse {
         file: source_name.to_string(),
         source: e,
-    })?;
+    };
+    let config: PipelineConfig = match content.parse::<toml::Table>() {
+        Ok(mut table) if table.contains_key("models") || table.contains_key("default_route") => {
+            crate::ModelRoutesConfig::from_table(&table).map_err(|e| {
+                ConfigError::Validation(format!("{source_name}: {e}"))
+            })?;
+            table.remove("models");
+            table.remove("default_route");
+            toml::Value::Table(table).try_into().map_err(parse_err)?
+        }
+        _ => toml::from_str(content).map_err(parse_err)?,
+    };
 
     validation::validate(&config).map_err(|errors| {
         ConfigError::Validation(
@@ -140,6 +157,26 @@ log_format = "pretty"
     fn test_load_from_str_valid_toml_succeeds() {
         let config = load_from_str(VALID_TOML, "test").expect("test: valid config");
         assert_eq!(config.pipeline.name, "test");
+    }
+
+    #[test]
+    fn test_load_from_str_accepts_a_models_table() {
+        let content = format!(
+            "default_route = false\n{VALID_TOML}\n[[models]]\nname = \"gpt-*\"\nprovider = \"openai\"\n\
+             base_url = \"http://localhost:8000/v1\"\n\n[[models]]\nname = \"claude-*\"\nprovider = \"anthropic\"\n"
+        );
+        let config = load_from_str(&content, "with-models").expect("test: models table accepted");
+        assert_eq!(config.pipeline.name, "test");
+        let routes = crate::ModelRoutesConfig::from_toml_str(&content).expect("test: routes");
+        assert_eq!(routes.models.len(), 2);
+        assert!(!routes.default_route);
+    }
+
+    #[test]
+    fn test_load_from_str_rejects_a_bad_models_entry() {
+        let content = format!("{VALID_TOML}\n[[models]]\nname = \"x\"\nprovider = \"nope\"\n");
+        let err = load_from_str(&content, "bad-models").expect_err("test: bad provider rejected");
+        assert!(err.to_string().contains("unknown provider"), "{err}");
     }
 
     #[test]

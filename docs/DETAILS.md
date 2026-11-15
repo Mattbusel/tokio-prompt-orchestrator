@@ -96,9 +96,63 @@ x-orchestrator-dedup: cached
 {"choices":[{"finish_reason":"stop","index":0,"logprobs":null,"message":{"content":"Summarize this ticket","refusal":null,"role":"assistant"}}],"created":1790804186,"id":"chatcmpl-4d5284a811bd4c0f90bee01018103e1a","model":"echo","object":"chat.completion","system_fingerprint":null,"usage":{"completion_tokens":5,"prompt_tokens":5,"total_tokens":10}}
 ```
 
-It uses the provider and model it was started with (say `--provider openai --model gpt-4o-mini`), whatever the request names. Errors use OpenAI's format: 503 while the breaker is open (with `x-should-retry: false`, so the SDK won't retry), 429 at the spend cap. Details: [docs/REFERENCE.md](REFERENCE.md#openai-compatible-api).
+Errors use OpenAI's format: 503 while the breaker is open (with `x-should-retry: false`, so the SDK won't retry), 429 at the spend cap. Details: [docs/REFERENCE.md](REFERENCE.md#openai-compatible-api).
 
-OpenAI token counts come from the real tokenizer, so they match your bill. Other models are estimated at about 4 characters per token.
+Token usage is the provider's own count when it reports one. Otherwise OpenAI counts come from the real tokenizer, so they match your bill, and other models are estimated at about 4 characters per token.
+
+### Every request is sent as asked
+
+Since 2.2.0 the endpoint passes each request's settings to the provider instead of one set per process: the messages as written (assistant `tool_calls` and `tool` results included), `temperature`, `top_p`, `max_tokens`, `max_completion_tokens`, `stop`, `seed`, `response_format`, `tools`, `tool_choice` and `parallel_tool_calls`. Tool calls come back as `tool_calls` with `finish_reason: "tool_calls"`, streamed or not. `n` must be 1. Fields outside that list are accepted and not forwarded.
+
+Nothing is capped by the orchestrator. Without `max_tokens` the model's own limit applies; Anthropic, which requires one, gets 4096 (or the route's `max_tokens`). Without `temperature` the provider's default applies (1.0 for OpenAI and Anthropic). Before 2.2.0, `--provider openai` sampled every request at 0.7 whatever the client sent; send `temperature: 0.7` to keep that. `tool_choice` and `parallel_tool_calls` are only sent with at least one tool, since providers refuse them without tools (`tools: []` counts as no tools). If the provider rejects a parameter (a 4xx such as an unknown model or a temperature out of range), you get its status and message back as `upstream_rejected`, and it does not count against the circuit breaker.
+
+With a single `--provider`/`--model` (no routing table) the request's settings are honoured and the configured model is still the one called and reported, whatever `model` the request names, as before.
+
+### Route by model name
+
+`--models <file>` loads a static `[[models]]` table that sends each request to the upstream serving its `model`. Each entry is a name or a glob (`*` any run of characters, `?` one character; case-insensitive), so one orchestrator can serve OpenAI, Anthropic and a local llama.cpp at once. Each route has its own queue, circuit breaker, timeout and retries, so one failing provider does not take the others down.
+
+```toml
+# models.toml (the same tables also work inside a pipeline TOML)
+default_route = true          # unmatched models go to --provider/--model (the default)
+
+[[models]]
+name = "gpt-*"
+provider = "openai"           # any OpenAI-compatible server; key from OPENAI_API_KEY
+
+[[models]]
+name = "claude-*"
+provider = "anthropic"        # key from ANTHROPIC_API_KEY
+max_tokens = 8192             # used when the client sends no max_tokens (default 4096)
+
+[[models]]
+name = "llama-*"
+provider = "llama_cpp"
+base_url = "http://127.0.0.1:8081"
+
+[[models]]
+name = "fast"                 # an alias: clients ask for "fast"
+provider = "openai"
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+model = "meta-llama/llama-3.1-8b-instruct"
+```
+
+```sh
+orchestrator --provider openai --model gpt-4o-mini --models models.toml
+```
+
+Entry fields: `name` and `provider` (`openai`, `anthropic`, `llama_cpp`, `echo`) are required; `base_url`, `api_key_env`, `model` (send this name upstream instead of the client's), `max_tokens` and `timeout_secs` are optional. A route's per-call timeout is its `timeout_secs`, else `--timeout`, else 60 s for an Anthropic route and 30 s for the others. The server waits for an answer long enough for the slowest route to use every `--retries` attempt, so a long `timeout_secs` is not cut off with a 504. Keep globs narrow: `o*` would also send `olmo-*` or `openchat-*` to OpenAI with your OpenAI key, so the example lists `o1*`, `o3*` and `o4*`. An `openai` route with a `base_url` and no `api_key_env` sends no key, for local servers such as vLLM or LM Studio. Exact names are tried before globs, and globs in file order; a glob route sends the client's model name upstream.
+
+A model that matches no route (or a request with no model) goes to the default route: the `--provider`/`--model` the orchestrator was started with, so existing setups behave as before. Set `default_route = false` and it is answered `400 model_not_found` in OpenAI's shape, listing the configured models. `GET /v1/models` lists the default model (when the default route is on) and every route, globs by their pattern. Routing applies to `POST /v1/messages` too. An Anthropic route answers 400 for a `response_format` other than `text`, since the Messages API has none; `seed` is not sent to Anthropic.
+
+In Rust: `ModelRoutesConfig::from_file` reads the table, `ModelRoutes::spawn` starts one pipeline per route, and `ServerConfig::model_routes` hands it to the server. Your own workers can implement `ModelWorker::chat` to receive the structured `ChatRequest`; workers that do not get the messages flattened into one prompt and ignore the settings.
+
+### What dedup treats as the same request
+
+The dedup key is a SHA-256 over a canonical encoding (object keys sorted) of the route, the model, the messages, the tools and tool choice, every sampling setting and the response format. Two requests that differ in any of them never share an answer; the same request with its fields in another order does.
+
+Identical requests always share one upstream call while it is in flight. A completed answer is reused for the dedup window (`ORCHESTRATOR_DEDUP_SECS`, default 300 s) unless the request has `temperature > 0` and no `seed`: the client asked for a fresh sample, so those answers are shared only in flight and never cached. Send `temperature: 0`, leave it unset, or set a `seed` to get cached answers. A request with no `temperature` is cached even though the provider samples it at its default temperature (1.0 for OpenAI), as every answer was cached before 2.2.0; send an explicit temperature above 0 for fresh samples. Semantic dedup (`--semantic-dedup`) only compares requests whose settings are identical.
 
 ## Drop-in Anthropic proxy
 
@@ -124,7 +178,7 @@ Summarize this ticket end_turn
 Now stream it
 ```
 
-Supports text, system prompts and streaming. Image and tool blocks get an `invalid_request_error`. The key goes in `x-api-key` or `Authorization: Bearer`.
+Supports text, system prompts and streaming, and passes `max_tokens`, `temperature`, `top_p` and `stop_sequences` through. Image and tool blocks get an `invalid_request_error`. The key goes in `x-api-key` or `Authorization: Bearer`.
 
 ## Server flags
 
@@ -138,6 +192,7 @@ The main flags (`orchestrator --help` lists all):
 | `--max-spend <dollars>` | none | Spend cap. Returns 429 once hit. |
 | `--semantic-dedup [0.5-1.0]` | off | Reuses answers to reworded questions (needs `fastembed`). |
 | `--docs <folder>` | off | Answers from your own Markdown and text files (needs `tantivy`). |
+| `--models <file>` | none | Routes OpenAI-endpoint requests by `model` with a `[[models]]` table (see [Route by model name](#route-by-model-name)). |
 
 While the breaker is open you get `503 circuit_open`, `x-should-retry: false`, and a `Retry-After` for when it tries again. The OpenAI and Anthropic SDKs read `x-should-retry`, so they fail at once.
 
