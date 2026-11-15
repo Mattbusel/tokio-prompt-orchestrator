@@ -531,6 +531,47 @@ impl Deduplicator {
         debug!(key = token.key, token_id = %token.id, "request failed, removed from dedup");
     }
 
+    /// Mark a request as failed and hand `result` to the tasks waiting on
+    /// it, without caching it.
+    ///
+    /// Like [`Deduplicator::fail`], this releases the key, so the next
+    /// [`Deduplicator::check_and_register`] for it gets
+    /// [`DeduplicationResult::New`] and a failure is never served from the
+    /// cache. Unlike `fail`, tasks already blocked in
+    /// [`Deduplicator::wait_for_result`] receive `result` instead of the
+    /// cancellation sentinel. Use it when the failure would be the same for
+    /// every identical caller (a rejected request, an exhausted retry
+    /// budget), so the waiters report it instead of all sending the request
+    /// again at once. Encode the failure so waiters can tell it apart from a
+    /// successful result.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use tokio_prompt_orchestrator::enhanced::{Deduplicator, DeduplicationResult};
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let dedup = Deduplicator::new(Duration::from_secs(60));
+    /// if let DeduplicationResult::New(token) = dedup.check_and_register("key").await {
+    ///     dedup.fail_with(token, "error: 400 bad request".to_string()).await;
+    /// }
+    /// // Nothing was cached: the next caller sends its own request.
+    /// assert!(matches!(
+    ///     dedup.check_and_register("key").await,
+    ///     DeduplicationResult::New(_)
+    /// ));
+    /// # }
+    /// ```
+    pub async fn fail_with(&self, token: DeduplicationToken, result: String) {
+        token.completed.store(true, Ordering::Release);
+        // Send errors only mean nobody is waiting.
+        let _ = token.waiter_tx.send(result);
+        remove_if_owned_by(&self.requests, &token.key, &token.id);
+        debug!(key = token.key, token_id = %token.id, "request failed, waiters told, removed from dedup");
+    }
+
     /// Return a snapshot of current deduplication statistics.
     ///
     /// The counts are computed by iterating the cache in O(n). Use sparingly

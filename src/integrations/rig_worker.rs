@@ -32,8 +32,8 @@ use crate::OrchestratorError;
 /// # }
 /// ```
 ///
-/// Requires the `rig` feature, which needs Rust 1.97.1 or newer (rig-core's
-/// minimum).
+/// Requires the `rig` feature (rig-core 0.43 to 0.46), which needs Rust 1.95
+/// or newer (rig-core's minimum; rig-core 0.45 and 0.46 need 1.97.1).
 #[derive(Clone, Debug)]
 pub struct RigWorker {
     model: DynModel<Completion>,

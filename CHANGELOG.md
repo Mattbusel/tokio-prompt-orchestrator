@@ -7,23 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-11-14
+
+### Fixed
+
+- Review fixes on top of 2.1.0 for the rig transport and the answer-length change (tests added).
+
 ## [2.1.0] - 2026-11-14
 
 ### Added
 
-- `integrations::OrchestratedTransport` (feature `rig`): a rig-core 0.46 `Transport` that wraps the
-  transport of any rig model with the orchestrator's deduplication, circuit breaker and retry.
-  Swap it in with `Model::new(model.wire, OrchestratedTransport::new(model.transport))`. The rig
-  request is forwarded exactly as rig encoded it, so messages, tools, `temperature`, `max_tokens`
-  and structured output all reach the provider (unlike `RigWorker`, which only passes the prompt).
-  Identical unary requests in flight share one upstream call (keyed on a SHA-256 of method, URI,
-  credential headers and body); streams are never deduplicated. Retryable failures (connection
-  errors, 5xx, 429, truncated replies) are retried and counted by the breaker; a 400 or 401 is
-  neither. Defaults: in-flight dedup only, breaker opens after 5 failures and probes after 30 s,
-  3 attempts with exponential backoff from 200 ms; `OrchestratedTransport::builder` changes them.
-  Tested in `tests/integrations_tests.rs` against a counting mock transport (8 concurrent
-  identical calls, 1 upstream send; breaker opens after K failures; retries stop at the maximum)
-  and against rig's real HTTP client on a wiremock server. Example: `examples/rig_transport.rs`.
+- `integrations::OrchestratedTransport` (new feature `rig-transport`): a rig `driver::Transport`
+  for rig-core 0.45 and 0.46 that wraps the transport of any rig model with the orchestrator's
+  deduplication, circuit breaker and retry. Swap it in with
+  `Model::new(model.wire, OrchestratedTransport::new(model.transport))`. The rig request is
+  forwarded exactly as rig encoded it, so messages, tools, `temperature`, `max_tokens` and
+  structured output all reach the provider (unlike `RigWorker`, which only passes the prompt).
+  - Identical unary requests in flight share one upstream call (keyed on a SHA-256 of method,
+    URI, credential headers and body); streams are never deduplicated. Waiting callers also share
+    the first caller's failure (a 400, a 401, retries used up, the breaker open) as
+    `ProviderError::Relayed`, which keeps the status, code, retry verdict and provider reply,
+    instead of all sending the request again at once. Failures are never cached.
+  - Retryable failures (connection errors, 5xx, 429, truncated replies) are retried, and every
+    failed attempt counts against the breaker; a 400 or 401 is neither retried nor counted.
+  - Defaults: in-flight dedup only; the breaker opens after 5 consecutive failed attempts (with
+    3 attempts per request, two fully failed requests are enough) and probes again after 30 s;
+    3 attempts with exponential backoff from 200 ms. `OrchestratedTransport::builder` changes them.
+  - What rig's observation does not see: a deduplicated caller's reply is rebuilt from the first
+    caller's frames and document and has no HTTP status, headers, provider request id or
+    observation slot (rig gives a wrapping transport no way to read them); a reply that fails or
+    stalls before it opens is not recorded on the observation; neither is a send refused by the
+    open breaker. Details on the type's rustdoc.
+  - Tested in `tests/integrations_tests.rs` against a counting mock transport (8 concurrent
+    identical calls, 1 upstream send; 6 concurrent identical rejected calls, 1 send; 5 concurrent
+    identical failing calls, one retry budget; breaker opens after K failures; retries stop at the
+    maximum) and against rig's real HTTP client on a wiremock server, on rig-core 0.45 and 0.46.
+    Example: `examples/rig_transport.rs`.
+  - Needs Rust 1.97.1 (rig-core 0.45's minimum). With an older rig-core in your lockfile the
+    feature does not build: run `cargo update -p rig-core`.
+- `Deduplicator::fail_with(token, result)`: release a failed request and hand `result` to the tasks
+  waiting on it, without caching it.
 - `OpenAiWorker::with_key(model, key)` and `AnthropicWorker::with_key(model, key)` take the API key
   from the caller, so a key from a vault or a per-tenant config no longer needs
   `std::env::set_var` (unsafe in edition 2024 and racy in a multi-threaded runtime).
@@ -35,9 +58,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- The `rig` feature now targets rig-core 0.46 (`>=0.46, <0.47`), the current release. rig 0.43
-  and 0.44 are no longer accepted. rig-core 0.46 needs Rust 1.97.1, so the `rig` feature does too;
-  the rest of the crate keeps the 1.88 MSRV.
+- The `rig` feature (`RigWorker`) accepts rig-core 0.43 to 0.46 (`>=0.43, <0.47`, was
+  `>=0.43, <0.45`). This only widens the range: a project on rig-core 0.43 or 0.44 keeps its
+  version and its Rust 1.95 floor. A fresh resolve now picks rig-core 0.46, which needs
+  Rust 1.97.1 (with Cargo's MSRV-aware resolver, the default under resolver 3, an older
+  toolchain gets 0.44 instead). Tested:
+  `integrations_tests` passes for `RigWorker` on 0.43, 0.44, 0.45 and 0.46.
 
 ### Fixed
 
@@ -46,6 +72,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the model's own limit applies. `LlamaCppWorker` had the same problem with `n_predict: 256`;
   it now omits `n_predict` unless set. The setters keep their signatures. `AnthropicWorker` still
   sends 1024 by default because the Messages API requires a value.
+
+  The old cap also bounded cost and time, so check these if you relied on it:
+  - Call `.with_max_tokens(256)` to keep the old behaviour.
+  - Without a cap, one OpenAI request can cost up to the model's full output limit. The
+    `orchestrator` proxy's `--max-spend` is checked after each call, so it stops the next request,
+    not the expensive one.
+  - The llama.cpp server's own default for `n_predict` is -1 (generate until end of text or a
+    full context). A long or runaway generation that used to stop at 256 tokens can now run into
+    the worker's 30 s HTTP timeout (`with_timeout` changes it) and fail instead of returning a
+    short answer.
 
 ## [2.0.6] - 2026-11-14
 

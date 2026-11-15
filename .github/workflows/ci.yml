@@ -102,7 +102,7 @@ jobs:
       - name: Integration tests
         run: cargo test --tests
       - name: rig integration tests (RigWorker, OrchestratedTransport)
-        run: cargo test --features rig --test integrations_tests
+        run: cargo test --features rig,rig-transport --test integrations_tests
       - name: Doctests
         run: cargo test --doc
       - name: Examples build

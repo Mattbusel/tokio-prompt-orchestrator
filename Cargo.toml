@@ -1,6 +1,6 @@
 [package]
 name = "tokio-prompt-orchestrator"
-version = "2.1.0"
+version = "2.1.1"
 edition = "2021"
 rust-version = "1.88"
 default-run = "orchestrator"
@@ -38,7 +38,7 @@ pkg-fmt = "zip"
 bin-dir = "orchestrator-v{ version }-x86_64-pc-windows-msvc/{ bin }{ binary-ext }"
 
 [package.metadata.docs.rs]
-features = ["full", "tui", "mcp", "self-improving", "distributed", "schema", "core-pinning", "tower", "async-openai", "genai", "rig", "tantivy"]
+features = ["full", "tui", "mcp", "self-improving", "distributed", "schema", "core-pinning", "tower", "async-openai", "genai", "rig", "rig-transport", "tantivy"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
@@ -128,7 +128,13 @@ async-openai = { version = "0.42", default-features = false, features = ["rustls
 genai = { version = "0.6", default-features = false, features = ["rustls-tls"], optional = true }
 tantivy = { version = "0.26", default-features = false, features = ["stopwords", "stemmer"], optional = true }
 fastembed = { version = "7.1", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls"], optional = true }
-rig-core = { version = ">=0.46, <0.47", default-features = false, features = ["reqwest", "rustls"], optional = true }
+# One dependency for both rig features. `rig` (RigWorker) accepts 0.43 to
+# 0.46; `rig-transport` (OrchestratedTransport) uses the `driver::Transport`
+# API of 0.45 and 0.46 and does not build against an older rig-core in the
+# lockfile. A second, renamed rig-core entry pinned to >=0.45 is not
+# possible: Cargo rejects a crate that depends on the same rig-core version
+# under two names, which would break `--all-features` and docs.rs.
+rig-core = { version = ">=0.43, <0.47", default-features = false, features = ["reqwest", "rustls"], optional = true }
 
 # MCP server
 rmcp = { version = "0.16", optional = true, features = ["server", "macros", "transport-io"] }
@@ -161,9 +167,13 @@ hot-reload = ["notify"]
 # Each adds one worker type under `integrations`. See src/integrations/mod.rs.
 async-openai = ["dep:async-openai"]
 genai = ["dep:genai"]
-# rig: RigWorker and OrchestratedTransport for rig-core 0.46. Needs Rust
-# 1.97.1 or newer (rig-core's minimum).
+# rig: RigWorker for rig-core 0.43 to 0.46. Needs Rust 1.95 or newer
+# (rig-core's minimum; 0.45 and 0.46 need 1.97.1).
 rig = ["dep:rig-core"]
+# rig-transport: OrchestratedTransport, a rig `driver::Transport`. Needs
+# rig-core 0.45 or 0.46 (`cargo update -p rig-core` if your lockfile holds an
+# older one) and Rust 1.97.1 or newer (their minimum).
+rig-transport = ["dep:rig-core"]
 tower = ["dep:tower"]
 # fastembed: local embedding models (BGE, MiniLM, ...) via ONNX Runtime, for
 # semantic dedup without an API. Downloads the model once on first use.
@@ -285,7 +295,7 @@ required-features = ["web-api"]
 
 [[example]]
 name = "rig_transport"
-required-features = ["rig"]
+required-features = ["rig-transport"]
 
 [[bin]]
 name = "orchestrator"

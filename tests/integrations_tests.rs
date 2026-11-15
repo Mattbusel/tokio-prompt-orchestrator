@@ -5,7 +5,12 @@
 //! reply, a streamed reply, and the error mapping the pipeline depends on
 //! (401 must not be retried, 429 must back off).
 
-#![cfg(any(feature = "async-openai", feature = "genai", feature = "rig"))]
+#![cfg(any(
+    feature = "async-openai",
+    feature = "genai",
+    feature = "rig",
+    feature = "rig-transport"
+))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use futures::StreamExt;
@@ -291,9 +296,9 @@ async fn dedup_in_front_of_an_integration_saves_the_second_call() {
     // MockServer verifies `.expect(1)` on drop: the second answer cost nothing.
 }
 
-/// `OrchestratedTransport` under a rig 0.46 model: the rig request goes
+/// `OrchestratedTransport` under a rig 0.45/0.46 model: the rig request goes
 /// through unchanged, and dedup, the breaker and retries act on the sends.
-#[cfg(feature = "rig")]
+#[cfg(feature = "rig-transport")]
 mod rig_transport {
     use super::*;
     use rig_core::completion::CompletionRequest;
@@ -335,6 +340,10 @@ mod rig_transport {
                 delay: Duration::ZERO,
                 ..Self::replying("")
             }
+        }
+
+        fn with_delay(self, delay: Duration) -> Self {
+            Self { delay, ..self }
         }
 
         fn calls(&self) -> usize {
@@ -507,6 +516,62 @@ mod rig_transport {
             transport.breaker().is_closed_sync(),
             "a 400 says nothing about provider health"
         );
+    }
+
+    #[tokio::test]
+    async fn concurrent_identical_requests_share_a_rejection() {
+        // A 400 would be the same for every caller: they share the first
+        // caller's error instead of all sending the request again.
+        let mock = MockTransport::failing(400).with_delay(Duration::from_millis(50));
+        let model = model(OrchestratedTransport::new(mock.clone()));
+
+        let calls = (0..6).map(|_| model.call(CompletionRequest::new("Bad request?")));
+        for reply in futures::future::join_all(calls).await {
+            let err = reply.unwrap_err();
+            assert_eq!(
+                err.provider_response_status(),
+                Some(StatusCode::BAD_REQUEST),
+                "{err}"
+            );
+            assert!(!err.is_retryable());
+            assert!(err.to_string().contains("upstream says no"), "{err}");
+        }
+        assert_eq!(mock.calls(), 1, "6 identical rejected requests, 1 send");
+
+        // The failure is not cached: a later identical request is sent.
+        model
+            .call(CompletionRequest::new("Bad request?"))
+            .await
+            .unwrap_err();
+        assert_eq!(mock.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn concurrent_identical_requests_share_one_retry_budget() {
+        // Waiters do not each run their own retry sequence after the first
+        // caller used up its attempts.
+        let mock = MockTransport::failing(503).with_delay(Duration::from_millis(20));
+        let model = model(
+            OrchestratedTransport::builder(mock.clone())
+                .retry(quick_retry(3))
+                .breaker(Arc::new(CircuitBreaker::new(
+                    100,
+                    0.8,
+                    Duration::from_secs(60),
+                )))
+                .build(),
+        );
+        let calls = (0..5).map(|_| model.call(CompletionRequest::new("hi")));
+        for reply in futures::future::join_all(calls).await {
+            let err = reply.unwrap_err();
+            assert_eq!(
+                err.provider_response_status(),
+                Some(StatusCode::SERVICE_UNAVAILABLE),
+                "{err}"
+            );
+            assert!(err.is_retryable(), "the retry verdict is kept: {err}");
+        }
+        assert_eq!(mock.calls(), 3, "one request's 3 attempts, not 5 x 3");
     }
 
     /// The same through rig's real HTTP client against a mock server.

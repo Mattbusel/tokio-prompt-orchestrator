@@ -12,9 +12,9 @@ use std::time::Duration;
 use futures::StreamExt;
 use rig_core::driver::{Exchange, Opened, Opening, Transport};
 use rig_core::http_client::framing::WireFrame;
-use rig_core::http_client::{HeaderMap, Request, StatusCode};
+use rig_core::http_client::{HeaderMap, Request};
 use rig_core::wire::{Body, Encoded, Mode, Wire};
-use rig_core::ProviderError;
+use rig_core::{ErrorReport, ProviderError};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -29,7 +29,7 @@ const CREDENTIAL_HEADERS: [&str; 4] = ["authorization", "x-api-key", "api-key", 
 /// A rig [`Transport`] that puts deduplication, a circuit breaker and
 /// retries in front of any other transport.
 ///
-/// Rig 0.46 splits a model into a wire (what to send, how to read the reply)
+/// Rig 0.45 and later split a model into a wire (what to send, how to read the reply)
 /// and a transport (how the bytes travel). [`OrchestratedTransport`] wraps
 /// the transport, so every rig feature keeps working: messages, tools,
 /// temperature, `max_tokens`, structured output and streaming all reach the
@@ -40,14 +40,44 @@ const CREDENTIAL_HEADERS: [&str; 4] = ["authorization", "x-api-key", "api-key", 
 ///   share one upstream call. The key is a SHA-256 of the method, URI,
 ///   credential headers and serialized request body, so two different
 ///   prompts, models or API keys never share an answer. Streaming requests
-///   are never deduplicated.
-/// * **Circuit breaker.** Retryable failures (connection errors, 5xx, 429,
-///   truncated replies) count against a [`CircuitBreaker`]. While
-///   it is open, sends fail at once with [`ProviderError::Provider`] instead
-///   of waiting on a provider that is down.
+///   are never deduplicated. The first caller's outcome is shared either
+///   way: if it fails (a 400, a rejected key, retries used up, the breaker
+///   open), the callers waiting on it get the same error, as
+///   [`ProviderError::Relayed`] with the original's status, code, retry
+///   verdict and provider reply, instead of all sending the request again
+///   at once. Only when the first caller is dropped before it finishes do
+///   the waiters send their own.
+/// * **Circuit breaker.** Every failed *attempt* with a retryable error
+///   (connection errors, 5xx, 429, truncated replies) counts against a
+///   [`CircuitBreaker`], so retries count too: with the defaults, two user
+///   requests that each fail all 3 attempts open it. While it is open, sends
+///   fail at once with [`ProviderError::Provider`] instead of waiting on a
+///   provider that is down. Non-retryable failures (a 400, a 401) are not
+///   counted: the provider answered.
 /// * **Retry.** Retryable failures are retried under a [`RetryPolicy`].
 ///   A streamed reply is retried only until its first frame arrives; after
 ///   that the caller already holds part of the answer.
+///
+/// # What rig's observation sees
+///
+/// The first caller's reply is the inner transport's own, passed through
+/// with its HTTP status, headers, request id, route and observation slot.
+/// Three things are lost, because rig gives a wrapping transport no way
+/// to read or set them:
+///
+/// * A deduplicated caller's reply is rebuilt from the first caller's
+///   frames and JSON document. It has the request path as its route, but no
+///   HTTP status, headers or provider request id, and no observation slot,
+///   so `call_observed` records no attempt for it (no request was sent).
+///   Without a slot rig never consults the wire's `analysis_only`
+///   predicate, which only exempts frames from observation's frame count;
+///   decoding is the same, so every wire decodes the reply as it would the
+///   original.
+/// * The opening of a reply does not carry the inner transport's slot. Rig
+///   uses that slot only when a reply fails or stalls before it opens; such
+///   a failure is still returned, but not recorded on the observation.
+/// * A send refused by the open breaker never reaches the inner transport,
+///   so it is not observed either.
 ///
 /// ```no_run
 /// use rig_core::completion::CompletionRequest;
@@ -89,7 +119,9 @@ const CREDENTIAL_HEADERS: [&str; 4] = ["authorization", "x-api-key", "api-key", 
 /// # }
 /// ```
 ///
-/// Requires the `rig` feature. This is not the same thing as
+/// Requires the `rig-transport` feature and rig-core 0.45 or 0.46 (run
+/// `cargo update -p rig-core` if your lockfile holds an older one). This is
+/// not the same thing as
 /// [`RigWorker`](super::RigWorker): the worker turns a rig model into a
 /// prompt-in, text-out [`ModelWorker`](crate::ModelWorker) for the pipeline,
 /// which drops everything but the prompt. The transport keeps the whole rig
@@ -130,8 +162,9 @@ impl<T> OrchestratedTransport<T> {
     ///
     /// * deduplication of identical unary requests while they are in flight
     ///   (no reuse of finished answers),
-    /// * a circuit breaker that opens after 5 consecutive retryable failures
-    ///   and probes again after 30 seconds,
+    /// * a circuit breaker that opens after 5 consecutive failed attempts
+    ///   (each retry is an attempt, so two requests that fail all their
+    ///   attempts are enough) and probes again after 30 seconds,
     /// * up to 3 attempts per request, with exponential backoff from 200 ms.
     pub fn new(inner: T) -> Self {
         Self::builder(inner).build()
@@ -256,19 +289,24 @@ impl<T> OrchestratedTransport<T> {
             return self.resilient::<W>(payload, exchange).await.into_result();
         };
 
+        let route = payload.request.uri().path().to_owned();
         match dedup.check_and_register(&key).await {
             DeduplicationResult::New(token) => {
                 let reply = self.resilient::<W>(payload, exchange).await;
-                match &reply.frames {
-                    Some(frames) => dedup.complete(token, SharedFrame::encode(frames)).await,
-                    None => dedup.fail(token).await,
+                match (&reply.frames, &reply.error) {
+                    (Some(frames), _) => dedup.complete(token, Shared::frames(frames)).await,
+                    // Waiters get the same failure instead of all sending
+                    // the request again; nothing is cached.
+                    (None, Some(error)) => dedup.fail_with(token, Shared::error(error)).await,
+                    (None, None) => dedup.fail(token).await,
                 }
                 reply.into_result()
             }
-            DeduplicationResult::Cached(shared) => shared_reply(&shared),
+            DeduplicationResult::Cached(shared) => shared_reply(&shared, route),
             DeduplicationResult::InProgress => match dedup.wait_for_result(&key).await {
-                Some(shared) if !is_cancelled_result(&shared) => shared_reply(&shared),
-                // The first caller failed or gave up: send our own.
+                Some(shared) if !is_cancelled_result(&shared) => shared_reply(&shared, route),
+                // The first caller was dropped before it finished (or its
+                // entry was already gone): send our own.
                 _ => self.resilient::<W>(payload, exchange).await.into_result(),
             },
         }
@@ -337,6 +375,7 @@ impl<T> OrchestratedTransport<T> {
                 ));
                 Err(Failure {
                     retryable: false,
+                    error: error.clone(),
                     outcome: Outcome::Refused(error),
                 })
             }
@@ -364,6 +403,7 @@ async fn unary(opened: Opened<WireFrame>) -> Result<Reply, Failure> {
             Ok(Reply {
                 outcome: Outcome::Opened(opened),
                 frames: Some(frames),
+                error: None,
             })
         }
     }
@@ -383,6 +423,7 @@ async fn streaming(opened: Opened<WireFrame>) -> Result<Reply, Failure> {
     Ok(Reply {
         outcome: Outcome::Opened(opened),
         frames: None,
+        error: None,
     })
 }
 
@@ -407,13 +448,18 @@ fn classify(
     outcome: impl FnOnce(ProviderError) -> Outcome,
 ) -> Result<Reply, Failure> {
     let retryable = error.is_retryable();
-    let outcome = outcome(error);
+    let outcome = outcome(error.clone());
     if retryable {
-        Err(Failure { retryable, outcome })
+        Err(Failure {
+            retryable,
+            error,
+            outcome,
+        })
     } else {
         Ok(Reply {
             outcome,
             frames: None,
+            error: Some(error),
         })
     }
 }
@@ -429,6 +475,8 @@ struct Reply {
     outcome: Outcome,
     /// The frames of a successful unary reply, to share with waiters.
     frames: Option<Vec<WireFrame>>,
+    /// The error a failed reply ends with, to share with waiters.
+    error: Option<ProviderError>,
 }
 
 impl Reply {
@@ -443,6 +491,7 @@ impl Reply {
 /// A failed attempt. Holds what to hand back if it is the last one.
 struct Failure {
     retryable: bool,
+    error: ProviderError,
     outcome: Outcome,
 }
 
@@ -451,16 +500,14 @@ impl Failure {
         Reply {
             outcome: self.outcome,
             frames: None,
+            error: Some(self.error),
         }
     }
 }
 
 impl fmt::Display for Failure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.outcome {
-            Outcome::Refused(error) => write!(f, "{error}"),
-            Outcome::Opened(_) => f.write_str("upstream reply failed"),
-        }
+        write!(f, "{}", self.error)
     }
 }
 
@@ -544,6 +591,33 @@ fn dedup_key(payload: &Encoded) -> Option<String> {
     Some(format!("rig-transport:{}", hex::encode(hash.finalize())))
 }
 
+/// What the deduplicator hands the callers waiting on a request: the first
+/// caller's reply frames, or the error its request ended with.
+#[derive(Serialize, Deserialize)]
+enum Shared {
+    #[serde(rename = "ok")]
+    Frames(Vec<SharedFrame>),
+    #[serde(rename = "err")]
+    Error(Box<ErrorReport>),
+}
+
+impl Shared {
+    fn frames(frames: &[WireFrame]) -> String {
+        let frames = frames
+            .iter()
+            .map(|frame| match frame {
+                WireFrame::Text(text) => SharedFrame::Text(text.clone()),
+                WireFrame::Bytes(bytes) => SharedFrame::Bytes(hex::encode(bytes)),
+            })
+            .collect();
+        serde_json::to_string(&Shared::Frames(frames)).unwrap_or_default()
+    }
+
+    fn error(error: &ProviderError) -> String {
+        serde_json::to_string(&Shared::Error(Box::new(error.report()))).unwrap_or_default()
+    }
+}
+
 /// A frame as the deduplicator stores it.
 #[derive(Serialize, Deserialize)]
 enum SharedFrame {
@@ -554,42 +628,36 @@ enum SharedFrame {
 }
 
 impl SharedFrame {
-    fn encode(frames: &[WireFrame]) -> String {
-        let shared: Vec<SharedFrame> = frames
-            .iter()
-            .map(|frame| match frame {
-                WireFrame::Text(text) => SharedFrame::Text(text.clone()),
-                WireFrame::Bytes(bytes) => SharedFrame::Bytes(hex::encode(bytes)),
-            })
-            .collect();
-        serde_json::to_string(&shared).unwrap_or_default()
-    }
-
-    fn decode(shared: &str) -> Result<Vec<WireFrame>, ProviderError> {
-        let frames: Vec<SharedFrame> = serde_json::from_str(shared)
-            .map_err(|e| ProviderError::Provider(format!("shared reply unreadable: {e}")))?;
-        frames
-            .into_iter()
-            .map(|frame| match frame {
-                SharedFrame::Text(text) => Ok(WireFrame::Text(text)),
-                SharedFrame::Bytes(hex) => hex::decode(hex)
-                    .map(WireFrame::Bytes)
-                    .map_err(|e| ProviderError::Provider(format!("shared reply unreadable: {e}"))),
-            })
-            .collect()
+    fn decode(self) -> Result<WireFrame, ProviderError> {
+        match self {
+            SharedFrame::Text(text) => Ok(WireFrame::Text(text)),
+            SharedFrame::Bytes(hex) => hex::decode(hex)
+                .map(WireFrame::Bytes)
+                .map_err(|e| ProviderError::Provider(format!("shared reply unreadable: {e}"))),
+        }
     }
 }
 
-/// The reply a waiting caller gets: the first caller's frames. A whole-body
-/// reply also carries its JSON document, as the HTTP transport would set it.
-fn shared_reply(shared: &str) -> Result<Opened<WireFrame>, ProviderError> {
-    let frames = SharedFrame::decode(shared)?;
+/// The reply a waiting caller gets: the first caller's frames, under this
+/// caller's request path, or its error. A whole-body reply also carries its
+/// JSON document, as the HTTP transport would set it. The first caller's
+/// HTTP status, headers and request id are not available to a wrapping
+/// transport, so they are left unset rather than made up.
+fn shared_reply(shared: &str, route: String) -> Result<Opened<WireFrame>, ProviderError> {
+    let shared: Shared = serde_json::from_str(shared)
+        .map_err(|e| ProviderError::Provider(format!("shared reply unreadable: {e}")))?;
+    let frames = match shared {
+        Shared::Frames(frames) => frames
+            .into_iter()
+            .map(SharedFrame::decode)
+            .collect::<Result<Vec<_>, _>>()?,
+        Shared::Error(report) => return Err(ProviderError::Relayed(report)),
+    };
     let document = match frames.as_slice() {
         [only] => serde_json::from_slice::<serde_json::Value>(only.as_bytes()).ok(),
         _ => None,
     };
-    let opened = Opened::new(futures::stream::iter(frames.into_iter().map(Ok)))
-        .with_http(StatusCode::OK, HeaderMap::new());
+    let opened = Opened::new(futures::stream::iter(frames.into_iter().map(Ok))).with_route(route);
     Ok(match document {
         Some(document) => opened.with_document(document),
         None => opened,

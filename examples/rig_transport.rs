@@ -1,4 +1,4 @@
-//! # Example: dedup, circuit breaker and retry under a rig 0.46 model
+//! # Example: dedup, circuit breaker and retry under a rig model (0.45 or 0.46)
 //!
 //! Wraps the transport of a rig OpenAI chat model in
 //! `OrchestratedTransport`, sends five identical requests at once, and
@@ -8,12 +8,12 @@
 //! Ollama, LM Studio):
 //!
 //! ```text
-//! OPENAI_API_KEY=sk-... cargo run --example rig_transport --features rig
+//! OPENAI_API_KEY=sk-... cargo run --example rig_transport --features rig-transport
 //! OPENAI_BASE_URL=http://localhost:8080/v1 OPENAI_API_KEY=none MODEL=local \
-//!     cargo run --example rig_transport --features rig
+//!     cargo run --example rig_transport --features rig-transport
 //! ```
 //!
-//! Features needed: `rig` (Rust 1.97.1 or newer).
+//! Features needed: `rig-transport` (Rust 1.97.1 or newer).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

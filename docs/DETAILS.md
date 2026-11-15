@@ -272,7 +272,8 @@ Keep your client. Each is a cargo feature that wraps it as a worker, so dedup, t
 |---|---|---|
 | [async-openai](https://crates.io/crates/async-openai) | `features = ["async-openai"]` | `AsyncOpenAiWorker::new(client, "gpt-4o-mini")`: OpenAI, Azure, or any OpenAI-compatible server (Ollama, vLLM, llama.cpp, LM Studio) |
 | [genai](https://crates.io/crates/genai) | `features = ["genai"]` | `GenaiWorker::new(genai::Client::default(), "claude-sonnet-4-6")`: OpenAI, Anthropic, Gemini, Ollama, Groq, DeepSeek, xAI and more, picked by model name |
-| [rig](https://crates.io/crates/rig-core) | `features = ["rig"]` | `Model::new(model.wire, OrchestratedTransport::new(model.transport))`: keeps your rig model and its full request (messages, tools, params), adds dedup, the breaker and retry underneath. Or `RigWorker::new(model)` to run a rig model as a pipeline worker (prompt only). rig-core 0.46 (needs Rust 1.97.1+) |
+| [rig](https://crates.io/crates/rig-core) | `features = ["rig-transport"]` | `Model::new(model.wire, OrchestratedTransport::new(model.transport))`: keeps your rig model and its full request (messages, tools, params), adds dedup, the breaker and retry underneath. rig-core 0.45 or 0.46 (needs Rust 1.97.1+) |
+| [rig](https://crates.io/crates/rig-core) | `features = ["rig"]` | `RigWorker::new(OpenAI::from_env()?.completion("gpt-5.2"))`: any rig completion model as a pipeline worker (prompt only); rig-core 0.43 to 0.46 (needs Rust 1.95+, 1.97.1+ for 0.45 and 0.46) |
 | [tower](https://crates.io/crates/tower) | `features = ["tower"]` | `ServiceWorker::new(svc)` runs any `Service<String>` (with your tower layers) as a worker; `WorkerService::new(worker)` goes the other way |
 
 ```rust,ignore

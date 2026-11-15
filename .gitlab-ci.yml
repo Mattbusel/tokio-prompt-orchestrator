@@ -94,7 +94,8 @@ test:
     paths: [target/, .cargo-home/]
   script:
     # The lean default build, then every test target and example with the
-    # features they need (rig needs Rust 1.97.1+, which rust:1 has).
+    # features they need (rig and rig-transport need Rust 1.97.1+ with
+    # rig-core 0.46, which rust:1 has).
     - cargo check --locked --lib
-    - cargo test --locked --no-fail-fast --lib --tests --examples --features "full tui mcp self-improving distributed schema tower async-openai genai rig tantivy"
+    - cargo test --locked --no-fail-fast --lib --tests --examples --features "full tui mcp self-improving distributed schema tower async-openai genai rig rig-transport tantivy"
     - cargo test --locked --doc --features "full tower async-openai genai"
