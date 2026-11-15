@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794724102099,
+  "lastUpdate": 1794770677901,
   "repoUrl": "https://github.com/Mattbusel/tokio-prompt-orchestrator",
   "entries": {
     "Pipeline Benchmarks": [
@@ -2686,6 +2686,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "session_id_creation",
             "value": 11,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "committer": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "distinct": true,
+          "id": "52ca4fcf10e1502c8eb654f89482c26b7f669e4d",
+          "message": "2.4.1: rmcp 0.16 to 3.10 for the mcp server\n\n- mcp feature: rmcp 3.10; get_info uses the ServerConfig builder and reports serverInfo as tokio-prompt-orchestrator with the crate version\n- drops RUSTSEC-2026-0189 (old rmcp) from the tree and from the audit ignores\n- lockfile refresh: quinn-proto 0.11.19, quinn-udp 0.5.16, rustls-webpki 0.103.17, webpki-roots 1.0.12, tokio 1.54.1, so the audit job passes again",
+          "timestamp": "2026-11-15T14:20:32-05:00",
+          "tree_id": "3cc2ba0d333858604d92b7075fc82a73f9740d14",
+          "url": "https://github.com/Mattbusel/tokio-prompt-orchestrator/commit/52ca4fcf10e1502c8eb654f89482c26b7f669e4d"
+        },
+        "date": 1794770675431,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "full_pipeline_echo_worker",
+            "value": 11276065,
+            "range": "± 138447",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/10",
+            "value": 51118934,
+            "range": "± 182513",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/50",
+            "value": 51333180,
+            "range": "± 216627",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/100",
+            "value": 51322425,
+            "range": "± 113454",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/512",
+            "value": 27442,
+            "range": "± 620",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/1024",
+            "value": 27832,
+            "range": "± 804",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/2048",
+            "value": 27433,
+            "range": "± 612",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "send_with_shed_normal",
+            "value": 175,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "shard_session",
+            "value": 12,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "session_id_creation",
+            "value": 13,
             "range": "± 0",
             "unit": "ns/iter"
           }
