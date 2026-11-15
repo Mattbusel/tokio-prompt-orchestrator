@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794719904467,
+  "lastUpdate": 1794724102099,
   "repoUrl": "https://github.com/Mattbusel/tokio-prompt-orchestrator",
   "entries": {
     "Pipeline Benchmarks": [
@@ -2602,6 +2602,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "session_id_creation",
             "value": 12,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "committer": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "distinct": true,
+          "id": "418865c85b588896f939df37d18e5e5c7075cb72",
+          "message": "2.4.0: Anthropic tool use, /v1/responses, /v1/embeddings with per-input caching\n\nThe proxy speaks more client protocols through the same routing, dedup, circuit breaker and spend cap:\n- POST /v1/messages: tools, tool_choice, tool_use/tool_result translated for any upstream; streamed input_json_delta; POST /v1/messages/count_tokens\n- POST /v1/responses: OpenAI Responses API, JSON and the response.* SSE event sequence\n- POST /v1/embeddings: per-input cache and in-flight sharing, float/base64, own circuit breaker; web_api::EmbeddingsBackend and ServerConfig::embeddings\n- tests/client_protocols_tests.rs against mock OpenAI, Anthropic and embeddings upstreams",
+          "timestamp": "2026-11-15T00:40:26-05:00",
+          "tree_id": "049fd65efb86b24201109b45e68c763890dcdff0",
+          "url": "https://github.com/Mattbusel/tokio-prompt-orchestrator/commit/418865c85b588896f939df37d18e5e5c7075cb72"
+        },
+        "date": 1794724099621,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "full_pipeline_echo_worker",
+            "value": 11210489,
+            "range": "± 143554",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/10",
+            "value": 51220293,
+            "range": "± 126811",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/50",
+            "value": 51213234,
+            "range": "± 113029",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/100",
+            "value": 51217580,
+            "range": "± 130979",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/512",
+            "value": 34637,
+            "range": "± 4889",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/1024",
+            "value": 34614,
+            "range": "± 4641",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/2048",
+            "value": 33320,
+            "range": "± 4455",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "send_with_shed_normal",
+            "value": 292,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "shard_session",
+            "value": 10,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "session_id_creation",
+            "value": 11,
             "range": "± 0",
             "unit": "ns/iter"
           }
