@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794770677901,
+  "lastUpdate": 1794794354794,
   "repoUrl": "https://github.com/Mattbusel/tokio-prompt-orchestrator",
   "entries": {
     "Pipeline Benchmarks": [
@@ -2770,6 +2770,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "session_id_creation",
             "value": 13,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "committer": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "distinct": true,
+          "id": "8aefe2c3b97f4a2ccdd4785ab8d1103fd4711778",
+          "message": "2.4.2: cargo binstall finds the GitHub release binaries\n\nThe binstall metadata still pointed at GitLab release downloads with old\nasset names, so cargo binstall fell back to a source build. pkg-url and\nbin-dir now match the assets release.yml attaches to each GitHub release\n(orchestrator-v<version>-<target>.tar.gz, .zip on Windows). Verified with\ncargo binstall --dry-run on Linux, Windows and macOS arm64 against v2.4.1.\nNo code changes.",
+          "timestamp": "2026-11-15T20:55:35-05:00",
+          "tree_id": "f16765c0d21b4540eca5908911b5f83a108b9e4f",
+          "url": "https://github.com/Mattbusel/tokio-prompt-orchestrator/commit/8aefe2c3b97f4a2ccdd4785ab8d1103fd4711778"
+        },
+        "date": 1794794352759,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "full_pipeline_echo_worker",
+            "value": 11236973,
+            "range": "± 108263",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/10",
+            "value": 51185643,
+            "range": "± 156021",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/50",
+            "value": 51300981,
+            "range": "± 167621",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/100",
+            "value": 51033465,
+            "range": "± 243227",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/512",
+            "value": 22360,
+            "range": "± 973",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/1024",
+            "value": 22519,
+            "range": "± 530",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/2048",
+            "value": 22630,
+            "range": "± 520",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "send_with_shed_normal",
+            "value": 126,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "shard_session",
+            "value": 9,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "session_id_creation",
+            "value": 11,
             "range": "± 0",
             "unit": "ns/iter"
           }
