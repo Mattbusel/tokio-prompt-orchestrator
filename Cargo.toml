@@ -1,6 +1,6 @@
 [package]
 name = "tokio-prompt-orchestrator"
-version = "2.4.1"
+version = "2.4.2"
 edition = "2021"
 rust-version = "1.88"
 default-run = "orchestrator"
@@ -18,24 +18,22 @@ exclude = [".github", "scripts", "assets", "site", "docs", "benches", "releases"
 unwrap_used = "deny"
 expect_used = "deny"
 
-# `cargo binstall tokio-prompt-orchestrator` downloads the GitLab release
-# (release assets live on GitLab; `repository` points at GitHub, so the URL is spelled out)
-# asset instead of compiling. Asset names come from .gitlab-ci.yml. Targets
-# without a prebuilt binary 404 on the default URL, and binstall then builds
-# from source.
+# `cargo binstall tokio-prompt-orchestrator` downloads the prebuilt archive from
+# the GitHub release instead of compiling. The asset names come from
+# .github/workflows/release.yml (orchestrator-v<version>-<target>.tar.gz, .zip on
+# Windows) and are not the crate name, so the URL and the folder inside the
+# archive are spelled out. The archives hold the binaries that need no extra
+# feature (orchestrator, replay, coordinator, validate). Targets without a
+# prebuilt archive 404, and binstall then builds from source.
 [package.metadata.binstall]
-pkg-url = "https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/releases/v{ version }/downloads/orchestrator-{ target }.tar.gz"
+pkg-url = "{ repo }/releases/download/v{ version }/orchestrator-v{ version }-{ target }.tar.gz"
+bin-dir = "orchestrator-v{ version }-{ target }/{ bin }{ binary-ext }"
 pkg-fmt = "tgz"
 disabled-strategies = ["quick-install"]
 
-[package.metadata.binstall.overrides.x86_64-unknown-linux-gnu]
-pkg-url = "https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/releases/v{ version }/downloads/orchestrator-linux-x86_64.tar.gz"
-bin-dir = "orchestrator-v{ version }-x86_64-unknown-linux-gnu/{ bin }"
-
 [package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
-pkg-url = "https://gitlab.com/mattbusel/tokio-prompt-orchestrator/-/releases/v{ version }/downloads/orchestrator-windows-x86_64.zip"
+pkg-url = "{ repo }/releases/download/v{ version }/orchestrator-v{ version }-{ target }.zip"
 pkg-fmt = "zip"
-bin-dir = "orchestrator-v{ version }-x86_64-pc-windows-msvc/{ bin }{ binary-ext }"
 
 [package.metadata.docs.rs]
 features = ["full", "tui", "mcp", "self-improving", "distributed", "schema", "core-pinning", "tower", "reqwest-middleware", "async-openai", "genai", "rig", "rig-transport", "tantivy"]

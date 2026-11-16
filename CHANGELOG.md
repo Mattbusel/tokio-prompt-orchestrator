@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.4.2] - 2026-11-15
+
+### Fixed
+
+- **`cargo binstall tokio-prompt-orchestrator` now installs the prebuilt binaries** instead of
+  compiling from source. The `[package.metadata.binstall]` URLs still pointed at GitLab release
+  downloads with old asset names; they now point at the GitHub release assets that
+  `.github/workflows/release.yml` builds (`orchestrator-v<version>-<target>.tar.gz`, `.zip` on
+  Windows), with the folder inside the archive spelled out. Checked with
+  `cargo binstall --dry-run` for x86_64 Linux, x86_64 Windows and aarch64 macOS: each resolves to
+  the release archive and installs `orchestrator`, `replay`, `coordinator` and `validate`.
+  No code changes.
+
 ## [2.4.1] - 2026-11-15
 
 ### Changed
