@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.4.3] - 2026-11-16
+
+### Fixed
+
+- `circuit_breaker::CircuitBreaker` recovery. HalfOpen let every caller through while the first
+  probe was still pending, so recovery traffic was not limited; and a call admitted while
+  Closed that finished during recovery counted as a probe success, so with
+  `success_threshold = 1` it could close the breaker before the real probe returned. HalfOpen
+  now admits one probe at a time (`with_max_probes(n)` for more), decided under the same lock
+  as the state transitions, and the boolean `is_allowed()` respects that bound.
+
+### Added
+
+- `CircuitBreaker::try_acquire()` returns a `CallPermit` tied to the breaker's generation.
+  `permit.success()` / `permit.failure()` record the outcome; outcomes of calls admitted under
+  an earlier state go into the failure window but do not move a recovering breaker. Both return
+  whether the breaker is Open afterwards, so a retry loop can stop instead of sleeping. A probe
+  permit dropped without an outcome (a cancelled future) frees its slot.
+  `probes_in_flight()` reports the slots in use. Eight new tests, one with 16 threads racing
+  for the probe slot.
+
 ### Docs
 
 - `docs/migrate-from-helicone-ai-gateway.md`: moving a self-hosted Helicone AI Gateway setup to
