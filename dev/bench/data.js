@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794881694146,
+  "lastUpdate": 1794885968414,
   "repoUrl": "https://github.com/Mattbusel/tokio-prompt-orchestrator",
   "entries": {
     "Pipeline Benchmarks": [
@@ -2938,6 +2938,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "session_id_creation",
             "value": 8,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "committer": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "distinct": true,
+          "id": "9ad577e6cb5c894184a142fdf04c2fe988aa2007",
+          "message": "2.4.3: bounded half-open probes and generation-tagged call permits\n\nHalfOpen admitted every caller while the first probe was pending, and a call\nadmitted while Closed that finished during recovery counted as a probe success\n(closing the breaker early with success_threshold = 1). try_acquire() now\nadmits at most max_probes probes under the transition lock and returns a\nCallPermit tagged with the breaker generation; stale outcomes stay in the window\nbut cannot move a recovering breaker; a dropped probe permit frees its slot.\nis_allowed() respects the probe bound.",
+          "timestamp": "2026-11-16T22:22:50-05:00",
+          "tree_id": "afcaab921c9b5700272a499eed814fd24586b671",
+          "url": "https://github.com/Mattbusel/tokio-prompt-orchestrator/commit/9ad577e6cb5c894184a142fdf04c2fe988aa2007"
+        },
+        "date": 1794885966449,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "full_pipeline_echo_worker",
+            "value": 11186246,
+            "range": "± 101005",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/10",
+            "value": 51083548,
+            "range": "± 116930",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/50",
+            "value": 51143285,
+            "range": "± 132715",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/100",
+            "value": 51207841,
+            "range": "± 118667",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/512",
+            "value": 20507,
+            "range": "± 924",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/1024",
+            "value": 20719,
+            "range": "± 1187",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/2048",
+            "value": 19708,
+            "range": "± 863",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "send_with_shed_normal",
+            "value": 181,
+            "range": "± 11",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "shard_session",
+            "value": 7,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "session_id_creation",
+            "value": 5,
             "range": "± 0",
             "unit": "ns/iter"
           }
