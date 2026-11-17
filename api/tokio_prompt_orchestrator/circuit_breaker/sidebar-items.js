@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["CircuitState"],"struct":["CircuitBreaker","CircuitBreakerConfig","CircuitBreakerRegistry"]};
+window.SIDEBAR_ITEMS = {"enum":["CircuitState"],"struct":["CallPermit","CircuitBreaker","CircuitBreakerConfig","CircuitBreakerRegistry"]};
