@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794794354794,
+  "lastUpdate": 1794881694146,
   "repoUrl": "https://github.com/Mattbusel/tokio-prompt-orchestrator",
   "entries": {
     "Pipeline Benchmarks": [
@@ -2854,6 +2854,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "session_id_creation",
             "value": 11,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "committer": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "distinct": true,
+          "id": "ad5e76dd8504ac1c5dc536e6ceb958569d8c574e",
+          "message": "docs: migrating from Helicone AI Gateway\n\nConcept and config mapping, a routes file that keeps Helicone's provider/model names, client changes, Docker Compose, the checks run against the 2.4.2 release binary, and the gaps (per-key budgets, load-balancing strategies, shared caches, provider catalog).",
+          "timestamp": "2026-11-16T21:11:05-05:00",
+          "tree_id": "ffb97966da833d035f68acb6868c1f0b7143808f",
+          "url": "https://github.com/Mattbusel/tokio-prompt-orchestrator/commit/ad5e76dd8504ac1c5dc536e6ceb958569d8c574e"
+        },
+        "date": 1794881692131,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "full_pipeline_echo_worker",
+            "value": 11183575,
+            "range": "± 135666",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/10",
+            "value": 51208820,
+            "range": "± 132007",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/50",
+            "value": 51268411,
+            "range": "± 309058",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/100",
+            "value": 51311565,
+            "range": "± 145560",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/512",
+            "value": 17128,
+            "range": "± 328",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/1024",
+            "value": 18645,
+            "range": "± 287",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/2048",
+            "value": 17402,
+            "range": "± 484",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "send_with_shed_normal",
+            "value": 207,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "shard_session",
+            "value": 7,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "session_id_creation",
+            "value": 8,
             "range": "± 0",
             "unit": "ns/iter"
           }
