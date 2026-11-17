@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Docs
+
+- `docs/migrate-from-helicone-ai-gateway.md`: moving a self-hosted Helicone AI Gateway setup to
+  TPO: concept and config mapping, a routes file that keeps Helicone's `provider/model` names,
+  client changes, Docker Compose, the checks run against the 2.4.2 binary, and what TPO does not
+  do.
+
 ## [2.4.2] - 2026-11-15
 
 ### Fixed
