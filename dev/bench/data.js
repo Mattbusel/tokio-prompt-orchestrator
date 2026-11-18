@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794885968414,
+  "lastUpdate": 1794968866942,
   "repoUrl": "https://github.com/Mattbusel/tokio-prompt-orchestrator",
   "entries": {
     "Pipeline Benchmarks": [
@@ -3022,6 +3022,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "session_id_creation",
             "value": 5,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "committer": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "distinct": true,
+          "id": "60cc55a0e6d5ff2c298090046108773626858c24",
+          "message": "2.5.0: llm-resilience crate, one-probe half-open, async-nats 0.50\n\nSplit Dedup, the enhanced CircuitBreaker, ResilienceLayer (tower) and\nResilienceMiddleware (reqwest-middleware) into crates/llm-resilience, a\nworkspace member published on its own as llm-resilience 0.1.0. Its\ndependency tree is 12 crates (tokio sync/time, parking_lot, tracing), 14\nwith tower, against about 200 for this crate with default features, so\nprojects that only want dedup and a breaker can take them without the\npipeline, server and provider clients. Every moved type is re-exported at\nits old path here; existing code compiles unchanged.\n\nFixed: the enhanced CircuitBreaker let every caller through while\nhalf-open although the docs promised one probe. It now admits one probe at\na time (with_max_probes(n) for more), rejects the rest, frees the slot of a\ncancelled probe, and tags calls with the breaker generation so a slow call\nadmitted before the breaker opened cannot close a recovering breaker. The\nstate lock is now a short synchronous lock, so the *_sync accessors no\nlonger misreport under contention.\n\nAdded: BreakerEvent with per-breaker and process-wide event hooks\n(init_metrics registers one, so the Prometheus breaker counters work as\nbefore), Display/Error for CircuitBreakerError, docs/integrating.md.\n\nasync-nats 0.35 -> 0.50 (feature distributed) clears the rustls-webpki\nadvisories; cargo audit in CI now runs with no ignores. Closes #8.\nRemoved the unused tracing-futures dependency. CI checks, lints, documents\nand tests llm-resilience, including on the MSRV.",
+          "timestamp": "2026-11-17T21:18:36-05:00",
+          "tree_id": "ab44378325684c5b307f550103a38194040bc505",
+          "url": "https://github.com/Mattbusel/tokio-prompt-orchestrator/commit/60cc55a0e6d5ff2c298090046108773626858c24"
+        },
+        "date": 1794968864555,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "full_pipeline_echo_worker",
+            "value": 11085124,
+            "range": "± 110264",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/10",
+            "value": 51201558,
+            "range": "± 40810",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/50",
+            "value": 51296797,
+            "range": "± 180376",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/100",
+            "value": 51026941,
+            "range": "± 275489",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/512",
+            "value": 22152,
+            "range": "± 1213",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/1024",
+            "value": 22620,
+            "range": "± 493",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/2048",
+            "value": 22339,
+            "range": "± 505",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "send_with_shed_normal",
+            "value": 127,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "shard_session",
+            "value": 9,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "session_id_creation",
+            "value": 10,
             "range": "± 0",
             "unit": "ns/iter"
           }
