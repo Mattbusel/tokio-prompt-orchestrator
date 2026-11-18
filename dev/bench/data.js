@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794968866942,
+  "lastUpdate": 1795011502444,
   "repoUrl": "https://github.com/Mattbusel/tokio-prompt-orchestrator",
   "entries": {
     "Pipeline Benchmarks": [
@@ -3106,6 +3106,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "session_id_creation",
             "value": 10,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "committer": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "distinct": true,
+          "id": "5cc7ddd14448675e6e8e3fe9352d0555a04c583d",
+          "message": "2.5.1: llm-resilience 0.1.1 with try_acquire and CallPermit\n\nCircuitBreaker::try_acquire() hands back a CallPermit for callers that\ndecide which outcomes count: success(), failure(), or drop to record\nnothing. Admission shares the lock with the state transitions, and the\npermit carries its generation, as with call().\n\nCI now fails if llm-resilience with no features grows past tokio,\nparking_lot and tracing.",
+          "timestamp": "2026-11-18T09:14:49-05:00",
+          "tree_id": "2c499bbf2bda1c956784393b3a5b6e2be3ed4376",
+          "url": "https://github.com/Mattbusel/tokio-prompt-orchestrator/commit/5cc7ddd14448675e6e8e3fe9352d0555a04c583d"
+        },
+        "date": 1795011500646,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "full_pipeline_echo_worker",
+            "value": 11157908,
+            "range": "± 149693",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/10",
+            "value": 51159627,
+            "range": "± 198160",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/50",
+            "value": 51291429,
+            "range": "± 186908",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/100",
+            "value": 51318431,
+            "range": "± 130632",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/512",
+            "value": 16597,
+            "range": "± 491",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/1024",
+            "value": 16876,
+            "range": "± 438",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/2048",
+            "value": 17446,
+            "range": "± 463",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "send_with_shed_normal",
+            "value": 207,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "shard_session",
+            "value": 8,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "session_id_creation",
+            "value": 7,
             "range": "± 0",
             "unit": "ns/iter"
           }
