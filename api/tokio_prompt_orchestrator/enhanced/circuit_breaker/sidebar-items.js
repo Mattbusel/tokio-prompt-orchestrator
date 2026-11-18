@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["BreakerEvent","CircuitBreakerError","CircuitStatus"],"fn":["add_global_event_hook"],"struct":["CircuitBreaker","CircuitBreakerStats"]};
+window.SIDEBAR_ITEMS = {"enum":["BreakerEvent","CircuitBreakerError","CircuitStatus"],"fn":["add_global_event_hook"],"struct":["CallPermit","CircuitBreaker","CircuitBreakerStats"]};
