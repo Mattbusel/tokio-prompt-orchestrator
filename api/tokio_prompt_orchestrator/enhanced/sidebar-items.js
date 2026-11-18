@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["adaptive_timeout","bulkhead","cache","circuit_breaker","dedup","dlq_replay","priority","rate_limit","retry","semantic_dedup","smart_batch","tournament"]};
+window.SIDEBAR_ITEMS = {"enum":["CircuitStatus"],"mod":["adaptive_timeout","bulkhead","cache","circuit_breaker","dedup","dlq_replay","priority","rate_limit","retry","semantic_dedup","smart_batch","tournament"],"struct":["CircuitBreaker"]};
