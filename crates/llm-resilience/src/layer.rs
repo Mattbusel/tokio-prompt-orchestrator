@@ -1,8 +1,8 @@
 //! A tower [`Layer`] that adds single-flight deduplication and a circuit
 //! breaker to any [`Service`]: an HTTP client, an LLM client, a gRPC channel.
 //!
-//! Use it when you already have a tower stack and want the orchestrator's
-//! two cost and outage savers without running the pipeline or the proxy.
+//! Use it when you already have a tower stack and want identical in-flight
+//! requests to share one call, and a failing dependency to fail fast.
 
 use std::fmt;
 use std::future::Future;
@@ -11,10 +11,10 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use tower::{Layer, Service};
+use tower_layer::Layer;
+use tower_service::Service;
 
-use crate::enhanced::circuit_breaker::CircuitBreakerError;
-use crate::enhanced::CircuitBreaker;
+use crate::circuit_breaker::{CircuitBreaker, CircuitBreakerError};
 use crate::single_flight::{Dedup, DedupStats};
 
 type KeyFn<Req, K> = Arc<dyn Fn(&Req) -> Option<K> + Send + Sync>;
@@ -122,8 +122,8 @@ where
 ///
 /// ```
 /// use std::time::Duration;
-/// use tokio_prompt_orchestrator::enhanced::CircuitBreaker;
-/// use tokio_prompt_orchestrator::integrations::ResilienceLayer;
+/// use llm_resilience::CircuitBreaker;
+/// use llm_resilience::ResilienceLayer;
 /// use tower::{ServiceBuilder, ServiceExt};
 ///
 /// # #[tokio::main]

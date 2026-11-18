@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-11-17
+
+### Added
+
+- **`llm-resilience` crate** (`crates/llm-resilience`, published separately as 0.1.0): `Dedup`,
+  the `enhanced` `CircuitBreaker`, `ResilienceLayer` (feature `tower`) and `ResilienceMiddleware`
+  (feature `reqwest-middleware`), for projects that want only these. Its dependency tree is 12
+  crates (`tokio` sync/time, `parking_lot`, `tracing`), 14 with `tower`, against about 200 for
+  this crate with default features. This crate re-exports every moved type at its old path
+  (`Dedup`, `single_flight::*`, `enhanced::CircuitBreaker`, `enhanced::circuit_breaker::*`,
+  `integrations::ResilienceLayer`, `integrations::ResilienceMiddleware` and their helpers), so
+  existing code compiles unchanged.
+- `enhanced::CircuitBreaker::with_max_probes(n)`, `with_event_hook(f)`, `status_sync()`,
+  `probes_in_flight()`, and `circuit_breaker::add_global_event_hook` / `BreakerEvent` for
+  reporting transitions and rejections to any metrics system. `init_metrics()` registers a hook,
+  so the `orchestrator_circuit_breaker_*` Prometheus counters work as before.
+- `Display` and `std::error::Error` for `CircuitBreakerError<E>`; `CircuitStatus` is now `Copy`,
+  `Eq` and `Hash`.
+- `docs/integrating.md`: the three ways in (the `llm-resilience` primitives, the proxy, the
+  pipeline) with short examples, dependency cost, MSRV and stability notes.
+
+### Fixed
+
+- `enhanced::CircuitBreaker` half-open (used by the pipeline, the OpenAI-compatible server,
+  `ResilienceLayer` and `ResilienceMiddleware`). It let every caller through while half-open
+  although the docs promised one probe, so a recovering provider took the whole backlog at once.
+  It now admits one probe at a time and rejects the rest; a cancelled probe frees its slot. Calls
+  are tagged with the breaker's generation, so a slow call admitted before the breaker opened no
+  longer closes a recovering breaker (or extends an open one) when it finishes. This is the fix
+  2.4.3 made to `circuit_breaker::CircuitBreaker`, applied to the other breaker.
+- The `is_*_sync()` and `retry_after_sync()` methods no longer give a wrong answer when the state
+  happened to be locked at that moment (the state lock is now a short synchronous lock).
+
+### Changed
+
+- `async-nats` 0.35 to 0.50 (feature `distributed`). This moves it to `rustls-webpki` 0.103 and
+  clears RUSTSEC-2026-0049, -0098, -0099, -0104 and -0382; the `cargo audit` CI job now runs with
+  no ignored advisories. Closes #8.
+- Removed the unused `tracing-futures` dependency.
+- CI checks, lints, documents and tests `llm-resilience` with and without its features, and
+  checks it on the MSRV (1.88).
+
 ## [2.4.3] - 2026-11-16
 
 ### Fixed

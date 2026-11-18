@@ -408,7 +408,23 @@ pub fn init_metrics() -> Result<(), OrchestratorError> {
         dedup_hash_collisions_total,
     });
 
+    // Every circuit breaker (they live in the llm-resilience crate) reports
+    // transitions and rejections through this hook. Adding it twice is a no-op.
+    llm_resilience::add_global_event_hook(record_breaker_event);
+
     Ok(())
+}
+
+/// Feeds the circuit-breaker counters from llm-resilience breaker events.
+fn record_breaker_event(event: llm_resilience::BreakerEvent) {
+    use llm_resilience::BreakerEvent;
+    match event {
+        BreakerEvent::Rejected => inc_cb_rejected(),
+        BreakerEvent::Opened | BreakerEvent::HalfOpened | BreakerEvent::Closed => {
+            inc_cb_transition(event.as_str())
+        }
+        _ => {}
+    }
 }
 
 /// Return a reference to the initialised [`Metrics`], or `None` if
@@ -1407,6 +1423,33 @@ mod tests {
         assert!(
             (value - 2.0).abs() < f64::EPSILON,
             "counter must be 2.0, got {value}"
+        );
+    }
+
+    /// Breakers live in llm-resilience; once metrics are initialised their
+    /// transitions and rejections must still reach the global counters.
+    #[tokio::test]
+    async fn breaker_events_reach_the_prometheus_counters() {
+        init_metrics().expect("metrics init");
+        let m = metrics().expect("initialised");
+        let opened = || {
+            m.circuit_breaker_state_transitions_total
+                .get_metric_with_label_values(&["open"])
+                .map(|c| c.get())
+                .unwrap_or(0.0)
+        };
+        let rejected_before = m.circuit_breaker_requests_rejected_total.get();
+        let opened_before = opened();
+
+        let cb = crate::enhanced::CircuitBreaker::new(1, 0.8, Duration::from_secs(60));
+        let _ = cb.call(|| async { Err::<(), _>("boom") }).await;
+        let _ = cb.call(|| async { Ok::<(), &str>(()) }).await;
+
+        // Other tests share the global registry, so compare with >=.
+        assert!(opened() >= opened_before + 1.0, "open transition counted");
+        assert!(
+            m.circuit_breaker_requests_rejected_total.get() >= rejected_before + 1.0,
+            "rejection counted"
         );
     }
 }

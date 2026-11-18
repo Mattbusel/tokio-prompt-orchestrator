@@ -19,8 +19,7 @@ use reqwest::{Method, Request, Response, ResponseBuilderExt, StatusCode, Url, Ve
 use reqwest_middleware::{Error, Middleware, Next, Result};
 use sha2::{Digest, Sha256};
 
-use crate::enhanced::circuit_breaker::CircuitBreakerError;
-use crate::enhanced::CircuitBreaker;
+use crate::circuit_breaker::{CircuitBreaker, CircuitBreakerError};
 use crate::single_flight::{Claim, Dedup, DedupStats};
 
 /// Returned (inside [`reqwest_middleware::Error::Middleware`]) when the
@@ -204,7 +203,7 @@ const DEFAULT_IGNORED_HEADERS: &[&str] = &[
 ///
 /// ```no_run
 /// use reqwest_middleware::ClientBuilder;
-/// use tokio_prompt_orchestrator::integrations::ResilienceMiddleware;
+/// use llm_resilience::ResilienceMiddleware;
 ///
 /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// let client = ClientBuilder::new(reqwest::Client::new())

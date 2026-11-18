@@ -78,6 +78,16 @@ Closed ──(N failures)──► Open
   └──(success rate ok)── HalfOpen
 ```
 
+While HalfOpen, one probe call runs at a time (`with_max_probes(n)` for more);
+every other caller is still rejected, so a recovering provider is not hit by
+the whole backlog at once. A probe that is cancelled frees its slot.
+
+Since 2.5.0 the breaker, `Dedup`, `ResilienceLayer` and `ResilienceMiddleware`
+live in the [`llm-resilience`](../crates/llm-resilience) crate and are
+re-exported here at the same paths. Depend on `llm-resilience` directly if you
+only need these (12 crates in its dependency tree instead of the
+orchestrator's ~200). See [integrating.md](integrating.md).
+
 ### When to use
 
 - Wrapping any network call to an LLM provider or external API.

@@ -58,6 +58,9 @@
 //! - Without the pipeline: `integrations::ResilienceLayer` (feature `tower`) puts dedup and a
 //!   circuit breaker in any tower stack, and `integrations::ResilienceMiddleware` (feature
 //!   `reqwest-middleware`) does the same for a `reqwest_middleware::ClientWithMiddleware`.
+//!   These, [`Dedup`] and [`enhanced::CircuitBreaker`] also ship on their own as the
+//!   [`llm-resilience`](https://docs.rs/llm-resilience) crate (12 crates in its
+//!   dependency tree), for projects that want only them.
 //! - [`DeadLetterQueue`] holds every request that was dropped, with the reason.
 //! - [`PipelineConfig`] loads the same pipeline from TOML.
 //!

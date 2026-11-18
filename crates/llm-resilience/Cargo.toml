@@ -1,0 +1,67 @@
+[package]
+name = "llm-resilience"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Single-flight request deduplication and an async circuit breaker for LLM and HTTP clients, with a tower layer and a reqwest middleware. The core needs only tokio, parking_lot and tracing."
+documentation = "https://docs.rs/llm-resilience"
+repository = "https://github.com/Mattbusel/tokio-prompt-orchestrator"
+homepage = "https://github.com/Mattbusel/tokio-prompt-orchestrator/tree/main/crates/llm-resilience"
+license = "MIT"
+readme = "README.md"
+keywords = ["llm", "circuit-breaker", "singleflight", "tower", "deduplication"]
+categories = ["asynchronous", "network-programming", "web-programming::http-client"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
+[dependencies]
+tokio = { version = "1.40", default-features = false, features = ["sync", "time"] }
+parking_lot = "0.12"
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+
+# feature `tower`
+tower-layer = { version = "0.3", optional = true }
+tower-service = { version = "0.3", optional = true }
+
+# feature `reqwest-middleware` (reqwest 0.12, reqwest-middleware 0.4).
+# reqwest is used without default features: TLS comes from the Client you pass in.
+reqwest = { version = "0.12", default-features = false, optional = true }
+reqwest-middleware = { version = "0.4", optional = true }
+http = { version = "1", optional = true }
+bytes = { version = "1", optional = true }
+sha2 = { version = "0.10", optional = true }
+dashmap = { version = "5.5", optional = true }
+serde_json = { version = "1", optional = true }
+async-trait = { version = "0.1", optional = true }
+
+[features]
+default = []
+tower = ["dep:tower-layer", "dep:tower-service"]
+reqwest-middleware = [
+    "dep:reqwest",
+    "dep:reqwest-middleware",
+    "dep:http",
+    "dep:bytes",
+    "dep:sha2",
+    "dep:dashmap",
+    "dep:serde_json",
+    "dep:async-trait",
+]
+
+[dev-dependencies]
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tower = { version = "0.5", default-features = false, features = ["util"] }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+reqwest-middleware = { version = "0.4", features = ["json"] }
+serde_json = "1"
+wiremock = "0.6"
+
+[[example]]
+name = "tower_layer"
+required-features = ["tower"]

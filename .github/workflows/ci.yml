@@ -20,6 +20,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --lib
+      - name: llm-resilience, every feature
+        run: cargo check -p llm-resilience --all-features
 
   clippy:
     runs-on: ubuntu-latest
@@ -33,6 +35,10 @@ jobs:
         run: cargo clippy -- -D warnings
       - name: Clippy (all features)
         run: cargo clippy --all-features -- -D warnings
+      - name: Clippy (llm-resilience)
+        run: |
+          cargo clippy -p llm-resilience --all-targets -- -D warnings
+          cargo clippy -p llm-resilience --all-features --all-targets -- -D warnings
 
   docs:
     runs-on: ubuntu-latest
@@ -41,7 +47,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Check documentation builds without warnings
-        run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+        run: |
+          RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+          RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p llm-resilience --all-features
 
   feature-matrix:
     runs-on: ubuntu-latest
@@ -105,6 +113,10 @@ jobs:
         run: cargo test --features rig,rig-transport --test integrations_tests
       - name: Doctests
         run: cargo test --doc
+      - name: llm-resilience (no features, then every feature)
+        run: |
+          cargo test -p llm-resilience
+          cargo test -p llm-resilience --all-features
       - name: Examples build
         run: cargo build --examples
       - name: Run the no-key LLM pipeline example
@@ -127,19 +139,10 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
       - name: Run security audit
-        # Ignored advisories, each reviewed:
-        # - RUSTSEC-2024-0437: prometheus 0.13 protobuf; /metrics is behind METRICS_API_KEY (see Cargo.toml).
-        # - RUSTSEC-2026-0049/0098/0099/0104/0382: rustls-webpki 0.102 via async-nats 0.35, only with the
-        #   optional `distributed` feature. The fix needs async-nats >= 0.47 (Rust 1.88, which is now
-        #   the MSRV, so the upgrade is no longer blocked on the toolchain).
-        run: >-
-          cargo audit
-          --ignore RUSTSEC-2024-0437
-          --ignore RUSTSEC-2026-0049
-          --ignore RUSTSEC-2026-0098
-          --ignore RUSTSEC-2026-0099
-          --ignore RUSTSEC-2026-0104
-          --ignore RUSTSEC-2026-0382
+        # No ignores: prometheus 0.14 without protobuf dropped RUSTSEC-2024-0437, and
+        # async-nats 0.50 (rustls-webpki 0.103) dropped the RUSTSEC-2026-0049/0098/
+        # 0099/0104/0382 advisories that came in with the optional `distributed` feature.
+        run: cargo audit
 
   check-windows:
     runs-on: windows-latest

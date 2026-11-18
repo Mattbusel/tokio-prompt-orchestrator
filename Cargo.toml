@@ -1,6 +1,9 @@
+[workspace]
+members = [".", "crates/llm-resilience"]
+
 [package]
 name = "tokio-prompt-orchestrator"
-version = "2.4.3"
+version = "2.5.0"
 edition = "2021"
 rust-version = "1.88"
 default-run = "orchestrator"
@@ -12,7 +15,7 @@ license = "MIT"
 readme = "README.md"
 keywords = ["llm", "openai", "anthropic", "proxy", "circuit-breaker"]
 categories = ["asynchronous", "network-programming", "web-programming::http-server", "command-line-utilities"]
-exclude = [".github", "scripts", "assets", "site", "docs", "benches", "releases", ".idea", ".githooks", ".cargo", ".bench_baseline.txt", "claude_desktop_config.json", "bench", "charts", "Dockerfile", ".dockerignore"]
+exclude = ["crates", ".github", "scripts", "assets", "site", "docs", "benches", "releases", ".idea", ".githooks", ".cargo", ".bench_baseline.txt", "claude_desktop_config.json", "bench", "charts", "Dockerfile", ".dockerignore"]
 
 [lints.clippy]
 unwrap_used = "deny"
@@ -40,12 +43,15 @@ features = ["full", "tui", "mcp", "self-improving", "distributed", "schema", "co
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
+# Resilience core (Dedup, CircuitBreaker, ResilienceLayer, ResilienceMiddleware),
+# published separately as llm-resilience and re-exported at the old paths.
+llm-resilience = { version = "0.1.0", path = "crates/llm-resilience" }
+
 # Core
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-std", "signal"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "registry"] }
-tracing-futures = "0.2"
 # OpenTelemetry (feature `otel`). OTLP over HTTP only: init_tracing never used
 # the gRPC exporter, so tonic and its stack are no longer compiled.
 opentelemetry = { version = "0.27", features = ["trace"], optional = true }
@@ -88,7 +94,9 @@ bytes = "1"
 subtle = "2"
 
 # Enhanced features
-async-nats = { version = "0.35", optional = true }
+# 0.50: the newest line whose MSRV (1.88) matches this crate; it moved to
+# rustls-webpki 0.103, which clears RUSTSEC-2026-0049/0098/0099/0104/0382.
+async-nats = { version = "0.50", optional = true }
 notify = { version = "6", optional = true }
 schemars = { version = "0.8", optional = true }
 redis = { version = "0.24", optional = true, features = ["tokio-comp", "connection-manager"] }
@@ -178,10 +186,10 @@ rig = ["dep:rig-core"]
 rig-transport = ["dep:rig-core"]
 # tower: ServiceWorker/WorkerService adapters, and ResilienceLayer (single-flight
 # dedup + circuit breaker for any tower Service, no pipeline needed).
-tower = ["dep:tower"]
+tower = ["dep:tower", "llm-resilience/tower"]
 # reqwest-middleware: ResilienceMiddleware, the same dedup + per-host circuit
 # breaker as a reqwest-middleware 0.4 middleware (reqwest 0.12).
-reqwest-middleware = ["dep:reqwest-middleware", "dep:http"]
+reqwest-middleware = ["dep:reqwest-middleware", "dep:http", "llm-resilience/reqwest-middleware"]
 # fastembed: local embedding models (BGE, MiniLM, ...) via ONNX Runtime, for
 # semantic dedup without an API. Downloads the model once on first use.
 # Needs Rust 1.88 or newer (fastembed's minimum).

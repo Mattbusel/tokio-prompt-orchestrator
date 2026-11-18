@@ -14,7 +14,9 @@
 //! | `tower` | [`ServiceWorker`], [`WorkerService`] | any `tower::Service<String>`, in both directions |
 //!
 //! Or skip the pipeline and put the dedup and circuit breaker straight into
-//! the client stack you already have:
+//! the client stack you already have. These two also ship on their own as the
+//! [`llm-resilience`](https://docs.rs/llm-resilience) crate, for projects that
+//! want only them (its core depends on `tokio`, `parking_lot` and `tracing`):
 //!
 //! | Feature | Type | Wraps |
 //! |---|---|---|
@@ -84,19 +86,16 @@ mod tower_adapters;
 #[cfg_attr(docsrs, doc(cfg(feature = "tower")))]
 pub use tower_adapters::{ServiceWorker, WorkerService};
 
-#[cfg(feature = "tower")]
-mod tower_resilience;
+// ResilienceLayer and ResilienceMiddleware live in the llm-resilience crate
+// (the orchestrator's resilience core, usable on its own) and are re-exported
+// here at their original paths.
 #[cfg(feature = "tower")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tower")))]
-pub use tower_resilience::{NoDedup, ResilienceError, ResilienceLayer, ResilienceService};
+pub use llm_resilience::{NoDedup, ResilienceError, ResilienceLayer, ResilienceService};
 
 #[cfg(feature = "reqwest-middleware")]
-mod reqwest_resilience;
-#[cfg(feature = "reqwest-middleware")]
 #[cfg_attr(docsrs, doc(cfg(feature = "reqwest-middleware")))]
-pub use reqwest_resilience::{
-    CircuitOpenError, JoinedRequestFailed, ResilienceMiddleware, SkipDedup,
-};
+pub use llm_resilience::{CircuitOpenError, JoinedRequestFailed, ResilienceMiddleware, SkipDedup};
 
 /// Map an HTTP status and message from a provider client to the error the
 /// pipeline understands: 401/403 are never retried, 429 backs off, and
