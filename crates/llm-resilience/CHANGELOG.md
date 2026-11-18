@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.1.1] - 2026-11-18
+
+### Added
+
+- `CircuitBreaker::try_acquire()` and the public `CallPermit`, for callers that decide
+  themselves which outcomes count. Report `success()` or `failure()` on the permit, or drop it
+  to record nothing (a cancelled call, or an error that says nothing about the dependency's
+  health, such as a bad request). Admission happens under the same lock as the state
+  transitions, so the half-open probe limit holds, and the permit carries its generation, so a
+  call admitted before a state change cannot move the breaker when it finishes.
+
 ## [0.1.0] - 2026-11-17
 
 First release, split out of tokio-prompt-orchestrator 2.5.0, which re-exports

@@ -3,7 +3,7 @@ members = [".", "crates/llm-resilience"]
 
 [package]
 name = "tokio-prompt-orchestrator"
-version = "2.5.0"
+version = "2.5.1"
 edition = "2021"
 rust-version = "1.88"
 default-run = "orchestrator"
@@ -45,7 +45,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [dependencies]
 # Resilience core (Dedup, CircuitBreaker, ResilienceLayer, ResilienceMiddleware),
 # published separately as llm-resilience and re-exported at the old paths.
-llm-resilience = { version = "0.1.0", path = "crates/llm-resilience" }
+llm-resilience = { version = "0.1.1", path = "crates/llm-resilience" }
 
 # Core
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-std", "signal"] }

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.5.1] - 2026-11-18
+
+### Added
+
+- `enhanced::circuit_breaker::CircuitBreaker::try_acquire()` and `CallPermit`, from
+  `llm-resilience` 0.1.1 (now the minimum): report `success()` or `failure()` yourself, or drop
+  the permit to record nothing. Probe limits and generation tagging apply as with `call()`.
+- CI checks that `llm-resilience` with no features keeps its small tree (no `dashmap`,
+  `prometheus`, `tracing-serde`, `serde`, `reqwest` and the like). Depend on `llm-resilience`
+  directly when you need only the breaker or `Dedup`.
+
 ## [2.5.0] - 2026-11-17
 
 ### Added

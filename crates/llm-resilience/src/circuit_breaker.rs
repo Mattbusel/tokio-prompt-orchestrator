@@ -260,23 +260,55 @@ where
     }
 }
 
-/// An admitted call. Dropping it without an outcome (the future was
-/// cancelled, or the operation panicked) frees its probe slot.
-struct Permit<'a> {
+/// Permission to make one call, from [`CircuitBreaker::try_acquire`].
+///
+/// Report the outcome with [`success`](Self::success) or
+/// [`failure`](Self::failure). The permit carries the breaker generation it
+/// was admitted in, so the outcome of a call admitted before a state change
+/// is ignored (a slow call admitted while closed cannot close a recovering
+/// breaker). Dropping the permit without an outcome records nothing and frees
+/// its probe slot: use that for a cancelled call, or for an error that says
+/// nothing about the dependency's health (a bad request, say).
+#[must_use = "report the outcome with success() or failure(), or drop the permit to record nothing"]
+pub struct CallPermit<'a> {
     breaker: &'a CircuitBreaker,
     generation: u64,
     probe: bool,
     done: bool,
 }
 
-impl Permit<'_> {
+impl fmt::Debug for CallPermit<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CallPermit")
+            .field("generation", &self.generation)
+            .field("probe", &self.probe)
+            .finish()
+    }
+}
+
+impl CallPermit<'_> {
     fn finish(mut self, success: bool) {
         self.done = true;
         self.breaker.record(success, self.generation, self.probe);
     }
+
+    /// Whether this call is a half-open probe.
+    pub fn is_probe(&self) -> bool {
+        self.probe
+    }
+
+    /// Record a successful call.
+    pub fn success(self) {
+        self.finish(true);
+    }
+
+    /// Record a failed call. May open the breaker.
+    pub fn failure(self) {
+        self.finish(false);
+    }
 }
 
-impl Drop for Permit<'_> {
+impl Drop for CallPermit<'_> {
     fn drop(&mut self) {
         if !self.done && self.probe {
             let mut state = self.breaker.state.lock();
@@ -417,7 +449,7 @@ impl CircuitBreaker {
     }
 
     /// Admit a call, or say why not. Returns the permit and any event to emit.
-    fn admit(&self) -> (Option<Permit<'_>>, Option<BreakerEvent>) {
+    fn admit(&self) -> (Option<CallPermit<'_>>, Option<BreakerEvent>) {
         let mut state = self.state.lock();
         let mut event = None;
         if state.status == CircuitStatus::Open {
@@ -449,13 +481,43 @@ impl CircuitBreaker {
             }
             state.probes_in_flight += 1;
         }
-        let permit = Permit {
+        let permit = CallPermit {
             breaker: self,
             generation: state.generation,
             probe,
             done: false,
         };
         (Some(permit), event)
+    }
+
+    /// Admit one call, or return `None` if the breaker is open (or half-open
+    /// with every probe slot taken).
+    ///
+    /// Use this instead of [`call`](Self::call) when you decide yourself which
+    /// outcomes count: call [`CallPermit::success`] or
+    /// [`CallPermit::failure`], or drop the permit to record nothing.
+    /// Admission and the state transitions happen under one lock, so at most
+    /// `max_probes` calls hold a probe permit at once.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use llm_resilience::CircuitBreaker;
+    ///
+    /// let breaker = CircuitBreaker::new(3, 0.8, Duration::from_secs(30));
+    /// if let Some(permit) = breaker.try_acquire() {
+    ///     let response: Result<&str, u16> = Err(400); // ... make the call ...
+    ///     match response {
+    ///         Ok(_) => permit.success(),
+    ///         Err(status) if status >= 500 => permit.failure(),
+    ///         // A client error says nothing about the server: record nothing.
+    ///         Err(_) => drop(permit),
+    ///     }
+    /// };
+    /// ```
+    pub fn try_acquire(&self) -> Option<CallPermit<'_>> {
+        let (permit, event) = self.admit();
+        self.emit(event);
+        permit
     }
 
     /// Execute a fallible async operation through the circuit breaker.
@@ -767,6 +829,63 @@ mod tests {
         assert_eq!(quick.retry_after_sync(), Some(Duration::ZERO));
         breaker.reset().await;
         assert_eq!(breaker.retry_after_sync(), None);
+    }
+
+    #[tokio::test]
+    async fn test_try_acquire_records_reported_outcomes() {
+        let breaker = CircuitBreaker::new(2, 1.0, Duration::from_secs(60));
+        breaker.try_acquire().expect("closed").failure();
+        assert_eq!(breaker.status_sync(), CircuitStatus::Closed);
+        breaker.try_acquire().expect("closed").failure();
+        assert_eq!(breaker.status_sync(), CircuitStatus::Open);
+        assert!(breaker.try_acquire().is_none(), "open breaker admits nothing");
+    }
+
+    #[tokio::test]
+    async fn test_dropped_permit_records_nothing() {
+        let breaker = CircuitBreaker::new(1, 1.0, Duration::from_secs(60));
+        for _ in 0..5 {
+            drop(breaker.try_acquire().expect("closed"));
+        }
+        assert_eq!(breaker.status_sync(), CircuitStatus::Closed);
+        assert_eq!(breaker.stats().await.failures, 0);
+    }
+
+    #[tokio::test]
+    async fn test_try_acquire_admits_one_probe_and_drop_frees_it() {
+        let breaker = CircuitBreaker::new(1, 1.0, Duration::ZERO);
+        breaker.trip().await;
+
+        let probe = breaker.try_acquire().expect("probe is due");
+        assert!(probe.is_probe());
+        assert_eq!(breaker.status_sync(), CircuitStatus::HalfOpen);
+        assert!(breaker.try_acquire().is_none(), "one probe at a time");
+
+        // A probe dropped without an outcome frees the slot and changes nothing
+        drop(probe);
+        assert_eq!(breaker.probes_in_flight(), 0);
+        assert_eq!(breaker.status_sync(), CircuitStatus::HalfOpen);
+
+        breaker.try_acquire().expect("slot was freed").success();
+        assert_eq!(breaker.status_sync(), CircuitStatus::Closed);
+    }
+
+    #[tokio::test]
+    async fn test_permit_from_before_a_state_change_is_ignored() {
+        let breaker = CircuitBreaker::new(1, 1.0, Duration::ZERO);
+        let stale = breaker.try_acquire().expect("closed");
+        assert!(!stale.is_probe());
+        breaker.trip().await;
+
+        let probe = breaker.try_acquire().expect("probe is due");
+        // The call admitted while closed finishes during recovery: it must not
+        // close the breaker while the probe is still out.
+        stale.success();
+        assert_eq!(breaker.status_sync(), CircuitStatus::HalfOpen);
+        assert_eq!(breaker.probes_in_flight(), 1);
+
+        probe.success();
+        assert_eq!(breaker.status_sync(), CircuitStatus::Closed);
     }
 
     #[tokio::test]

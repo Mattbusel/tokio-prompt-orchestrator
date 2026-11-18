@@ -56,7 +56,7 @@ mod layer;
 mod middleware;
 
 pub use circuit_breaker::{
-    add_global_event_hook, BreakerEvent, CircuitBreaker, CircuitBreakerError,
+    add_global_event_hook, BreakerEvent, CallPermit, CircuitBreaker, CircuitBreakerError,
     CircuitBreakerStats, CircuitStatus,
 };
 pub use single_flight::{Claim, Dedup, DedupStats, Leader};

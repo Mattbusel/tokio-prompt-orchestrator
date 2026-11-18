@@ -117,6 +117,16 @@ jobs:
         run: |
           cargo test -p llm-resilience
           cargo test -p llm-resilience --all-features
+      - name: llm-resilience with no features stays small
+        # Projects such as swiftide depend on the breaker alone. Its tree must stay
+        # tokio, parking_lot and tracing: fail if anything heavy creeps in.
+        run: |
+          cargo tree -p llm-resilience -e normal --prefix none > tree.txt
+          cat tree.txt
+          if grep -E '^(dashmap|prometheus|tracing-serde|tracing-subscriber|serde|serde_json|reqwest|hyper|tower) ' tree.txt; then
+            echo "llm-resilience pulls a dependency its core does not need" >&2
+            exit 1
+          fi
       - name: Examples build
         run: cargo build --examples
       - name: Run the no-key LLM pipeline example
