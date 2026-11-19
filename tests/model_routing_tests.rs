@@ -602,7 +602,7 @@ async fn different_settings_never_share_an_answer() {
 }
 
 #[tokio::test]
-async fn sampled_requests_are_shared_in_flight_but_never_cached_unless_seeded() {
+async fn the_same_sampled_prompt_twice_is_paid_for_once_unless_the_client_asks_for_fresh() {
     let (url, up) = spawn_upstream(300).await;
     let base = start(
         Arc::new(EchoWorker::new()),
@@ -620,12 +620,72 @@ async fn sampled_requests_are_shared_in_flight_but_never_cached_unless_seeded() 
     assert_eq!(outcomes, vec!["joined", "joined", "joined", "miss"]);
     assert_eq!(up.calls(), 1, "identical requests in flight share one call");
 
-    // Finished: a sampled answer is not reused.
+    // Finished: the same sampled request again is a duplicate, not a new
+    // question, so it is answered from the cache (3.0 default).
     let again = post_chat(&base, &sampled).await;
-    assert_eq!(again.headers()["x-orchestrator-dedup"], "miss");
+    assert_eq!(again.headers()["x-orchestrator-dedup"], "cached");
+    assert_eq!(up.calls(), 1);
+
+    // A fresh sample is an explicit choice, per request.
+    for (name, value) in [("x-orchestrator-fresh", "1"), ("cache-control", "no-cache")] {
+        let fresh = client()
+            .post(format!("{base}/v1/chat/completions"))
+            .header(name, value)
+            .json(&sampled)
+            .send()
+            .await
+            .expect("request sent");
+        assert_eq!(fresh.headers()["x-orchestrator-dedup"], "miss", "{name}");
+    }
+    assert_eq!(up.calls(), 3);
+}
+
+#[tokio::test]
+async fn cache_sampled_false_keeps_the_old_rule() {
+    let (url, up) = spawn_upstream(0).await;
+    let handles = spawn_pipeline(Arc::new(EchoWorker::new()));
+    let output_rx = handles.take_output_rx().await.expect("output receiver");
+    let port = free_port();
+    let cfg = ModelRoutesConfig::new(vec![openai_route("gpt-*", &url)]);
+    let config = ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        provider: "echo".to_string(),
+        model: "echo".to_string(),
+        model_routes: Some(Arc::new(
+            ModelRoutes::spawn(&cfg, &PipelineOptions::default()).expect("routes"),
+        )),
+        cache_sampled: false,
+        ..ServerConfig::default()
+    };
+    let (tx, dlq, cb) = (
+        handles.input_tx.clone(),
+        handles.dlq.clone(),
+        handles.circuit_breaker.clone(),
+    );
+    tokio::spawn(async move {
+        let _handles = handles;
+        let _ = start_server(config, tx, output_rx, dlq, cb, None).await;
+    });
+    let base = format!("http://127.0.0.1:{port}");
+    for _ in 0..100 {
+        if client().get(format!("{base}/live")).send().await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let sampled = json!({"model": "gpt-4o", "temperature": 0.8, "messages": [{"role": "user", "content": "a poem"}]});
+    assert_eq!(
+        post_chat(&base, &sampled).await.headers()["x-orchestrator-dedup"],
+        "miss"
+    );
+    assert_eq!(
+        post_chat(&base, &sampled).await.headers()["x-orchestrator-dedup"],
+        "miss"
+    );
     assert_eq!(up.calls(), 2);
 
-    // With a seed the answer is reproducible, so it is cached.
+    // With a seed the answer is reproducible, so it is cached either way.
     let mut seeded = sampled.clone();
     seeded["seed"] = json!(5);
     assert_eq!(post_chat(&base, &seeded).await.headers()["x-orchestrator-dedup"], "miss");

@@ -20,6 +20,7 @@
 //! | `inference_time_to_first_token_seconds` | Histogram | `worker`, `model` |
 //! | `orchestrator_requests_expired_total` | Counter | (none) |
 //! | `orchestrator_inference_retries_total` | Counter | (none) |
+//! | `orchestrator_retry_budget_refused_total` | Counter | (none) |
 
 use crate::OrchestratorError;
 use prometheus::{
@@ -62,6 +63,9 @@ pub struct Metrics {
     /// Inference calls retried after a transient provider error (429, 5xx,
     /// network). Only moves when retries are enabled.
     pub inference_retries_total: Counter,
+    /// Retries not sent because the dollar retry budget could not pay for
+    /// them.
+    pub retry_budget_refused_total: Counter,
     /// Requests dropped because their deadline had already passed at dequeue time.
     pub requests_expired_total: Counter,
     /// Incremented when a `DeadLetterQueue` mutex is recovered from a poisoned state.
@@ -237,6 +241,15 @@ pub fn init_metrics() -> Result<(), OrchestratorError> {
         .register(Box::new(inference_retries_total.clone()))
         .map_err(|e| OrchestratorError::Other(format!("metrics registration failed: {e}")))?;
 
+    let retry_budget_refused_total = Counter::with_opts(Opts::new(
+        "orchestrator_retry_budget_refused_total",
+        "Retries not sent because the dollar retry budget could not pay for them",
+    ))
+    .map_err(|e| OrchestratorError::Other(format!("metrics init failed: {e}")))?;
+    registry
+        .register(Box::new(retry_budget_refused_total.clone()))
+        .map_err(|e| OrchestratorError::Other(format!("metrics registration failed: {e}")))?;
+
     let requests_expired_total = Counter::with_opts(Opts::new(
         "orchestrator_requests_expired_total",
         "Requests dropped at the inference stage because their deadline had already passed",
@@ -392,6 +405,7 @@ pub fn init_metrics() -> Result<(), OrchestratorError> {
         dedup_waiters_unblocked_total,
         inference_timeouts_total,
         inference_retries_total,
+        retry_budget_refused_total,
         requests_expired_total,
         dlq_lock_poisoned_total,
         rag_requests_expired_total,
@@ -638,6 +652,13 @@ pub fn inc_expired() {
 pub fn inc_inference_retry() {
     if let Some(m) = metrics() {
         m.inference_retries_total.inc();
+    }
+}
+
+/// Increment the counter of retries refused by the dollar retry budget.
+pub fn inc_retry_budget_refused() {
+    if let Some(m) = metrics() {
+        m.retry_budget_refused_total.inc();
     }
 }
 
@@ -1065,6 +1086,13 @@ mod tests {
             .register(Box::new(inference_retries_total.clone()))
             .expect("register must succeed in tests");
 
+        let retry_budget_refused_total =
+            Counter::with_opts(Opts::new("t_retry_budget_refused_total", "test counter"))
+                .expect("Counter construction must succeed in tests");
+        registry
+            .register(Box::new(retry_budget_refused_total.clone()))
+            .expect("register must succeed in tests");
+
         let requests_expired_total =
             Counter::with_opts(Opts::new("t_requests_expired_total", "test counter"))
                 .expect("Counter construction must succeed in tests");
@@ -1187,6 +1215,7 @@ mod tests {
             dedup_waiters_unblocked_total,
             inference_timeouts_total,
         inference_retries_total,
+            retry_budget_refused_total,
             requests_expired_total,
             dlq_lock_poisoned_total,
             rag_requests_expired_total,

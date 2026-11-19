@@ -3,7 +3,7 @@ members = [".", "crates/llm-resilience"]
 
 [package]
 name = "tokio-prompt-orchestrator"
-version = "2.5.1"
+version = "3.0.0"
 edition = "2021"
 rust-version = "1.88"
 default-run = "orchestrator"
@@ -26,7 +26,7 @@ expect_used = "deny"
 # .github/workflows/release.yml (orchestrator-v<version>-<target>.tar.gz, .zip on
 # Windows) and are not the crate name, so the URL and the folder inside the
 # archive are spelled out. The archives hold the binaries that need no extra
-# feature (orchestrator, replay, coordinator, validate). Targets without a
+# feature (orchestrator, replay, burn, coordinator, validate). Targets without a
 # prebuilt archive 404, and binstall then builds from source.
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/orchestrator-v{ version }-{ target }.tar.gz"
@@ -45,7 +45,10 @@ rustdoc-args = ["--cfg", "docsrs"]
 [dependencies]
 # Resilience core (Dedup, CircuitBreaker, ResilienceLayer, ResilienceMiddleware),
 # published separately as llm-resilience and re-exported at the old paths.
-llm-resilience = { version = "0.1.1", path = "crates/llm-resilience" }
+llm-resilience = { version = "0.2.0", path = "crates/llm-resilience" }
+# Dated, source-cited list prices for the spend cap, the retry budget and
+# the burn report (the built-in table only covers a few 2024 models).
+llm-prices = "1.8"
 
 # Core
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-std", "signal"] }
@@ -327,6 +330,13 @@ path = "src/main.rs"
 [[bin]]
 name = "replay"
 path = "src/bin/replay.rs"
+required-features = ["cli"]
+
+# burn: replay request logs and price the duplicates, repeats and blind
+# retries in them; `burn audit` flags retry code with no dollar ceiling.
+[[bin]]
+name = "burn"
+path = "src/bin/burn.rs"
 required-features = ["cli"]
 
 [[bin]]

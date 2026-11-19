@@ -445,15 +445,20 @@ fn stream_events(echo: &Echo, answer: &ChatResponse, usage: Value) -> Vec<(Strin
 /// `/v1/chat/completions`. See the module docs for what is translated.
 pub(in crate::web_api) async fn responses_handler(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    match responses(state, body).await {
+    match responses(state, &headers, body).await {
         Ok(resp) => resp,
         Err(err) => err.into_response(),
     }
 }
 
-async fn responses(state: Arc<AppState>, body: axum::body::Bytes) -> Result<Response, ApiError> {
+async fn responses(
+    state: Arc<AppState>,
+    headers: &axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Response, ApiError> {
     if state.shutting_down.load(AtomicOrdering::Relaxed) {
         return Err(ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -534,7 +539,9 @@ async fn responses(state: Arc<AppState>, body: axum::body::Bytes) -> Result<Resp
         "POST /v1/responses"
     );
 
-    let (answer, outcome) = complete(&state, &target, &id, session, prompt.clone(), chat).await?;
+    let fresh = wants_fresh(headers);
+    let (answer, outcome) =
+        complete(&state, &target, &id, session, prompt.clone(), chat, fresh).await?;
     let (input_tokens, output_tokens) = usage_for(&target.reported_model, &prompt, &answer);
     let usage = serde_json::json!({
         "input_tokens": input_tokens,

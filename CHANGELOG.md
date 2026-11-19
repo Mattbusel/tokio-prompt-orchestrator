@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-11-19
+
+You pay for the same prompt twice. 3.0 makes that the exception you ask for, caps retries in
+dollars instead of attempts, and ships `burn`, which reads your request logs and prices every
+duplicate and blind retry in them.
+
+### Why the major version
+
+Two defaults change what the proxy sends upstream, and one public type loses `Copy`:
+
+- **The same sampled prompt is paid for once.** Until 2.5, a request with `temperature > 0` and
+  no `seed` was shared only while an identical one was in flight; once answered, the next
+  identical request went upstream again. Agents, retry wrappers and UIs that double-submit
+  re-send identical sampled requests all the time, and each was a second bill. Now any
+  identical request inside the dedup window (`ORCHESTRATOR_DEDUP_SECS`, default 300 s) gets the
+  cached answer (`x-orchestrator-dedup: cached`). A client that wants a new sample says so per
+  request: `x-orchestrator-fresh: 1` or `Cache-Control: no-cache`.
+  `ServerConfig::cache_sampled = false` (or `ORCHESTRATOR_CACHE_SAMPLED=0`) restores the old
+  rule.
+- **The spend cap is reserved before the call.** `--max-spend` used to compare spend so far with
+  the cap and let the next call through, so the last call could carry spend past it: a budget
+  checked after the call is a receipt. Every upstream call now reserves its worst case first
+  (prompt tokens at the input price plus `max_tokens`, or 4096 when the request sets none, at
+  the output price); a call that does not fit gets 429 `insufficient_quota` and nothing is
+  sent. The reservation is replaced by the real cost when the call ends.
+- **`enhanced::InferenceRetry` is `Clone`, not `Copy` or `Eq`**, because it can now carry a
+  `RetryBudget`. `PartialEq` is kept.
+
+### Added
+
+- **Retries capped in dollars.** `enhanced::RetryBudget` and `InferenceRetry::with_budget`:
+  each retry is priced at the prompt's input tokens plus 512 output tokens at the model's list
+  price and paid from `llm_resilience::RetrySpend` (a floor plus 10% of real spend per hour)
+  before it is sent; a retry that does not fit fails the request with its original error. The
+  `orchestrator` binary turns it on: `--retry-budget <dollars>` (default 0.50,
+  `ORCHESTRATOR_RETRY_BUDGET`), priced per route with `--models`. `--retries` is still the most
+  attempts. New metric `orchestrator_retry_budget_refused_total`.
+- **`burn`** (feature `cli`, in the release archives): `burn logs.jsonl` replays request logs
+  (OpenAI-style request/response logs, LiteLLM spend logs, Helicone and Langfuse exports, or
+  any JSONL with a time and a request) and prices identical requests sent while the first was
+  in flight, repeats within the TTL, retries after a non-retryable 4xx, agent steps that
+  repeated the previous action and got the same result, and the retries a dollar budget would
+  have refused. `--per-user`, `--ttl`, `--price MODEL=IN,OUT`, `--json`, and
+  `--fail-over SHARE` for CI. `burn audit <repo>` flags retry code that can burn money:
+  tenacity retries with no `stop`, retries on every exception (4xx included), and retry loops
+  that catch everything. The library half is `tokio_prompt_orchestrator::burn`. Findings on
+  public data: `docs/burn-findings.md`.
+- `cost_estimator::CostEstimator` prices from the dated, source-cited `llm-prices` table first
+  (current Anthropic, OpenAI, Gemini, DeepSeek, Mistral and xAI rates, dated snapshot ids
+  resolved), then its own table; an unknown model is priced high, never at $0.
+  `CostEstimator::prices_per_mtok(model)`.
+- `llm-resilience` 0.2.0 (now the minimum): `RetrySpend`, `retryable_status`, and the replay
+  window in `ResilienceMiddleware` (re-exported as `integrations::DEFAULT_REPLAY_WINDOW` and
+  `REPLAY_HEADER`).
+
 ## [2.5.1] - 2026-11-18
 
 ### Added

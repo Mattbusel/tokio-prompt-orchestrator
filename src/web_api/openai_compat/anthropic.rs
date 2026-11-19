@@ -485,15 +485,20 @@ fn stream_events(
 /// endpoint. See the module docs for what is translated.
 pub(in crate::web_api) async fn messages_handler(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    match messages(state, body).await {
+    match messages(state, &headers, body).await {
         Ok(resp) => resp,
         Err(err) => anthropic_error(&err),
     }
 }
 
-async fn messages(state: Arc<AppState>, body: axum::body::Bytes) -> Result<Response, ApiError> {
+async fn messages(
+    state: Arc<AppState>,
+    headers: &axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Response, ApiError> {
     if state.shutting_down.load(AtomicOrdering::Relaxed) {
         return Err(ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -522,7 +527,9 @@ async fn messages(state: Arc<AppState>, body: axum::body::Bytes) -> Result<Respo
         "POST /v1/messages"
     );
 
-    let (answer, outcome) = complete(&state, &target, &id, session, prompt.clone(), chat).await?;
+    let fresh = wants_fresh(headers);
+    let (answer, outcome) =
+        complete(&state, &target, &id, session, prompt.clone(), chat, fresh).await?;
     let (input_tokens, output_tokens) = usage_for(&target.reported_model, &prompt, &answer);
     let model = target.reported_model.clone();
 

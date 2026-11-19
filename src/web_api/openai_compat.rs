@@ -35,15 +35,28 @@
 //!   response format ([`crate::ChatRequest::dedup_key`]), so requests with
 //!   different settings never share an answer. Identical requests share one
 //!   upstream call while it is in flight. A completed answer is reused for
-//!   [`ServerConfig::dedup_window_secs`], except when the request has
-//!   `temperature > 0` and no `seed`: the client asked for a fresh sample,
-//!   so such answers are shared only while in flight and never cached. The
-//!   `x-orchestrator-dedup` response header says which happened: `miss`,
-//!   `joined`, `cached` or `semantic`. Semantic dedup (with an embedder)
-//!   only compares requests whose settings are identical.
-//! - **Spend cap.** With [`ServerConfig::max_spend_usd`] set, estimated spend
-//!   is tracked per upstream call and the endpoint answers 429
-//!   `insufficient_quota` once the cap is reached.
+//!   [`ServerConfig::dedup_window_secs`], whatever the request's
+//!   `temperature`: you do not pay for the same prompt twice by default.
+//!   Agents, retry wrappers and double-submitting UIs re-send identical
+//!   sampled requests all the time, and each one used to be a second bill.
+//!   A client that really wants a fresh sample says so per request with
+//!   `x-orchestrator-fresh: 1` or `Cache-Control: no-cache` (or
+//!   `no-store`); then the answer is shared only with identical requests in
+//!   flight and is not cached. [`ServerConfig::cache_sampled`]` = false`
+//!   restores the old rule (requests with `temperature > 0` and no `seed`
+//!   are never cached). The `x-orchestrator-dedup` response header says
+//!   which happened: `miss`, `joined`, `cached` or `semantic`. Semantic
+//!   dedup (with an embedder) only compares requests whose settings are
+//!   identical.
+//! - **Spend cap, reserved before the call.** With
+//!   [`ServerConfig::max_spend_usd`] set, every upstream call first
+//!   reserves its worst case (prompt tokens at the input price plus
+//!   `max_tokens`, or 4096 when the request sets none, at the output
+//!   price). A call whose worst case does not fit in what is left of the
+//!   cap is answered 429 `insufficient_quota` before anything is sent, so
+//!   the last call cannot carry spend past the cap. After the call the
+//!   reservation is replaced by the real cost. A budget checked only after
+//!   the call is a receipt, not a cap.
 //! - **Token usage.** `usage` is the provider's own count when it reports
 //!   one; otherwise it is counted with the model's tokenizer for OpenAI
 //!   models (feature `tiktoken`, on with `web-api`) or estimated at about 4
@@ -117,6 +130,10 @@ pub(super) struct OpenAiState {
     failures: DashMap<String, (Instant, ApiError)>,
     /// Estimated USD spent on upstream calls made through this endpoint.
     spent_usd: parking_lot::Mutex<f64>,
+    /// Worst-case USD of upstream calls in flight, held against the cap.
+    reserved_usd: parking_lot::Mutex<f64>,
+    /// Reuse answers to sampled requests (`temperature > 0`, no `seed`).
+    cache_sampled: bool,
     /// Unix time the server started; reported as `created` by `/v1/models`.
     started_unix: u64,
     /// Cache, in-flight table and per-route backends for `/v1/embeddings`.
@@ -139,14 +156,19 @@ impl OpenAiState {
             waiters: DashMap::new(),
             failures: DashMap::new(),
             spent_usd: parking_lot::Mutex::new(0.0),
+            reserved_usd: parking_lot::Mutex::new(0.0),
+            cache_sampled: config.cache_sampled,
             started_unix: unix_now(),
             embeddings: embeddings::EmbeddingsState::new(window),
         }
     }
 
     /// The deduplicator for `chat` sent to the route labelled `label`.
-    fn dedup_for(&self, chat: &ChatRequest, label: &str) -> Deduplicator {
-        if !chat.is_cacheable() {
+    /// `fresh` is the client asking for a new sample
+    /// (`x-orchestrator-fresh: 1`, `Cache-Control: no-cache`): shared only
+    /// while in flight, never cached.
+    fn dedup_for(&self, chat: &ChatRequest, label: &str, fresh: bool) -> Deduplicator {
+        if fresh || (!self.cache_sampled && !chat.is_cacheable()) {
             return self.in_flight_only.clone();
         }
         match &self.semantic {
@@ -850,9 +872,10 @@ async fn complete(
     session: String,
     prompt: String,
     chat: ChatRequest,
+    fresh: bool,
 ) -> Result<(ChatResponse, DedupOutcome), ApiError> {
     let key = chat.dedup_key(&target.label);
-    let dedup = state.openai.dedup_for(&chat, &target.label);
+    let dedup = state.openai.dedup_for(&chat, &target.label, fresh);
 
     for _ in 0..MAX_JOIN_ATTEMPTS {
         let (found, similar) = dedup.check_and_register_semantic(&key, &prompt).await;
@@ -877,6 +900,16 @@ async fn complete(
                 }
             },
             DeduplicationResult::New(token) => {
+                // Reserve the call's worst case against the spend cap
+                // before anything is sent; dropping the token on refusal
+                // frees the key for the next identical request.
+                let reservation = match reserve_spend(state, target, &prompt, &chat) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        drop(token);
+                        return Err(e);
+                    }
+                };
                 // Run the upstream call in its own task so a client that
                 // disconnects does not cancel it for everyone who joined.
                 let task_state = Arc::clone(state);
@@ -897,16 +930,23 @@ async fn complete(
                     match &result {
                         Ok(response) => {
                             let (p, c) = usage_for(&task_target.reported_model, &prompt, response);
-                            let cost =
-                                estimate_cost(&task_target.provider, &task_target.reported_model, p, c);
+                            let cost = estimate_cost(
+                                &task_target.provider,
+                                &task_target.reported_model,
+                                p,
+                                c,
+                            );
+                            reservation.settle(&task_state, cost);
                             if cost > 0.0 {
-                                *task_state.openai.spent_usd.lock() += cost;
                                 crate::metrics::record_inference_cost(cost);
                             }
                             task_state.openai.failures.remove(&key);
                             task_dedup.complete(token, encode_answer(response)).await;
                         }
                         Err(err) => {
+                            // A failed call is assumed unbilled: release
+                            // its reservation.
+                            reservation.settle(&task_state, 0.0);
                             task_state.openai.remember_failure(&key, err);
                             // Dropping the token wakes joined requests and
                             // clears the key so the next request retries.
@@ -934,6 +974,89 @@ async fn complete(
         "An identical request kept being cancelled. Retry.",
     )
     .retry_after(1))
+}
+
+/// Output tokens reserved against the spend cap for a request that sets
+/// no `max_tokens`.
+const DEFAULT_RESERVED_OUTPUT_TOKENS: usize = 4096;
+
+/// A worst-case cost held against the spend cap while a call is in flight.
+struct SpendReservation {
+    usd: f64,
+}
+
+impl SpendReservation {
+    /// Replace the reservation with the call's real cost.
+    fn settle(self, state: &AppState, actual_usd: f64) {
+        let mut reserved = state.openai.reserved_usd.lock();
+        *reserved = (*reserved - self.usd).max(0.0);
+        drop(reserved);
+        if actual_usd > 0.0 {
+            *state.openai.spent_usd.lock() += actual_usd;
+        }
+    }
+}
+
+/// Reserve the worst case of one upstream call against the spend cap, or
+/// answer 429 when it does not fit in what is left. Without a cap, or for a
+/// free provider, the reservation is $0.
+fn reserve_spend(
+    state: &AppState,
+    target: &Target,
+    prompt: &str,
+    chat: &ChatRequest,
+) -> Result<SpendReservation, ApiError> {
+    let Some(cap) = state.config.max_spend_usd else {
+        return Ok(SpendReservation { usd: 0.0 });
+    };
+    let max_output = chat
+        .max_completion_tokens
+        .or(chat.max_tokens)
+        .map_or(DEFAULT_RESERVED_OUTPUT_TOKENS, |n| {
+            usize::try_from(n).unwrap_or(usize::MAX)
+        });
+    let worst = estimate_cost(
+        &target.provider,
+        &target.reported_model,
+        prompt_tokens(&target.reported_model, prompt),
+        max_output,
+    );
+    let spent = *state.openai.spent_usd.lock();
+    let mut reserved = state.openai.reserved_usd.lock();
+    if spent + *reserved + worst > cap {
+        let left = (cap - spent - *reserved).max(0.0);
+        return Err(ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "insufficient_quota",
+            "insufficient_quota",
+            format!(
+                "This call could cost up to ${worst:.4} and only ${left:.4} of the orchestrator's \
+                 ${cap:.2} spend cap is left (spent ${spent:.4}, ${:.4} held by calls in flight). \
+                 Nothing was sent. Lower max_tokens, wait for calls in flight, or raise --max-spend.",
+                *reserved
+            ),
+        ));
+    }
+    *reserved += worst;
+    Ok(SpendReservation { usd: worst })
+}
+
+/// Whether the client asked for a fresh sample instead of a reused answer:
+/// `x-orchestrator-fresh: 1` (or `true`), or `Cache-Control: no-cache` /
+/// `no-store`.
+pub(super) fn wants_fresh(headers: &axum::http::HeaderMap) -> bool {
+    let fresh = headers
+        .get("x-orchestrator-fresh")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"));
+    fresh
+        || headers
+            .get_all(axum::http::header::CACHE_CONTROL)
+            .iter()
+            .any(|v| {
+                v.to_str()
+                    .is_ok_and(|s| s.contains("no-cache") || s.contains("no-store"))
+            })
 }
 
 /// 429 once the spend cap is reached.
@@ -975,15 +1098,20 @@ fn add_dedup_headers(resp: &mut Response, outcome: DedupOutcome) {
 /// `POST /v1/chat/completions`: OpenAI Chat Completions, JSON or SSE.
 pub(super) async fn chat_completions_handler(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    match chat_completions(state, body).await {
+    match chat_completions(state, &headers, body).await {
         Ok(resp) => resp,
         Err(err) => err.into_response(),
     }
 }
 
-async fn chat_completions(state: Arc<AppState>, body: axum::body::Bytes) -> Result<Response, ApiError> {
+async fn chat_completions(
+    state: Arc<AppState>,
+    headers: &axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Response, ApiError> {
     if state.shutting_down.load(AtomicOrdering::Relaxed) {
         return Err(ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1040,7 +1168,9 @@ async fn chat_completions(state: Arc<AppState>, body: axum::body::Bytes) -> Resu
         "POST /v1/chat/completions"
     );
 
-    let (answer, outcome) = complete(&state, &target, &id, session, prompt.clone(), chat).await?;
+    let fresh = wants_fresh(headers);
+    let (answer, outcome) =
+        complete(&state, &target, &id, session, prompt.clone(), chat, fresh).await?;
     let (prompt_tokens, completion_tokens) = usage_for(&target.reported_model, &prompt, &answer);
     let usage = serde_json::json!({
         "prompt_tokens": prompt_tokens,

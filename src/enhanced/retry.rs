@@ -438,6 +438,18 @@ where
 /// All attempts of one request count as one call for the circuit breaker,
 /// and all of them together must fit in the inference timeout.
 ///
+/// # Retries cost money, so they are capped in money
+///
+/// A retry count says nothing about what the retries cost: three retries of
+/// a 200,000-token agent context on a frontier model are dollars, and during
+/// an outage every request retries at once. With a [`RetryBudget`] set
+/// ([`with_budget`](Self::with_budget), on by default in the `orchestrator`
+/// binary), each retry must first be paid for from a dollar budget (a floor
+/// plus 10% of the pipeline's real spend per hour, see
+/// [`llm_resilience::RetrySpend`]). A retry that does not fit is not sent:
+/// the request fails with the error it already has. `max_retries` stays as
+/// an upper bound on attempts.
+///
 /// # Examples
 ///
 /// ```
@@ -448,7 +460,7 @@ where
 /// assert!(retry.is_enabled());
 /// assert!(!InferenceRetry::disabled().is_enabled());
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct InferenceRetry {
     /// Retries after the first attempt. `0` disables retrying.
     pub max_retries: u32,
@@ -457,6 +469,100 @@ pub struct InferenceRetry {
     /// Cap on the backoff delay, and on how long a `Retry-After` may ask
     /// the stage to wait. A longer `Retry-After` fails the request instead.
     pub max_delay: Duration,
+    /// Dollar budget every retry must fit in. `None` caps retries by count
+    /// only.
+    pub budget: Option<RetryBudget>,
+}
+
+impl PartialEq for InferenceRetry {
+    /// Equal settings; two budgets compare equal when their prices match
+    /// (the shared spend counters are not compared).
+    fn eq(&self, other: &Self) -> bool {
+        self.max_retries == other.max_retries
+            && self.base_delay == other.base_delay
+            && self.max_delay == other.max_delay
+            && match (&self.budget, &other.budget) {
+                (None, None) => true,
+                (Some(a), Some(b)) => {
+                    a.input_usd_per_mtok == b.input_usd_per_mtok
+                        && a.output_usd_per_mtok == b.output_usd_per_mtok
+                }
+                _ => false,
+            }
+    }
+}
+
+/// Output tokens a retry is assumed to produce when it is priced before it
+/// is sent.
+pub const RETRY_OUTPUT_TOKENS_ESTIMATE: usize = 512;
+
+/// A dollar budget for pipeline retries: the shared
+/// [`llm_resilience::RetrySpend`] plus the model's prices, so a retry can be
+/// priced before it is sent.
+///
+/// A retry is priced at the prompt's input tokens at the input price plus
+/// [`RETRY_OUTPUT_TOKENS_ESTIMATE`] output tokens at the output price.
+/// Successful calls record their own cost as real spend, which grows the
+/// allowance by 10% of it.
+///
+/// ```
+/// use llm_resilience::RetrySpend;
+/// use tokio_prompt_orchestrator::enhanced::RetryBudget;
+///
+/// // $3 / $15 per million tokens; $0.05 floor, nothing spent yet.
+/// let b = RetryBudget::new(RetrySpend::new(0.05), 3.0, 15.0);
+/// // A 10,000-token prompt: $0.03 input + 512 output tokens ($0.00768).
+/// assert!((b.retry_cost(10_000) - 0.03768).abs() < 1e-9);
+/// assert!(b.spend.try_retry(b.retry_cost(10_000)).is_ok());
+/// assert!(b.spend.try_retry(b.retry_cost(10_000)).is_err()); // $0.05 is used up
+/// ```
+#[derive(Debug, Clone)]
+pub struct RetryBudget {
+    /// The shared budget (clones share it).
+    pub spend: llm_resilience::RetrySpend,
+    /// Input price, USD per million tokens.
+    pub input_usd_per_mtok: f64,
+    /// Output price, USD per million tokens.
+    pub output_usd_per_mtok: f64,
+}
+
+impl RetryBudget {
+    /// A budget with explicit prices.
+    pub fn new(
+        spend: llm_resilience::RetrySpend,
+        input_usd_per_mtok: f64,
+        output_usd_per_mtok: f64,
+    ) -> Self {
+        Self {
+            spend,
+            input_usd_per_mtok,
+            output_usd_per_mtok,
+        }
+    }
+
+    /// A budget priced for `provider` / `model`: free for local providers
+    /// (`echo`, `llama`, `llama_cpp`), otherwise the model's list price from
+    /// [`CostEstimator`](crate::cost_estimator::CostEstimator) (an unknown
+    /// model is priced high, never at $0).
+    pub fn for_model(spend: llm_resilience::RetrySpend, provider: &str, model: &str) -> Self {
+        let (input, output) = match provider {
+            "echo" | "llama" | "llama_cpp" => (0.0, 0.0),
+            _ => crate::cost_estimator::CostEstimator::new().prices_per_mtok(model),
+        };
+        Self::new(spend, input, output)
+    }
+
+    /// Cost of a call with these token counts.
+    pub fn call_cost(&self, input_tokens: usize, output_tokens: usize) -> f64 {
+        (input_tokens as f64 * self.input_usd_per_mtok
+            + output_tokens as f64 * self.output_usd_per_mtok)
+            / 1_000_000.0
+    }
+
+    /// What one retry of a `prompt_tokens`-token prompt is priced at.
+    pub fn retry_cost(&self, prompt_tokens: usize) -> f64 {
+        self.call_cost(prompt_tokens, RETRY_OUTPUT_TOKENS_ESTIMATE)
+    }
 }
 
 impl Default for InferenceRetry {
@@ -472,6 +578,7 @@ impl InferenceRetry {
             max_retries: 0,
             base_delay: Duration::from_millis(100),
             max_delay: Duration::from_secs(5),
+            budget: None,
         }
     }
 
@@ -482,6 +589,46 @@ impl InferenceRetry {
             max_retries,
             base_delay,
             max_delay,
+            budget: None,
+        }
+    }
+
+    /// Make every retry pay for itself from `budget` first; a retry that
+    /// does not fit fails the request with the error it already has.
+    #[must_use]
+    pub fn with_budget(mut self, budget: RetryBudget) -> Self {
+        self.budget = Some(budget);
+        self
+    }
+
+    /// Book the cost of a successful call as real spend, which raises the
+    /// retry allowance. No-op without a budget.
+    pub fn record_call(&self, prompt_tokens: usize, output_tokens: usize) {
+        if let Some(b) = &self.budget {
+            b.spend
+                .record_spend(b.call_cost(prompt_tokens, output_tokens));
+        }
+    }
+
+    /// Whether the budget (if any) pays for one more retry of a
+    /// `prompt_tokens`-token prompt. Books the cost when it does.
+    fn pay_for_retry(&self, prompt_tokens: usize) -> bool {
+        let Some(b) = &self.budget else {
+            return true;
+        };
+        match b.spend.try_retry(b.retry_cost(prompt_tokens)) {
+            Ok(()) => true,
+            Err(refused) => {
+                crate::metrics::inc_retry_budget_refused();
+                warn!(
+                    target: "orchestrator::pipeline",
+                    estimated_usd = refused.estimated_usd(),
+                    remaining_usd = refused.remaining_usd(),
+                    allowance_usd = refused.allowance_usd(),
+                    "Retry refused by the dollar retry budget; failing with the original error"
+                );
+                false
+            }
         }
     }
 
@@ -501,7 +648,24 @@ impl InferenceRetry {
     }
 
     /// Run `f`, retrying transient failures according to these settings.
-    pub async fn run<F, Fut, T>(&self, mut f: F) -> Result<T, OrchestratorError>
+    /// Retries are priced as a zero-token prompt; use
+    /// [`run_for_prompt`](Self::run_for_prompt) when a budget is set.
+    pub async fn run<F, Fut, T>(&self, f: F) -> Result<T, OrchestratorError>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<T, OrchestratorError>>,
+    {
+        self.run_for_prompt(0, f).await
+    }
+
+    /// Run `f`, retrying transient failures according to these settings,
+    /// with each retry priced for a `prompt_tokens`-token prompt and paid
+    /// from the budget (if any) before it is sent.
+    pub async fn run_for_prompt<F, Fut, T>(
+        &self,
+        prompt_tokens: usize,
+        mut f: F,
+    ) -> Result<T, OrchestratorError>
     where
         F: FnMut() -> Fut,
         Fut: std::future::Future<Output = Result<T, OrchestratorError>>,
@@ -516,7 +680,7 @@ impl InferenceRetry {
             .with_max_times(self.max_retries as usize)
             .with_jitter();
         f.retry(backoff)
-            .when(OrchestratorError::is_retryable)
+            .when(|e| e.is_retryable() && self.pay_for_retry(prompt_tokens))
             .adjust(move |e, delay| match e {
                 // Wait as long as the provider asked, unless that is longer
                 // than we are allowed to wait: then give up and fail fast.
@@ -748,6 +912,54 @@ mod tests {
         assert!(matches!(result, Err(OrchestratorError::RateLimited { .. })));
         assert_eq!(calls.load(Ordering::SeqCst), 1, "a 60 s Retry-After is over the 5 s cap");
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn test_inference_retry_stops_when_the_dollar_budget_is_spent() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        // $3 / $15 per 1M tokens; a 100,000-token prompt retry costs
+        // $0.30 + 512 * $15 / 1M = $0.30768. A $0.70 floor pays for two.
+        let budget = RetryBudget::new(llm_resilience::RetrySpend::new(0.70), 3.0, 15.0);
+        let retry = InferenceRetry::new(10, Duration::from_millis(1), Duration::from_millis(5))
+            .with_budget(budget.clone());
+        let result: Result<(), _> = retry
+            .run_for_prompt(100_000, || {
+                c.fetch_add(1, Ordering::SeqCst);
+                async { Err(OrchestratorError::Inference("503".into())) }
+            })
+            .await;
+        assert!(matches!(result, Err(OrchestratorError::Inference(_))));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "first try plus the 2 retries $0.70 pays for"
+        );
+        let stats = budget.spend.stats();
+        assert_eq!((stats.granted, stats.refused), (2, 1));
+
+        // A free model's retries cost nothing, so the count is the only cap.
+        let free =
+            InferenceRetry::new(3, Duration::from_millis(1), Duration::from_millis(5)).with_budget(
+                RetryBudget::new(llm_resilience::RetrySpend::new(0.0), 0.0, 0.0),
+            );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let _: Result<(), _> = free
+            .run_for_prompt(100_000, || {
+                c.fetch_add(1, Ordering::SeqCst);
+                async { Err(OrchestratorError::Inference("503".into())) }
+            })
+            .await;
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn test_record_call_raises_the_allowance() {
+        let budget = RetryBudget::new(llm_resilience::RetrySpend::new(0.0), 3.0, 15.0);
+        let retry = InferenceRetry::disabled().with_budget(budget.clone());
+        retry.record_call(1_000_000, 0); // $3 of real spend
+        assert!((budget.spend.allowance_usd() - 0.3).abs() < 1e-9);
     }
 
     #[test]

@@ -188,25 +188,42 @@ impl CostEstimator {
     // Cost computation helpers
     // -----------------------------------------------------------------------
 
-    fn compute_cost(&self, input_tokens: usize, output_tokens: usize, model: &str) -> (f64, f64) {
-        // Look up by exact string match against the static key.
-        let price = self.prices.iter().find(|(k, _)| **k == model);
-        match price {
-            Some((_, p)) => {
-                let cost = (input_tokens as f64 / 1_000_000.0) * p.input_per_1m
-                    + (output_tokens as f64 / 1_000_000.0) * p.output_per_1m;
-                (cost, 0.90) // confidence high for known model
-            }
-            None => {
-                // Unknown model: fall back to gpt-4o pricing, lower confidence.
-                // `prices` is public, so gpt-4o may have been removed; estimate zero then.
-                let cost = self.prices.get("gpt-4o").map_or(0.0, |fallback| {
-                    (input_tokens as f64 / 1_000_000.0) * fallback.input_per_1m
-                        + (output_tokens as f64 / 1_000_000.0) * fallback.output_per_1m
-                });
-                (cost, 0.40)
+    /// Input and output price (USD per 1M tokens) for `model`, and how sure
+    /// the estimate is.
+    ///
+    /// Prices come from the dated, source-cited [`llm_prices`] table first
+    /// (current list prices for Anthropic, OpenAI, Gemini, DeepSeek, Mistral,
+    /// xAI and the big hosts, with dated snapshot ids resolved), then this
+    /// module's own small table. A model neither knows is priced at the
+    /// `gpt-4o` rate of the built-in table, never at $0: an unknown model
+    /// booked as free is how a spend cap stops working.
+    fn rates(&self, model: &str) -> (f64, f64, f64) {
+        if let Some(p) = llm_prices::lookup(model) {
+            if let (Some(input), Some(output)) = (p.input, p.output) {
+                return (input, output, 0.95);
             }
         }
+        if let Some(p) = self.prices.get(model) {
+            return (p.input_per_1m, p.output_per_1m, 0.90);
+        }
+        match self.prices.get("gpt-4o") {
+            Some(p) => (p.input_per_1m, p.output_per_1m, 0.40),
+            None => (5.0, 15.0, 0.40),
+        }
+    }
+
+    fn compute_cost(&self, input_tokens: usize, output_tokens: usize, model: &str) -> (f64, f64) {
+        let (input, output, confidence) = self.rates(model);
+        let cost = (input_tokens as f64 / 1_000_000.0) * input
+            + (output_tokens as f64 / 1_000_000.0) * output;
+        (cost, confidence)
+    }
+
+    /// Input and output price of `model` in USD per 1M tokens, as used by
+    /// [`cost_for_tokens`](Self::cost_for_tokens).
+    pub fn prices_per_mtok(&self, model: &str) -> (f64, f64) {
+        let (input, output, _) = self.rates(model);
+        (input, output)
     }
 
     // -----------------------------------------------------------------------
@@ -316,6 +333,22 @@ mod tests {
         let budget = BudgetConfig::default();
         let result = est.estimate_cost("Some text", "unknown-model-xyz", TaskType::Summarization, &budget);
         assert!(result.confidence < 0.5);
+    }
+
+    #[test]
+    fn test_current_models_use_list_prices_and_unknown_is_never_free() {
+        let est = CostEstimator::new();
+        // Current models resolve through the llm-prices table, dated ids too.
+        assert_eq!(
+            est.prices_per_mtok("claude-sonnet-4-5-20250929"),
+            (3.0, 15.0)
+        );
+        assert_eq!(est.prices_per_mtok("gpt-4o-mini"), (0.15, 0.6));
+        let (input, output) = est.prices_per_mtok("some-model-from-next-week");
+        assert!(
+            input > 0.0 && output > 0.0,
+            "an unknown model must not be free"
+        );
     }
 
     #[test]

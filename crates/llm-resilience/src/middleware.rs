@@ -6,15 +6,23 @@
 //! requests that are in flight at the same time share one upstream call,
 //! while a provider that keeps failing is cut off quickly instead of every
 //! request waiting for its own timeout.
+//!
+//! Since 0.2.0 it also refuses to pay for the same prompt twice in a row:
+//! a completed 2xx answer to an inference request (a JSON `POST` with
+//! `messages`, `prompt`, `input` or `contents`) is replayed to an identical
+//! request for 5 minutes by default. Opt out per request with
+//! `Cache-Control: no-cache` or [`SkipDedup`], or for the client with
+//! [`ResilienceMiddleware::with_replay_window`]`(Duration::ZERO)`.
 
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use dashmap::DashMap;
 use http::Extensions;
-use reqwest::header::{HeaderMap, HeaderName};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Method, Request, Response, ResponseBuilderExt, StatusCode, Url, Version};
 use reqwest_middleware::{Error, Middleware, Next, Result};
 use sha2::{Digest, Sha256};
@@ -154,6 +162,66 @@ enum Breakers {
     },
 }
 
+/// Default replay window for a completed inference answer.
+pub const DEFAULT_REPLAY_WINDOW: Duration = Duration::from_secs(300);
+
+/// Most answers kept for replay at once.
+const MAX_REPLAY_ENTRIES: usize = 10_000;
+
+/// Response header set on an answer replayed from the window:
+/// `x-llm-resilience: replayed`.
+pub const REPLAY_HEADER: &str = "x-llm-resilience";
+
+/// Completed inference answers, replayed to identical requests for `window`.
+struct Replay {
+    window: Duration,
+    map: DashMap<[u8; 32], (Instant, Buffered)>,
+    replayed: AtomicU64,
+}
+
+impl Replay {
+    fn new(window: Duration) -> Self {
+        Self {
+            window,
+            map: DashMap::new(),
+            replayed: AtomicU64::new(0),
+        }
+    }
+
+    fn get(&self, key: &[u8; 32]) -> Option<Buffered> {
+        let hit = {
+            let entry = self.map.get(key)?;
+            let (at, buffered) = entry.value();
+            if at.elapsed() < self.window {
+                Some(buffered.clone())
+            } else {
+                None
+            }
+        };
+        match hit {
+            Some(b) => {
+                self.replayed.fetch_add(1, Ordering::Relaxed);
+                Some(b)
+            }
+            None => {
+                self.map.remove(key);
+                None
+            }
+        }
+    }
+
+    fn put(&self, key: [u8; 32], buffered: &Buffered) {
+        if self.map.len() >= MAX_REPLAY_ENTRIES {
+            let window = self.window;
+            self.map.retain(|_, (at, _)| at.elapsed() < window);
+            if self.map.len() >= MAX_REPLAY_ENTRIES {
+                return;
+            }
+        }
+        self.map.insert(key, (Instant::now(), buffered.clone()));
+    }
+}
+
 /// Headers left out of the dedup key by default: tracing and request-id
 /// headers that differ on every request without changing the response.
 const DEFAULT_IGNORED_HEADERS: &[&str] = &[
@@ -186,6 +254,16 @@ const DEFAULT_IGNORED_HEADERS: &[&str] = &[
 /// or `Accept: text/event-stream`) and requests carrying [`SkipDedup`] are
 /// never deduplicated, so streams keep streaming. Credentials are part of the
 /// key, so two API keys never share a response.
+///
+/// **Replay window.** A completed 2xx answer to an inference request (a
+/// JSON `POST` whose body has `messages`, `prompt`, `input` or `contents`)
+/// is kept for [`DEFAULT_REPLAY_WINDOW`] (5 minutes) and an identical
+/// request in that window gets it back without an upstream call, marked
+/// with the response header `x-llm-resilience: replayed`. The same prompt
+/// sent twice is paid for once, whatever its `temperature`: if you want a
+/// second sample, say so with `Cache-Control: no-cache` on the request (or
+/// [`SkipDedup`]). Change or turn off the window with
+/// [`with_replay_window`](Self::with_replay_window).
 ///
 /// **Circuit breaker.** One breaker per host by default: 5 consecutive
 /// failures open it, it lets a probe through after 30 s, and while open,
@@ -228,6 +306,7 @@ const DEFAULT_IGNORED_HEADERS: &[&str] = &[
 /// reqwest 0.12).
 pub struct ResilienceMiddleware {
     dedup: Option<Dedup<[u8; 32], Shared>>,
+    replay: Option<Arc<Replay>>,
     breakers: Breakers,
     is_failure: Arc<dyn Fn(StatusCode) -> bool + Send + Sync>,
     ignored_headers: Vec<HeaderName>,
@@ -242,6 +321,7 @@ impl fmt::Debug for ResilienceMiddleware {
         };
         f.debug_struct("ResilienceMiddleware")
             .field("dedup", &self.dedup)
+            .field("replay_window", &self.replay.as_ref().map(|r| r.window))
             .field("circuit_breakers", &breakers)
             .finish()
     }
@@ -254,11 +334,13 @@ impl Default for ResilienceMiddleware {
 }
 
 impl ResilienceMiddleware {
-    /// Deduplication on, and a circuit breaker per host (5 consecutive
-    /// failures open it, a probe goes through after 30 s).
+    /// Deduplication on, completed inference answers replayed for 5
+    /// minutes, and a circuit breaker per host (5 consecutive failures open
+    /// it, a probe goes through after 30 s).
     pub fn new() -> Self {
         Self {
             dedup: Some(Dedup::new()),
+            replay: Some(Arc::new(Replay::new(DEFAULT_REPLAY_WINDOW))),
             breakers: Breakers::PerHost {
                 failure_threshold: 5,
                 success_threshold: 0.8,
@@ -273,11 +355,34 @@ impl ResilienceMiddleware {
         }
     }
 
-    /// Turn deduplication off (circuit breaker only).
+    /// Turn deduplication and the replay window off (circuit breaker only).
     #[must_use]
     pub fn without_dedup(mut self) -> Self {
         self.dedup = None;
+        self.replay = None;
         self
+    }
+
+    /// How long a completed inference answer is replayed to identical
+    /// requests (default [`DEFAULT_REPLAY_WINDOW`], 5 minutes).
+    /// `Duration::ZERO` turns replay off, so only requests in flight at the
+    /// same time share a call (the behaviour before 0.2.0).
+    #[must_use]
+    pub fn with_replay_window(mut self, window: Duration) -> Self {
+        self.replay = if window.is_zero() {
+            None
+        } else {
+            Some(Arc::new(Replay::new(window)))
+        };
+        self
+    }
+
+    /// Answers served from the replay window so far: upstream calls, and
+    /// their cost, that did not happen. `None` when replay is off.
+    pub fn replayed(&self) -> Option<u64> {
+        self.replay
+            .as_ref()
+            .map(|r| r.replayed.load(Ordering::Relaxed))
     }
 
     /// Turn the circuit breaker off (deduplication only).
@@ -462,6 +567,15 @@ impl Middleware for ResilienceMiddleware {
         let (Some(dedup), Some(key)) = (&self.dedup, self.dedup_key(&req, extensions)) else {
             return self.send(req, extensions, next).await;
         };
+        let replay = match &self.replay {
+            Some(r) if replayable(&req) => Some(Arc::clone(r)),
+            _ => None,
+        };
+        if let Some(r) = &replay {
+            if let Some(buffered) = r.get(&key) {
+                return replayed_response(&buffered);
+            }
+        }
         let leader = match dedup.claim(key).await {
             Claim::Joined(Ok(buffered)) => return buffered.to_response(),
             Claim::Joined(Err(SharedFailure::Open(e))) => return Err(Error::middleware(e)),
@@ -470,9 +584,23 @@ impl Middleware for ResilienceMiddleware {
             }
             Claim::Leader(leader) => leader,
         };
+        // A request that waited behind a leader which has just finished
+        // finds its answer in the replay window instead of calling again.
+        if let Some(r) = &replay {
+            if let Some(buffered) = r.get(&key) {
+                let out = replayed_response(&buffered);
+                leader.complete(Ok(buffered));
+                return out;
+            }
+        }
         match self.send(req, extensions, next).await {
             Ok(resp) => match Buffered::read(resp).await {
                 Ok(buffered) => {
+                    if let Some(r) = &replay {
+                        if buffered.status.is_success() {
+                            r.put(key, &buffered);
+                        }
+                    }
                     let out = buffered.to_response();
                     leader.complete(Ok(buffered));
                     out
@@ -504,6 +632,43 @@ fn host_key(url: &Url) -> String {
     match url.port_or_known_default() {
         Some(port) => format!("{host}:{port}"),
         None => host.to_string(),
+    }
+}
+
+/// A replayed answer, marked with `x-llm-resilience: replayed`.
+fn replayed_response(buffered: &Buffered) -> Result<Response> {
+    let mut resp = buffered.to_response()?;
+    resp.headers_mut()
+        .insert(REPLAY_HEADER, HeaderValue::from_static("replayed"));
+    Ok(resp)
+}
+
+/// Whether a completed answer to `req` may be replayed: a `POST` of an
+/// inference request (a JSON body with `messages`, `prompt`, `input` or
+/// `contents`) without `Cache-Control: no-cache` or `no-store`.
+fn replayable(req: &Request) -> bool {
+    if *req.method() != Method::POST {
+        return false;
+    }
+    let no_cache = req
+        .headers()
+        .get_all(reqwest::header::CACHE_CONTROL)
+        .iter()
+        .any(|v| {
+            v.to_str()
+                .is_ok_and(|s| s.contains("no-cache") || s.contains("no-store"))
+        });
+    if no_cache {
+        return false;
+    }
+    let Some(body) = req.body().and_then(|b| b.as_bytes()) else {
+        return false;
+    };
+    match serde_json::from_slice::<serde_json::Value>(body) {
+        Ok(serde_json::Value::Object(map)) => ["messages", "prompt", "input", "contents"]
+            .iter()
+            .any(|k| map.contains_key(*k)),
+        _ => false,
     }
 }
 
@@ -543,6 +708,25 @@ mod tests {
             "text/event-stream".parse().unwrap(),
         );
         assert!(wants_stream(&sse, b""));
+    }
+
+    #[test]
+    fn only_inference_posts_are_replayable() {
+        let c = reqwest::Client::new();
+        let chat = |b: &str| c.post("http://h/v1/chat").body(b.to_string());
+        assert!(replayable(&chat(r#"{"messages":[]}"#).build().unwrap()));
+        assert!(replayable(&chat(r#"{"prompt":"x"}"#).build().unwrap()));
+        assert!(replayable(&chat(r#"{"input":"x"}"#).build().unwrap()));
+        assert!(replayable(&chat(r#"{"contents":[]}"#).build().unwrap()));
+        assert!(!replayable(&chat(r#"{"file_id":"f"}"#).build().unwrap()));
+        assert!(!replayable(&chat("not json").build().unwrap()));
+        assert!(!replayable(
+            &chat(r#"{"messages":[]}"#)
+                .header("cache-control", "no-cache")
+                .build()
+                .unwrap()
+        ));
+        assert!(!replayable(&c.get("http://h/v1/models").build().unwrap()));
     }
 
     #[test]

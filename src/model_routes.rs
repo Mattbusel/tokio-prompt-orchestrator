@@ -552,6 +552,17 @@ impl ModelRoutes {
         for route in &config.models {
             let mut opts = options.clone();
             opts.inference_timeout = route.effective_timeout(options.inference_timeout);
+            // Same shared retry budget, priced for this route's model. A glob
+            // route without a fixed model is priced by its name pattern,
+            // which as an unknown model is priced high, never at $0.
+            if let Some(b) = &opts.retry.budget {
+                let model = route.model.as_deref().unwrap_or(&route.name);
+                opts.retry.budget = Some(crate::enhanced::RetryBudget::for_model(
+                    b.spend.clone(),
+                    route.provider.as_str(),
+                    model,
+                ));
+            }
             // The pipeline enforces the timeout (and counts it against the
             // breaker); the worker's own HTTP timeout is a backstop.
             let worker = route.build_worker(opts.inference_timeout + Duration::from_secs(1))?;

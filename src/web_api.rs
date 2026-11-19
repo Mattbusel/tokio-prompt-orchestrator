@@ -191,6 +191,14 @@ pub struct ServerConfig {
     /// Default: 300.
     #[serde(default = "default_dedup_window_secs")]
     pub dedup_window_secs: u64,
+    /// Reuse answers to sampled requests (`temperature > 0` and no `seed`)
+    /// for `dedup_window_secs` like any other. Default `true`: the same
+    /// prompt sent twice is paid for once. A client that wants a fresh
+    /// sample sends `x-orchestrator-fresh: 1` or `Cache-Control: no-cache`.
+    /// `false` restores the rule before 3.0 (sampled requests are shared
+    /// only while in flight).
+    #[serde(default = "default_cache_sampled")]
+    pub cache_sampled: bool,
     /// Embedder for semantic dedup on `/v1/chat/completions`: with one set,
     /// a prompt that means the same as one answered within
     /// `dedup_window_secs` is answered from the cache even when worded
@@ -244,6 +252,11 @@ fn default_dedup_window_secs() -> u64 {
 }
 
 #[cfg(feature = "web-api")]
+fn default_cache_sampled() -> bool {
+    true
+}
+
+#[cfg(feature = "web-api")]
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -259,6 +272,7 @@ impl Default for ServerConfig {
             model: default_provider(),
             max_spend_usd: None,
             dedup_window_secs: default_dedup_window_secs(),
+            cache_sampled: default_cache_sampled(),
             embedder: None,
             semantic_threshold: default_semantic_threshold(),
             api_key: None,

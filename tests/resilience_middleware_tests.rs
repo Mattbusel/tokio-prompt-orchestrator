@@ -217,3 +217,81 @@ async fn stats_count_leaders_and_coalesced_requests() {
         .circuit_breaker_for(&server.address().ip().to_string())
         .is_some());
 }
+
+#[tokio::test]
+async fn the_same_prompt_twice_is_paid_for_once() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(r#"{"choices":[{"message":{"content":"Paris"}}]}"#),
+        )
+        .mount(&server)
+        .await;
+    let mw = std::sync::Arc::new(ResilienceMiddleware::new());
+    let client = ClientBuilder::new(reqwest::Client::new())
+        .with_arc(mw.clone())
+        .build();
+    let url = format!("{}/v1/chat/completions", server.uri());
+    // A sampled request (temperature 1) sent twice, one after the other.
+    let body = serde_json::json!({
+        "model": "gpt-4o-mini",
+        "temperature": 1.0,
+        "messages": [{"role": "user", "content": "Capital of France?"}]
+    });
+
+    let first = client.post(&url).json(&body).send().await.unwrap();
+    assert!(first.headers().get(llm_resilience::REPLAY_HEADER).is_none());
+    let second = client.post(&url).json(&body).send().await.unwrap();
+    assert_eq!(second.headers()[llm_resilience::REPLAY_HEADER], "replayed");
+    assert!(second.text().await.unwrap().contains("Paris"));
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    assert_eq!(mw.replayed(), Some(1));
+
+    // Asking for a fresh sample is an explicit choice.
+    let fresh = client
+        .post(&url)
+        .header("cache-control", "no-cache")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert!(fresh.headers().get(llm_resilience::REPLAY_HEADER).is_none());
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn failures_are_not_replayed_and_the_window_can_be_turned_off() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(400))
+        .mount(&server)
+        .await;
+    let client400 = client(ResilienceMiddleware::new());
+    let url = format!("{}/v1/chat/completions", server.uri());
+    for _ in 0..2 {
+        let r = client400.post(&url).json(&chat_body(false)).send().await;
+        assert_eq!(r.unwrap().status(), 400);
+    }
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+
+    let ok = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+        .mount(&ok)
+        .await;
+    let mw = ResilienceMiddleware::new().with_replay_window(Duration::ZERO);
+    assert_eq!(mw.replayed(), None);
+    let plain = client(mw);
+    let url = format!("{}/v1/chat/completions", ok.uri());
+    for _ in 0..2 {
+        plain
+            .post(&url)
+            .json(&chat_body(false))
+            .send()
+            .await
+            .unwrap();
+    }
+    assert_eq!(ok.received_requests().await.unwrap().len(), 2);
+}

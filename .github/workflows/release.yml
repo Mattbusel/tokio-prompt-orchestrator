@@ -31,7 +31,7 @@ env:
   TAG: ${{ github.event_name == 'pull_request' && 'pr-test' || github.event.inputs.tag || github.ref_name }}
   NAME: orchestrator
   # Every binary that needs no extra feature, so `cargo binstall` finds them all.
-  BINS: orchestrator replay coordinator validate
+  BINS: orchestrator replay burn coordinator validate
 
 jobs:
   build:

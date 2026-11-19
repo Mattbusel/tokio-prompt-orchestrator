@@ -21,7 +21,7 @@
 //! | Feature | Type | Wraps |
 //! |---|---|---|
 //! | `tower` | [`ResilienceLayer`] | any `tower::Service` (HTTP client, LLM client, gRPC channel): single-flight dedup by a key you choose, plus a circuit breaker |
-//! | `reqwest-middleware` | [`ResilienceMiddleware`] | a `reqwest_middleware::ClientWithMiddleware` (reqwest 0.12, reqwest-middleware 0.4): identical in-flight requests share one upstream call, and a circuit breaker per host |
+//! | `reqwest-middleware` | [`ResilienceMiddleware`] | a `reqwest_middleware::ClientWithMiddleware` (reqwest 0.12, reqwest-middleware 0.4): identical in-flight requests share one upstream call, a completed inference answer is replayed to an identical request for 5 minutes, and a circuit breaker per host |
 //!
 //! A [`Retriever`](crate::Retriever) that grounds prompts in your documents:
 //!
@@ -95,7 +95,10 @@ pub use llm_resilience::{NoDedup, ResilienceError, ResilienceLayer, ResilienceSe
 
 #[cfg(feature = "reqwest-middleware")]
 #[cfg_attr(docsrs, doc(cfg(feature = "reqwest-middleware")))]
-pub use llm_resilience::{CircuitOpenError, JoinedRequestFailed, ResilienceMiddleware, SkipDedup};
+pub use llm_resilience::{
+    CircuitOpenError, JoinedRequestFailed, ResilienceMiddleware, SkipDedup, DEFAULT_REPLAY_WINDOW,
+    REPLAY_HEADER,
+};
 
 /// Map an HTTP status and message from a provider client to the error the
 /// pipeline understands: 401/403 are never retried, 429 backs off, and

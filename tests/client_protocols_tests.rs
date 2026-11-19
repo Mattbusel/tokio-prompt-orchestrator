@@ -884,3 +884,36 @@ async fn new_paths_use_openai_auth_errors() {
         assert_eq!(v["error"]["code"], "invalid_api_key", "{path}");
     }
 }
+
+#[tokio::test]
+async fn the_spend_cap_is_reserved_before_the_call_not_checked_after_it() {
+    let (url, up) = spawn_upstream(0).await;
+    // gpt-4o lists at $10 per 1M output tokens: a call allowed 100,000 output
+    // tokens could cost $1, which does not fit in a $0.01 cap.
+    let capped = start(Some(gpt_routes(&url)), |c| c.max_spend_usd = Some(0.01)).await;
+    let big = json!({"model": "gpt-4o", "max_tokens": 100_000,
+                     "messages": [{"role": "user", "content": "hi"}]});
+    let r = post(&capped, "/v1/chat/completions", &big).await;
+    assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+    let v: Value = r.json().await.expect("json");
+    assert_eq!(v["error"]["code"], "insufficient_quota");
+    let msg = v["error"]["message"].as_str().expect("message");
+    assert!(
+        msg.contains("could cost up to") && msg.contains("Nothing was sent"),
+        "{msg}"
+    );
+    assert_eq!(
+        up.chat_calls(),
+        0,
+        "a call that could break the cap is never sent"
+    );
+
+    // A call whose worst case fits goes through.
+    let small = json!({"model": "gpt-4o", "max_tokens": 16,
+                       "messages": [{"role": "user", "content": "hi"}]});
+    assert_eq!(
+        post(&capped, "/v1/chat/completions", &small).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(up.chat_calls(), 1);
+}

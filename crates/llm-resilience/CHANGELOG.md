@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.2.0] - 2026-11-19
+
+You pay for the same prompt twice, and retries are how bills triple. This release refuses both
+by default.
+
+### Changed (breaking default)
+
+- `ResilienceMiddleware::new()` now replays a completed 2xx answer to an identical inference
+  request (a JSON `POST` whose body has `messages`, `prompt`, `input` or `contents`) for 5
+  minutes, whatever its `temperature`. Before, only requests in flight at the same moment
+  shared a call, so a retry wrapper, a double-submitting UI or an agent loop that re-sent the
+  same request a second later paid twice. Replayed answers carry `x-llm-resilience: replayed`.
+  Ask for a fresh sample per request with `Cache-Control: no-cache` (or `no-store`, or
+  `SkipDedup`); restore the old behaviour with `.with_replay_window(Duration::ZERO)`. Failures
+  and non-inference requests (GET, file uploads, anything without a prompt) are never replayed.
+  `without_dedup()` turns replay off too.
+
+### Added
+
+- `RetrySpend`: a retry budget in USD. `try_retry(estimated_usd)` books a retry only if it fits
+  in a floor plus 10% (`with_ratio`) of real spend recorded with `record_spend`, per hour
+  (`with_window`). Clones share one budget. A retry estimated at $0 always fits.
+- `retryable_status(u16)`: 408, 409, 425, 429, 500, 502, 503, 504 and 529 are worth retrying;
+  every other status is not.
+- `ResilienceMiddleware::with_replay_window(Duration)`, `replayed()`, `DEFAULT_REPLAY_WINDOW`,
+  `REPLAY_HEADER`.
+
 ## [0.1.1] - 2026-11-18
 
 ### Added

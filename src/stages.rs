@@ -871,7 +871,7 @@ fn spawn_inference_pool(
                 Arc::clone(&dlq),
                 id,
                 adaptive_timeout.as_ref().map(Arc::clone),
-                retry,
+                retry.clone(),
                 cancel.child_token(),
             ))
         })
@@ -915,7 +915,7 @@ async fn invoke_worker(
 async fn call_worker(
     breaker: &CircuitBreaker,
     worker: Arc<dyn ModelWorker>,
-    retry: InferenceRetry,
+    retry: &InferenceRetry,
     request_id: &str,
     prompt: String,
     timeout: std::time::Duration,
@@ -924,12 +924,15 @@ async fn call_worker(
     crate::enhanced::circuit_breaker::CircuitBreakerError<crate::OrchestratorError>,
 > {
     let job = crate::chat::job(request_id);
+    // Each retry is priced at this prompt's size and paid from the dollar
+    // retry budget (if any) before it is sent.
+    let prompt_tokens = crate::cost_estimator::CostEstimator::estimate_tokens(&prompt);
     // Retries (if enabled) happen inside one breaker call, so a request
     // that recovers on a retry counts as one success, not N failures.
     breaker
         .call(|| async move {
             let result = retry
-                .run(|| async {
+                .run_for_prompt(prompt_tokens, || async {
                     match tokio::time::timeout(
                         timeout,
                         invoke_worker(worker.as_ref(), job.as_deref(), &prompt),
@@ -944,7 +947,11 @@ async fn call_worker(
                 })
                 .await;
             match result {
-                Ok(tokens) => Ok(Ok(tokens)),
+                Ok(tokens) => {
+                    let output_chars: usize = tokens.iter().map(|t| t.chars().count()).sum();
+                    retry.record_call(prompt_tokens, output_chars / 4);
+                    Ok(Ok(tokens))
+                }
                 Err(e @ crate::OrchestratorError::UpstreamRejected { .. }) => Ok(Err(e)),
                 Err(e) => Err(e),
             }
@@ -1045,7 +1052,7 @@ async fn inference_stage_pool_worker(
         let cb_result = call_worker(
             &breaker,
             Arc::clone(&worker),
-            retry,
+            &retry,
             &request_id,
             assemble_output.prompt.clone(),
             effective_timeout,

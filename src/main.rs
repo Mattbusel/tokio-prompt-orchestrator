@@ -22,10 +22,10 @@
 use std::env;
 use std::io::{self, Write as _};
 use std::sync::Arc;
-use tokio_prompt_orchestrator::enhanced::InferenceRetry;
+use tokio_prompt_orchestrator::enhanced::{InferenceRetry, RetryBudget};
 use tokio_prompt_orchestrator::{
-    metrics, spawn_pipeline_with, PipelineOptions, AnthropicWorker, EchoWorker, LlamaCppWorker, ModelWorker,
-    OpenAiWorker, PostOutput, PromptRequest, SessionId,
+    metrics, spawn_pipeline_with, AnthropicWorker, EchoWorker, LlamaCppWorker, ModelWorker,
+    OpenAiWorker, PipelineOptions, PostOutput, PromptRequest, SessionId,
 };
 
 #[cfg(feature = "web-api")]
@@ -127,6 +127,8 @@ struct CliArgs {
     max_spend: Option<f64>,
     /// Retries for a model call that fails with a 429, 5xx or network error.
     retries: u32,
+    /// Dollar floor of the retry budget per hour (`--retry-budget`).
+    retry_budget: f64,
     /// Folder of documents to ground answers in (`--docs`).
     docs: Option<std::path::PathBuf>,
     /// Semantic dedup threshold (`--semantic-dedup`), local embeddings.
@@ -175,7 +177,13 @@ OPTIONS:
                                                once reached (with --no-web, the program exits)
     --retries <N>                              Retry a model call up to N times when the
                                                provider fails with a 429, a 5xx or a network
-                                               error, with backoff (default: 0, max 10)
+                                               error, with backoff (default: 0, max 10).
+                                               A 4xx is never retried
+    --retry-budget <dollars>                   Retries are capped in dollars, not just count:
+                                               each retry is priced at the model's list price
+                                               and must fit in this many dollars per hour plus
+                                               10% of real spend, or the request fails with
+                                               its original error (default: 0.50)
     --docs <folder>                            Answer from your own documents: Markdown and
                                                text files in <folder> are searched for each
                                                prompt and the best passages sent with it
@@ -243,6 +251,12 @@ ENVIRONMENT:
     ORCHESTRATOR_DEDUP_SECS  reuse an identical chat completion for this many
                            seconds (default 300; 0 = only share in-flight calls)
     ORCHESTRATOR_RETRIES   same as --retries (the flag wins when both are set)
+    ORCHESTRATOR_RETRY_BUDGET  same as --retry-budget
+    ORCHESTRATOR_CACHE_SAMPLED  0 = do not reuse answers to requests with
+                           temperature > 0 and no seed (default 1: the same
+                           prompt is paid for once; send the header
+                           x-orchestrator-fresh: 1 or Cache-Control: no-cache
+                           for a fresh sample)
     ORCHESTRATOR_UPSTREAM_URL  send --provider openai traffic to any OpenAI-compatible
                            server instead of api.openai.com, e.g.
                            https://openrouter.ai/api/v1 or http://vllm:8000/v1
@@ -263,6 +277,7 @@ fn parse_args() -> Result<CliArgs, String> {
     let mut log_level = "info".to_string();
     let mut max_spend: Option<f64> = None;
     let mut retries: Option<u32> = None;
+    let mut retry_budget: Option<f64> = None;
     let mut docs: Option<std::path::PathBuf> = None;
     let mut semantic_dedup: Option<f32> = None;
     let mut concurrency: usize = DEFAULT_CONCURRENCY;
@@ -299,8 +314,8 @@ fn parse_args() -> Result<CliArgs, String> {
             }
             "--reset" => reset = true,
             flag @ ("--provider" | "--model" | "--port" | "--host" | "--log-level"
-            | "--max-spend" | "--retries" | "--docs" | "--concurrency" | "--timeout"
-            | "--models") => {
+            | "--max-spend" | "--retries" | "--retry-budget" | "--docs"
+            | "--concurrency" | "--timeout" | "--models") => {
                 i += 1;
                 if i >= args.len() {
                     return Err(format!("{flag} requires a value"));
@@ -332,6 +347,7 @@ fn parse_args() -> Result<CliArgs, String> {
                             })?);
                     }
                     "--retries" => retries = Some(parse_retries(&val)?),
+                    "--retry-budget" => retry_budget = Some(parse_retry_budget(&val)?),
                     "--concurrency" => concurrency = parse_concurrency(&val)?,
                     "--timeout" => timeout = Some(parse_timeout(&val)?),
                     "--models" => {
@@ -363,6 +379,13 @@ fn parse_args() -> Result<CliArgs, String> {
             _ => 0,
         },
     };
+    let retry_budget = match retry_budget {
+        Some(usd) => usd,
+        None => match env::var("ORCHESTRATOR_RETRY_BUDGET") {
+            Ok(v) if !v.trim().is_empty() => parse_retry_budget(v.trim())?,
+            _ => DEFAULT_RETRY_BUDGET_USD,
+        },
+    };
 
     Ok(CliArgs {
         provider,
@@ -372,6 +395,7 @@ fn parse_args() -> Result<CliArgs, String> {
         log_level,
         max_spend,
         retries,
+        retry_budget,
         docs,
         semantic_dedup,
         concurrency,
@@ -411,6 +435,20 @@ fn upstream_timeout(cfg: &ResolvedConfig) -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
+/// Default `--retry-budget`: dollars of retries allowed per hour on top of
+/// 10% of real spend.
+const DEFAULT_RETRY_BUDGET_USD: f64 = 0.50;
+
+/// Parse a `--retry-budget` value: dollars, 0 or more.
+fn parse_retry_budget(val: &str) -> Result<f64, String> {
+    match val.parse::<f64>() {
+        Ok(usd) if usd.is_finite() && usd >= 0.0 => Ok(usd),
+        _ => Err(format!(
+            "--retry-budget must be a dollar amount of 0 or more, got: {val}"
+        )),
+    }
+}
+
 /// Parse a `--retries` value: a whole number from 0 to 10.
 fn parse_retries(val: &str) -> Result<u32, String> {
     match val.parse::<u32>() {
@@ -433,6 +471,8 @@ struct ResolvedConfig {
     max_spend: Option<f64>,
     /// Retries for transient model errors (0 = off).
     retries: u32,
+    /// Dollar floor of the retry budget per hour.
+    retry_budget: f64,
     docs: Option<std::path::PathBuf>,
     // Read only by the web server, so unused in builds without `web-api`.
     #[cfg_attr(not(feature = "web-api"), allow(dead_code))]
@@ -550,6 +590,7 @@ fn run_wizard(args: CliArgs) -> ResolvedConfig {
                     log_level: args.log_level,
                     max_spend: args.max_spend,
                     retries: args.retries,
+                    retry_budget: args.retry_budget,
                     docs: args.docs.clone(),
                     semantic_dedup: args.semantic_dedup,
                     concurrency: args.concurrency,
@@ -721,6 +762,7 @@ fn run_wizard(args: CliArgs) -> ResolvedConfig {
         log_level: args.log_level,
         max_spend: args.max_spend,
         retries: args.retries,
+        retry_budget: args.retry_budget,
         docs: args.docs.clone(),
         semantic_dedup: args.semantic_dedup,
         concurrency: args.concurrency,
@@ -1204,11 +1246,19 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
 
     // Exponential backoff from 200 ms, each wait capped at 10 s (a longer
     // Retry-After from the provider fails the request instead of stalling it).
+    // Every retry is paid for in dollars first: --retry-budget (default
+    // $0.50) plus 10% of real spend per hour, priced at the model's list
+    // price. --retries stays the most attempts.
     let retry = InferenceRetry::new(
         cfg.retries,
         std::time::Duration::from_millis(200),
         std::time::Duration::from_secs(10),
-    );
+    )
+    .with_budget(RetryBudget::for_model(
+        llm_resilience::RetrySpend::new(cfg.retry_budget),
+        &cfg.provider,
+        &cfg.model,
+    ));
     let mut options = PipelineOptions::default();
     options.retry = retry;
     options.concurrency = cfg.concurrency;
@@ -1453,6 +1503,13 @@ async fn async_main(cfg: ResolvedConfig) -> Result<(), Box<dyn std::error::Error
                 model: cfg.model.clone(),
                 max_spend_usd: cfg.max_spend,
                 dedup_window_secs,
+                cache_sampled: match env::var("ORCHESTRATOR_CACHE_SAMPLED") {
+                    Ok(v) => !matches!(
+                        v.trim().to_ascii_lowercase().as_str(),
+                        "0" | "false" | "no" | "off"
+                    ),
+                    Err(_) => defaults.cache_sampled,
+                },
                 // Long enough for the slowest route (or the default
                 // pipeline) to use every attempt.
                 timeout_seconds: http_wait_secs(
@@ -1606,6 +1663,7 @@ mod tests {
             log_level: "info".to_string(),
             max_spend: None,
             retries: 0,
+            retry_budget: DEFAULT_RETRY_BUDGET_USD,
             docs: None,
             semantic_dedup: None,
             concurrency: DEFAULT_CONCURRENCY,
@@ -1632,6 +1690,7 @@ mod tests {
             log_level: "info".to_string(),
             max_spend: None,
             retries: 0,
+            retry_budget: DEFAULT_RETRY_BUDGET_USD,
             docs: None,
             semantic_dedup: None,
             concurrency: DEFAULT_CONCURRENCY,
@@ -1657,6 +1716,7 @@ mod tests {
             log_level: "info".to_string(),
             max_spend: None,
             retries: 0,
+            retry_budget: DEFAULT_RETRY_BUDGET_USD,
             docs: None,
             semantic_dedup: None,
             concurrency: DEFAULT_CONCURRENCY,
@@ -1679,6 +1739,7 @@ mod tests {
             log_level: "info".to_string(),
             max_spend: None,
             retries: 0,
+            retry_budget: DEFAULT_RETRY_BUDGET_USD,
             docs: None,
             semantic_dedup: None,
             concurrency: DEFAULT_CONCURRENCY,
@@ -1701,6 +1762,7 @@ mod tests {
             log_level: "info".to_string(),
             max_spend: None,
             retries: 0,
+            retry_budget: DEFAULT_RETRY_BUDGET_USD,
             docs: None,
             semantic_dedup: None,
             concurrency: DEFAULT_CONCURRENCY,
@@ -1752,6 +1814,15 @@ mod tests {
         assert!(parse_timeout("1.5").is_err());
     }
 
+    #[test]
+    fn test_parse_retry_budget() {
+        assert_eq!(parse_retry_budget("0"), Ok(0.0));
+        assert_eq!(parse_retry_budget("2.5"), Ok(2.5));
+        assert!(parse_retry_budget("-1").is_err());
+        assert!(parse_retry_budget("inf").is_err());
+        assert!(parse_retry_budget("lots").is_err());
+    }
+
     fn cfg_for(provider: &str, timeout: Option<u64>) -> ResolvedConfig {
         ResolvedConfig {
             provider: provider.to_string(),
@@ -1761,6 +1832,7 @@ mod tests {
             log_level: "info".to_string(),
             max_spend: None,
             retries: 0,
+            retry_budget: DEFAULT_RETRY_BUDGET_USD,
             docs: None,
             semantic_dedup: None,
             concurrency: DEFAULT_CONCURRENCY,

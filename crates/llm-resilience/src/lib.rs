@@ -6,9 +6,17 @@
 //!   result (an LLM prompt, a token refresh, a config fetch).
 //! - [`CircuitBreaker`]: stop calling a dependency that keeps failing, then
 //!   let one probe test whether it recovered.
+//! - [`RetrySpend`]: retries capped by dollars, not by count. Each retry
+//!   pays its estimated cost from a budget of a floor plus 10% of real
+//!   spend per hour, and [`retryable_status`] never retries a 4xx that will
+//!   fail the same way again. Retry counts say nothing about money; this
+//!   does.
 //! - `ResilienceLayer` (feature `tower`): both, around any `tower::Service`.
 //! - `ResilienceMiddleware` (feature `reqwest-middleware`): both, for a
 //!   `reqwest_middleware::ClientWithMiddleware`, with a breaker per host.
+//!   Since 0.2.0 it also replays a completed inference answer to an
+//!   identical request for 5 minutes by default: you do not pay for the same
+//!   prompt twice unless you ask for it (`Cache-Control: no-cache`).
 //!
 //! ```
 //! use llm_resilience::{CircuitBreaker, Dedup};
@@ -39,7 +47,7 @@
 //!
 //! | Feature | Adds | Extra dependencies |
 //! |---|---|---|
-//! | (none) | [`Dedup`], [`CircuitBreaker`] | `tokio` (sync, time), `parking_lot`, `tracing` |
+//! | (none) | [`Dedup`], [`CircuitBreaker`], [`RetrySpend`] | `tokio` (sync, time), `parking_lot`, `tracing` |
 //! | `tower` | `ResilienceLayer`, `ResilienceService` | `tower-layer`, `tower-service` |
 //! | `reqwest-middleware` | `ResilienceMiddleware` | `reqwest` 0.12 (no default features), `reqwest-middleware` 0.4, `http`, `bytes`, `sha2`, `dashmap`, `serde_json`, `async-trait` |
 
@@ -47,6 +55,7 @@
 #![warn(missing_docs)]
 
 pub mod circuit_breaker;
+pub mod retry_spend;
 pub mod single_flight;
 
 #[cfg(feature = "tower")]
@@ -59,6 +68,10 @@ pub use circuit_breaker::{
     add_global_event_hook, BreakerEvent, CallPermit, CircuitBreaker, CircuitBreakerError,
     CircuitBreakerStats, CircuitStatus,
 };
+pub use retry_spend::{
+    retryable_status, RetryRefused, RetrySpend, RetrySpendStats, DEFAULT_RETRY_RATIO,
+    DEFAULT_RETRY_WINDOW,
+};
 pub use single_flight::{Claim, Dedup, DedupStats, Leader};
 
 #[cfg(feature = "tower")]
@@ -67,4 +80,7 @@ pub use layer::{NoDedup, ResilienceError, ResilienceLayer, ResilienceService};
 
 #[cfg(feature = "reqwest-middleware")]
 #[cfg_attr(docsrs, doc(cfg(feature = "reqwest-middleware")))]
-pub use middleware::{CircuitOpenError, JoinedRequestFailed, ResilienceMiddleware, SkipDedup};
+pub use middleware::{
+    CircuitOpenError, JoinedRequestFailed, ResilienceMiddleware, SkipDedup, DEFAULT_REPLAY_WINDOW,
+    REPLAY_HEADER,
+};
