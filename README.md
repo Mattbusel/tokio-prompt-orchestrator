@@ -1,10 +1,10 @@
-# tokio-prompt-orchestrator
+# tokio-prompt-orchestrator: the proxy in front of your LLM should not be the slow part
 
 English | [简体中文](README.zh-CN.md) | [日本語](README.ja.md) | [한국어](README.ko.md)
 
 [![crates.io](https://img.shields.io/crates/v/tokio-prompt-orchestrator.svg)](https://crates.io/crates/tokio-prompt-orchestrator) [![docs.rs](https://img.shields.io/docsrs/tokio-prompt-orchestrator)](https://docs.rs/tokio-prompt-orchestrator) [![MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![CI](https://github.com/Mattbusel/tokio-prompt-orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/Mattbusel/tokio-prompt-orchestrator/actions/workflows/ci.yml)
 
-Sits in front of your LLM API and cuts the bill.
+Python made the LLM gateway easy to write. It did not make it cheap to run. On the same 4 CPUs and the same mock upstream, the LiteLLM proxy added 7.8 ms per request, idled at 347 MB and topped out at 162 req/s; this one added 0.5 ms, idled at 55 MB and ran at 1,217 req/s, the upstream's own ceiling ([method and caveats](bench/vs-litellm/README.md)). It also sends a repeated prompt upstream once by default: 2,000 requests over 50 distinct prompts became 50 calls.
 
 Ran 24 Claude Code agents on one RTX 4070. Cut API use to 26% of expected.
 
