@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795107967041,
+  "lastUpdate": 1795124868694,
   "repoUrl": "https://github.com/Mattbusel/tokio-prompt-orchestrator",
   "entries": {
     "Pipeline Benchmarks": [
@@ -3274,6 +3274,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "session_id_creation",
             "value": 12,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "committer": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "distinct": true,
+          "id": "f534bb5e99cecb1d25e77a0b9b9369e76fb0fb6d",
+          "message": "3.0.0: you pay for the same prompt twice; retries capped in dollars; burn\n\nThe same sampled prompt is now paid for once. Until 2.5 a request with\ntemperature > 0 and no seed was shared only while an identical one was in\nflight; the next identical request went upstream again. Now any identical\nrequest inside the dedup window gets the cached answer. A client that wants\na fresh sample says so: x-orchestrator-fresh: 1 or Cache-Control: no-cache.\nServerConfig::cache_sampled = false (ORCHESTRATOR_CACHE_SAMPLED=0) restores\nthe old rule.\n\nRetries are capped in dollars, not attempts. Each retry is priced at the\nmodel's list price and paid from llm_resilience::RetrySpend (a floor plus\n10% of real spend per hour) before it is sent; one that does not fit fails\nwith the original error. --retry-budget (default $0.50), priced per route.\n\nThe spend cap reserves each call's worst case (prompt plus max_tokens, or\n4096) before it is sent, so the last call cannot carry spend past the cap.\n\nburn (feature cli) replays request logs and prices in-flight duplicates,\nrepeats within the TTL, retries after a 4xx, agent steps that repeated an\naction and got the same result, and what a dollar retry budget would have\nrefused. burn audit flags retry code with no stop, retries on every\nexception, and catch-all retry loops. Findings on SWE-agent trajectories,\nWildChat and 26 agent frameworks: docs/burn-findings.md.\n\nCostEstimator prices from llm-prices first; an unknown model is never $0.\n\nllm-resilience 0.2.0: RetrySpend, retryable_status, and a 5-minute replay\nwindow for completed inference answers in ResilienceMiddleware (breaking\ndefault; with_replay_window(Duration::ZERO) restores in-flight only).\n\nInferenceRetry is Clone (not Copy/Eq) since it can carry a RetryBudget.",
+          "timestamp": "2026-11-19T16:44:11-05:00",
+          "tree_id": "a8a2f96419ea6ebccebc9a25d00a5c3c7f696b2c",
+          "url": "https://github.com/Mattbusel/tokio-prompt-orchestrator/commit/f534bb5e99cecb1d25e77a0b9b9369e76fb0fb6d"
+        },
+        "date": 1795124866309,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "full_pipeline_echo_worker",
+            "value": 11269568,
+            "range": "± 146712",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/10",
+            "value": 51253909,
+            "range": "± 164896",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/50",
+            "value": 51378038,
+            "range": "± 325325",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/100",
+            "value": 51320044,
+            "range": "± 125492",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/512",
+            "value": 17673,
+            "range": "± 1004",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/1024",
+            "value": 17218,
+            "range": "± 729",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/2048",
+            "value": 17608,
+            "range": "± 254",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "send_with_shed_normal",
+            "value": 205,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "shard_session",
+            "value": 8,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "session_id_creation",
+            "value": 7,
             "range": "± 0",
             "unit": "ns/iter"
           }
