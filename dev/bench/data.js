@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795124868694,
+  "lastUpdate": 1795217985283,
   "repoUrl": "https://github.com/Mattbusel/tokio-prompt-orchestrator",
   "entries": {
     "Pipeline Benchmarks": [
@@ -3347,6 +3347,90 @@ window.BENCHMARK_DATA = {
             "name": "send_with_shed_normal",
             "value": 205,
             "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "shard_session",
+            "value": 8,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "session_id_creation",
+            "value": 7,
+            "range": "± 0",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "committer": {
+            "email": "mattbusel@gmail.com",
+            "name": "Matthew Charles Busel",
+            "username": "Mattbusel"
+          },
+          "distinct": true,
+          "id": "bd87308a0ac4cf2cbcc69f81f4a68ecda8701c09",
+          "message": "llm-resilience 0.2.1: the crates.io description takes the README's side\n\nYou pay for the same prompt twice, and retries capped by count bill a full\ncontext each time. Description only, plus a rustfmt pass on the current\nstable toolchain; no behaviour change.",
+          "timestamp": "2026-11-20T18:36:09-05:00",
+          "tree_id": "870ebd239bdae5e6e235c75577433e122bf3285f",
+          "url": "https://github.com/Mattbusel/tokio-prompt-orchestrator/commit/bd87308a0ac4cf2cbcc69f81f4a68ecda8701c09"
+        },
+        "date": 1795217983408,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "full_pipeline_echo_worker",
+            "value": 11255607,
+            "range": "± 143289",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/10",
+            "value": 51277298,
+            "range": "± 123883",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/50",
+            "value": 51205605,
+            "range": "± 382607",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "pipeline_throughput/requests/100",
+            "value": 51363049,
+            "range": "± 114647",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/512",
+            "value": 16828,
+            "range": "± 277",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/1024",
+            "value": 16461,
+            "range": "± 569",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "channel_send/capacity/2048",
+            "value": 17132,
+            "range": "± 189",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "send_with_shed_normal",
+            "value": 198,
+            "range": "± 0",
             "unit": "ns/iter"
           },
           {
