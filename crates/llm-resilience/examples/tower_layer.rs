@@ -30,7 +30,9 @@ async fn main() {
 
     let mut joins = Vec::new();
     for _ in 0..10 {
-        joins.push(tokio::spawn(svc.clone().oneshot("What is 2+2?".to_string())));
+        joins.push(tokio::spawn(
+            svc.clone().oneshot("What is 2+2?".to_string()),
+        ));
     }
     for j in joins {
         match j.await {

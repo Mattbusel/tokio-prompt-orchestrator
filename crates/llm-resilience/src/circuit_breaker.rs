@@ -815,12 +815,21 @@ mod tests {
     #[tokio::test]
     async fn test_retry_after_counts_down_while_open_and_is_none_when_closed() {
         let breaker = CircuitBreaker::new(2, 0.8, Duration::from_secs(30));
-        assert_eq!(breaker.retry_after_sync(), None, "closed breaker has no reset time");
+        assert_eq!(
+            breaker.retry_after_sync(),
+            None,
+            "closed breaker has no reset time"
+        );
         for _ in 0..2 {
             fail(&breaker).await;
         }
-        let wait = breaker.retry_after_sync().expect("open breaker knows its reset time");
-        assert!(wait <= Duration::from_secs(30) && wait > Duration::from_secs(29), "{wait:?}");
+        let wait = breaker
+            .retry_after_sync()
+            .expect("open breaker knows its reset time");
+        assert!(
+            wait <= Duration::from_secs(30) && wait > Duration::from_secs(29),
+            "{wait:?}"
+        );
 
         // Past the probe interval the probe is due now.
         let quick = CircuitBreaker::new(1, 0.8, Duration::from_millis(20));
@@ -838,7 +847,10 @@ mod tests {
         assert_eq!(breaker.status_sync(), CircuitStatus::Closed);
         breaker.try_acquire().expect("closed").failure();
         assert_eq!(breaker.status_sync(), CircuitStatus::Open);
-        assert!(breaker.try_acquire().is_none(), "open breaker admits nothing");
+        assert!(
+            breaker.try_acquire().is_none(),
+            "open breaker admits nothing"
+        );
     }
 
     #[tokio::test]
@@ -1017,7 +1029,11 @@ mod tests {
                 .await;
             assert!(matches!(r, Err(CircuitBreakerError::Open)));
         }
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "only the probe reached the dependency");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "only the probe reached the dependency"
+        );
 
         let _ = release_tx.send(());
         assert!(probe.await.expect("join").is_ok());
@@ -1098,18 +1114,20 @@ mod tests {
 
         // Start a probe that hangs, so the breaker stays half-open.
         let probe_cb = cb.clone();
-        let probe = tokio::spawn(async move {
-            probe_cb
-                .call(std::future::pending::<Result<(), ()>>)
-                .await
-        });
+        let probe =
+            tokio::spawn(
+                async move { probe_cb.call(std::future::pending::<Result<(), ()>>).await },
+            );
         while cb.probes_in_flight() == 0 {
             tokio::task::yield_now().await;
         }
 
         let _ = tx.send(());
         assert!(slow.await.expect("join").is_ok());
-        assert!(cb.is_half_open_sync(), "the stale success must not close the breaker");
+        assert!(
+            cb.is_half_open_sync(),
+            "the stale success must not close the breaker"
+        );
         probe.abort();
     }
 

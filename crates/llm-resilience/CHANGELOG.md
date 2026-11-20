@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1 (2026-11-20)
+
+- crates.io description now says the side the README already takes: you pay for the same prompt twice, and retries capped by count bill a full context each time. No code change.
+
 ## [0.2.0] - 2026-11-19
 
 You pay for the same prompt twice, and retries are how bills triple. This release refuses both

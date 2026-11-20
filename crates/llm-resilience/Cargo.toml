@@ -1,9 +1,9 @@
 [package]
 name = "llm-resilience"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.88"
-description = "Single-flight request deduplication and an async circuit breaker for LLM and HTTP clients, with a tower layer and a reqwest middleware. The core needs only tokio, parking_lot and tracing."
+description = "You pay for the same prompt twice, and your retries are capped by count while each one bills a full context. Single-flight dedup, a replay window for identical requests, retries capped in dollars and an async circuit breaker for LLM and HTTP clients; tower layer and reqwest middleware."
 documentation = "https://docs.rs/llm-resilience"
 repository = "https://github.com/Mattbusel/tokio-prompt-orchestrator"
 homepage = "https://github.com/Mattbusel/tokio-prompt-orchestrator/tree/main/crates/llm-resilience"
